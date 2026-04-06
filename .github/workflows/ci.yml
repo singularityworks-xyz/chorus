@@ -2,12 +2,12 @@ name: CI
 
 on:
   push:
-  workflow_dispatch:
-    inputs:
-      release:
-        description: "Publish as GitHub Release"
-        type: boolean
-        default: false
+  # workflow_dispatch:
+  #   inputs:
+  #     release:
+  #       description: "Publish as GitHub Release"
+  #       type: boolean
+  #       default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
