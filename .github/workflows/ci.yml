@@ -2,12 +2,6 @@ name: CI
 
 on:
   push:
-  # workflow_dispatch:
-  #   inputs:
-  #     release:
-  #       description: "Publish as GitHub Release"
-  #       type: boolean
-  #       default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,7 +9,6 @@ concurrency:
 
 permissions:
   contents: read
-  # Elevated to write for release job when workflow_dispatch triggers with release=true
 
 jobs:
   lint-and-types:
@@ -73,86 +66,3 @@ jobs:
         with:
           path: .turbo
           key: ${{ runner.os }}-turbo-${{ github.ref_name }}-${{ github.sha }}
-
-  build-desktop:
-    name: Build Electron Desktop App
-    needs: lint-and-types
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-    strategy:
-      matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-
-    steps:
-      - name: Check Out Repository
-        uses: actions/checkout@v6
-
-      - name: Set Up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: package.json
-
-      - name: Install Dependencies
-        run: bun ci
-
-      - name: Build Electron Desktop App
-        run: bun run --cwd apps/desktop build
-
-      - name: Package Electron App
-        run: bun run --cwd apps/desktop package
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: desktop-${{ matrix.os }}
-          path: |
-            apps/desktop/release/*.dmg
-            apps/desktop/release/*.exe
-            apps/desktop/release/*.AppImage
-            apps/desktop/release/*.deb
-          if-no-files-found: warn
-
-  release:
-    name: Create Electron Release
-    needs: build-desktop
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release == true)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-
-    steps:
-      - name: Check Out Repository
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Resolve Release Tag
-        id: tag
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-          else
-            VERSION=$(node -p "require('./apps/desktop/package.json').version")
-            echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Download All Artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: release-artifacts
-
-      - name: Create Electron Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          files: release-artifacts/**/*
-          generate_release_notes: true
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
