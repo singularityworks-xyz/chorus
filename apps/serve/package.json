@@ -1,6 +1,6 @@
 {
   "name": "@chorus/serve",
-  "version": "0.0.29",
+  "version": "0.0.30",
   "private": true,
   "scripts": {
     "dev": "bun run --watch src/index.ts",
@@ -8,10 +8,8 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@armoriq/sdk": "^0.2.10",
     "@chorus/logger": "workspace:*",
     "@chorus/oc-adapter": "*",
-    "@chorus/policy-engine": "workspace:*",
     "@chorus/voice": "workspace:*",
     "@elysiajs/cors": "^1.4.1",
     "elysia": "^1.4.28",

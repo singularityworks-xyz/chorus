@@ -11,7 +11,6 @@ import { OpenCodeProcessManager } from "./opencode/process-manager";
 import { NativeFolderPicker } from "./projects/folder-picker";
 import { ProjectService } from "./projects/service";
 import { createHttpRoutes } from "./routes";
-import { policyRoutes } from "./routes/policy";
 import { createProjectRoutes } from "./routes/projects";
 import { voiceRoutes } from "./routes/voice";
 import { createWorkspaceRoutes } from "./routes/workspace";
@@ -232,7 +231,6 @@ const app = new Elysia()
   .use(createProjectRoutes(projectService))
   .use(createWorkspaceRoutes(workspaceStore, wsManager))
   .use(voiceRoutes)
-  .use(policyRoutes)
   .use(createWsHandler(bridge, wsManager, boardTasks))
   .listen(config.port);
 
