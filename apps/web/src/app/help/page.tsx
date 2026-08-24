@@ -143,9 +143,9 @@ export default function HelpPage() {
                 <div>
                   <h3 className="mb-2 font-semibold text-xl">Real-time Sync</h3>
                   <p className="text-sm text-zinc-400 leading-relaxed">
-                    State syncs through SpacetimeDB so you can watch and control
-                    the same session from desktop and mobile. Every device sees
-                    the same live operations floor.
+                    State syncs over a live WebSocket connection so you can
+                    watch and control the same session from desktop and mobile.
+                    Every device sees the same live operations floor.
                   </p>
                 </div>
               </div>
@@ -263,7 +263,7 @@ export default function HelpPage() {
               <div className="flex items-start gap-3">
                 <Network className="mt-0.5 h-5 w-5 text-cyan-400" />
                 <div>
-                  <h3 className="mb-1 font-semibold">SpacetimeDB</h3>
+                  <h3 className="mb-1 font-semibold">Live WebSocket Sync</h3>
                   <p className="text-zinc-400">
                     Shared state plane for real-time replication across all
                     devices. Ensures every client sees the same authoritative
