@@ -1,6 +1,6 @@
 # Cleanup Plan — Spec Alignment Pass
 
-> Companion to `specsheet.md`. Goal: remove everything §11 cut, plus verified-dead code,
+> Companion to `.context/specsheet.md`. Goal: remove everything §11 cut, plus verified-dead code,
 > **without losing any in-spec functionality**. Every phase ends green or we stop and investigate.
 > Execution order = risk order: zero-consumer deletions first, wired-feature removals last.
 
