@@ -270,45 +270,6 @@ export function createHttpRoutes(
     )
 
     .post(
-      "/tasks/:sessionID/race",
-      async ({ params, body }) => {
-        const sessions = await bridge.startRace(
-          params.sessionID,
-          body.models,
-          body.baseTitle
-        );
-
-        await bridge.promptRace(
-          sessions.map((s, i) => ({
-            sessionID: s.id,
-            model: body.models[i] ?? body.models[0],
-          })),
-          body.text
-        );
-
-        return {
-          raceSessions: sessions.map((s) => s.id),
-          timestamp: Date.now(),
-        };
-      },
-      {
-        params: t.Object({
-          sessionID: t.String(),
-        }),
-        body: t.Object({
-          models: t.Array(
-            t.Object({
-              providerID: t.String(),
-              modelID: t.String(),
-            })
-          ),
-          text: t.String(),
-          baseTitle: t.Optional(t.String()),
-        }),
-      }
-    )
-
-    .post(
       "/sessions/:sessionID/revert",
       async ({ params }) => {
         const startTime = Date.now();

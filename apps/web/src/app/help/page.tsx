@@ -6,7 +6,6 @@ import {
   CornerUpRight,
   Mic,
   Network,
-  Play,
   Shield,
   Workflow,
   XCircle,
@@ -220,21 +219,6 @@ export default function HelpPage() {
                     Send corrective instructions to a running task. You can
                     provide new context or change direction without losing the
                     work already completed.
-                  </p>
-                </div>
-              </div>
-
-              {/* Model Races */}
-              <div className="flex items-start gap-4">
-                <div className="mt-1 rounded-lg bg-purple-500/10 p-2">
-                  <Play className="h-5 w-5 text-purple-400" />
-                </div>
-                <div className="flex-1">
-                  <h3 className="mb-1 font-semibold text-lg">Model Races</h3>
-                  <p className="text-sm text-zinc-400">
-                    Run the same task with multiple models side-by-side. Compare
-                    outputs, latency, and quality to pick the best result or
-                    learn which model works best for specific tasks.
                   </p>
                 </div>
               </div>

@@ -8,7 +8,6 @@ export const WS_MESSAGE_TYPE = {
   TASK_REJECT: "task.reject",
   TASK_ABORT: "task.abort",
   TASK_REDIRECT: "task.redirect",
-  TASK_RACE: "task.race",
   TASK_QUESTION_REPLY: "task.question.reply",
   TASK_QUESTION_REJECT: "task.question.reject",
   VIEWPORT_SYNC: "viewport.sync",
@@ -26,7 +25,6 @@ export const WS_RESPONSE_TYPE = {
   TASK_REJECTED: "task.rejected",
   TASK_ABORTED: "task.aborted",
   TASK_REDIRECTED: "task.redirected",
-  TASK_RACE_STARTED: "task.race.started",
   TASK_QUESTION_REPLIED: "task.question.replied",
   TASK_QUESTION_REJECTED: "task.question.rejected",
   PRESENCE_PONG: "presence.pong",
@@ -41,7 +39,6 @@ export const SUPPORTED_MESSAGE_TYPES = [
   WS_MESSAGE_TYPE.TASK_REJECT,
   WS_MESSAGE_TYPE.TASK_ABORT,
   WS_MESSAGE_TYPE.TASK_REDIRECT,
-  WS_MESSAGE_TYPE.TASK_RACE,
   WS_MESSAGE_TYPE.TASK_QUESTION_REPLY,
   WS_MESSAGE_TYPE.TASK_QUESTION_REJECT,
   WS_MESSAGE_TYPE.VIEWPORT_SYNC,
@@ -66,7 +63,6 @@ export type WsMessage =
   | { type: typeof WS_MESSAGE_TYPE.TASK_REJECT; payload: RejectPayload }
   | { type: typeof WS_MESSAGE_TYPE.TASK_ABORT; payload: AbortPayload }
   | { type: typeof WS_MESSAGE_TYPE.TASK_REDIRECT; payload: RedirectPayload }
-  | { type: typeof WS_MESSAGE_TYPE.TASK_RACE; payload: RacePayload }
   | {
       type: typeof WS_MESSAGE_TYPE.TASK_QUESTION_REPLY;
       payload: QuestionReplyPayload;
@@ -119,13 +115,6 @@ export interface QuestionRejectPayload {
 export interface RedirectPayload {
   mode: "soft" | "hard";
   sessionID: string;
-  text: string;
-}
-
-export interface RacePayload {
-  baseTitle?: string;
-  models: Array<{ providerID: string; modelID: string }>;
-  parentSessionID: string;
   text: string;
 }
 

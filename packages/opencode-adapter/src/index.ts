@@ -7,7 +7,6 @@ import { PermissionHandler } from "./features/permissions/permission-handler";
 import { ProjectManager } from "./features/projects/project-manager";
 import { ProviderManager } from "./features/providers/provider-manager";
 import { QuestionHandler } from "./features/questions/question-handler";
-import { RaceManager } from "./features/race/race-manager";
 import { SessionManager } from "./features/session/session-manager";
 import { TuiManager } from "./features/tui/tui-manager";
 
@@ -54,7 +53,6 @@ export type {
   QuestionReplyInput,
   QuestionRequest,
 } from "./features/questions/question-handler";
-export type { RaceConfig, RaceResult } from "./features/race/race-manager";
 export type {
   SessionCommandInput,
   SessionCreateInput,
@@ -87,7 +85,6 @@ export class OpenCodeAdapter {
   readonly questions: QuestionHandler;
   readonly projects: ProjectManager;
   readonly providers: ProviderManager;
-  readonly races: RaceManager;
   readonly tui: TuiManager;
 
   constructor(client: OpencodeClient) {
@@ -100,7 +97,6 @@ export class OpenCodeAdapter {
     this.questions = new QuestionHandler(client);
     this.projects = new ProjectManager(client);
     this.providers = new ProviderManager(client);
-    this.races = new RaceManager(client);
     this.tui = new TuiManager(client);
   }
 

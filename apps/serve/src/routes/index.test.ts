@@ -10,27 +10,11 @@ function makeMockBridge() {
         fork: mock(async () => ({ id: "sess-forked" })),
       },
     },
-    races: {
-      createRaceSessions: mock(
-        async (
-          _: string,
-          models: Array<{ providerID: string; modelID: string }>
-        ) => models.map((_, i) => ({ id: `race-${i}` }))
-      ),
-      promptAll: mock(async () => undefined),
-    },
     createSession: mock(async () => ({ id: "sess-123" })),
     promptSession: mock(async () => ({})),
     abortSession: mock(async () => true),
     replyPermission: mock(async () => true),
     forkSession: mock(async () => ({ id: "sess-forked" })),
-    startRace: mock(
-      async (
-        _: string,
-        models: Array<{ providerID: string; modelID: string }>
-      ) => models.map((_, i) => ({ id: `race-${i}` }))
-    ),
-    promptRace: mock(async () => undefined),
     getStatus: mock(() => ({
       connected: true,
       opencodeUrl: "http://localhost:4096",
@@ -401,76 +385,6 @@ describe("HTTP routes", () => {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ mode: "soft" }),
-        })
-      );
-
-      expect(res.status).toBe(422);
-    });
-  });
-
-  describe("POST /tasks/:sessionID/race", () => {
-    test("creates race sessions and prompts all", async () => {
-      const { app, bridge } = makeApp();
-
-      const res = await app.handle(
-        new Request("http://localhost/tasks/sess-1/race", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            models: [
-              { providerID: "anthropic", modelID: "claude-sonnet-4" },
-              { providerID: "openai", modelID: "gpt-4.1" },
-            ],
-            text: "solve this",
-            baseTitle: "race test",
-          }),
-        })
-      );
-
-      expect(res.status).toBe(200);
-
-      const body = await res.json();
-      expect(body).toEqual({
-        raceSessions: ["race-0", "race-1"],
-        timestamp: expect.any(Number),
-      });
-
-      expect(bridge.startRace).toHaveBeenCalledWith(
-        "sess-1",
-        [
-          { providerID: "anthropic", modelID: "claude-sonnet-4" },
-          { providerID: "openai", modelID: "gpt-4.1" },
-        ],
-        "race test"
-      );
-
-      expect(bridge.promptRace).toHaveBeenCalled();
-    });
-
-    test("rejects missing models", async () => {
-      const { app } = makeApp();
-
-      const res = await app.handle(
-        new Request("http://localhost/tasks/sess-1/race", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ text: "solve this" }),
-        })
-      );
-
-      expect(res.status).toBe(422);
-    });
-
-    test("rejects missing text", async () => {
-      const { app } = makeApp();
-
-      const res = await app.handle(
-        new Request("http://localhost/tasks/sess-1/race", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            models: [{ providerID: "anthropic", modelID: "claude" }],
-          }),
         })
       );
 
