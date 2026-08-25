@@ -7,6 +7,10 @@ export function createLogger(config: LoggerConfig, source?: string): Logger {
     return new ConsoleLogger(source);
   }
 
+  if (!(config.postHogApiKey || process.env.POSTHOG_API_KEY)) {
+    return new ConsoleLogger(source);
+  }
+
   return new PostHogLogger(config);
 }
 

@@ -1,0 +1,5 @@
+# PostHog project API key removed from source (env-provided now); rotate at posthog.io.
+2c0165db4fad36edc8f81debcc2b99043d8cb7ae:packages/logger/src/posthog-logger.ts:generic-api-key:5
+2c0165db4fad36edc8f81debcc2b99043d8cb7ae:packages/logger/src/logger.test.ts:generic-api-key:208
+2c0165db4fad36edc8f81debcc2b99043d8cb7ae:packages/logger/src/logger.test.ts:generic-api-key:284
+2c0165db4fad36edc8f81debcc2b99043d8cb7ae:packages/logger/src/logger.test.ts:generic-api-key:306
