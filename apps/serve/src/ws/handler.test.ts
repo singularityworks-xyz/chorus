@@ -10,13 +10,6 @@ function makeMockBridge() {
         fork: mock(async () => ({ id: "sess-forked" })),
       },
     },
-    races: {
-      createRaceSessions: mock(
-        async (_: string, models: { providerID: string; modelID: string }[]) =>
-          models.map((_, i) => ({ id: `race-${i}` }))
-      ),
-      promptAll: mock(async () => undefined),
-    },
     createSession: mock(async () => ({ id: "sess-123" })),
     promptSession: mock(async () => undefined),
     abortSession: mock(async () => true),
@@ -142,24 +135,6 @@ describe("WS message type definitions", () => {
 
     expect(softMsg.payload.mode).toBe("soft");
     expect(hardMsg.payload.mode).toBe("hard");
-  });
-
-  test("task.race message has correct shape", () => {
-    const msg: WsMessage = {
-      type: "task.race",
-      payload: {
-        parentSessionID: "sess-1",
-        models: [
-          { providerID: "anthropic", modelID: "claude" },
-          { providerID: "openai", modelID: "gpt-4" },
-        ],
-        text: "solve this",
-        baseTitle: "race test",
-      },
-    };
-
-    expect(msg.type).toBe("task.race");
-    expect(msg.payload.models.length).toBe(2);
   });
 
   test("viewport.sync message has correct shape", () => {

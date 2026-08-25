@@ -1,6 +1,6 @@
 {
   "name": "chorus",
-  "version": "0.0.84",
+  "version": "0.0.97",
   "private": true,
   "scripts": {
     "build": "turbo run build",
@@ -20,15 +20,14 @@
     "@playwright/test": "^1.59.1",
     "@types/bun": "^1.3.11",
     "@types/node": "^25.5.2",
-    "electron": "^35.7.5",
-    "electron-builder": "^26.8.1",
-    "electron-vite": "^3.1.0",
     "lefthook": "^2.1.4",
     "turbo": "^2.9.3",
     "typescript": "^6.0.2",
     "ultracite": "^7.4.3",
     "vite": "^8.0.3",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "vscode": "npm:@codingame/monaco-vscode-extension-api",
+    "monaco-editor": "npm:@codingame/monaco-vscode-editor-api"
   },
   "packageManager": "bun@1.3.11",
   "workspaces": [

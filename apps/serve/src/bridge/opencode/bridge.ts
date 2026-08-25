@@ -214,32 +214,6 @@ export class OpenCodeBridge {
       });
   }
 
-  startRace(
-    parentSessionID: string,
-    models: Array<{ providerID: string; modelID: string }>,
-    baseTitle?: string
-  ) {
-    return this.adapter.races.createRaceSessions(
-      parentSessionID,
-      models,
-      baseTitle
-    );
-  }
-
-  promptRace(
-    sessions: Array<{
-      sessionID: string;
-      model: { providerID: string; modelID: string };
-    }>,
-    text: string
-  ) {
-    return this.adapter.races.promptAll(sessions, text);
-  }
-
-  get races() {
-    return this.adapter.races;
-  }
-
   getStatus(): BridgeStatus {
     return {
       connected: this.#eventHandle !== null,

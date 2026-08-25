@@ -42,17 +42,6 @@ const WS_PAYLOAD_SCHEMAS = {
     text: t.String(),
     mode: t.Union([t.Literal("soft"), t.Literal("hard")]),
   }),
-  [WS_MESSAGE_TYPE.TASK_RACE]: t.Object({
-    parentSessionID: t.String(),
-    models: t.Array(
-      t.Object({
-        providerID: t.String(),
-        modelID: t.String(),
-      })
-    ),
-    text: t.String(),
-    baseTitle: t.Optional(t.String()),
-  }),
   [WS_MESSAGE_TYPE.TASK_QUESTION_REPLY]: t.Object({
     requestID: t.String(),
     sessionID: t.String(),
@@ -299,33 +288,6 @@ async function handleMessage(
         payload: {
           originalSessionID: payload.sessionID,
           newSessionID: forked.id,
-        },
-        timestamp: Date.now(),
-      });
-      break;
-    }
-
-    case WS_MESSAGE_TYPE.TASK_RACE: {
-      const payload = validate(WS_MESSAGE_TYPE.TASK_RACE, msg.payload);
-
-      const sessions = await bridge.startRace(
-        payload.parentSessionID,
-        payload.models,
-        payload.baseTitle
-      );
-
-      await bridge.promptRace(
-        sessions.map((s, i) => ({
-          sessionID: s.id,
-          model: payload.models[i] ?? payload.models[0],
-        })),
-        payload.text
-      );
-
-      wsSend({
-        type: WS_RESPONSE_TYPE.TASK_RACE_STARTED,
-        payload: {
-          raceSessions: sessions.map((s) => s.id),
         },
         timestamp: Date.now(),
       });

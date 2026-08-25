@@ -1,13 +1,8 @@
 name: CI
 
 on:
+  pull_request:
   push:
-  # workflow_dispatch:
-  #   inputs:
-  #     release:
-  #       description: "Publish as GitHub Release"
-  #       type: boolean
-  #       default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,144 +10,183 @@ concurrency:
 
 permissions:
   contents: read
-  # Elevated to write for release job when workflow_dispatch triggers with release=true
 
 jobs:
-  lint-and-types:
-    name: Lint And Types
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
+    timeout-minutes: 10
     steps:
-      - name: Check Out Repository
-        uses: actions/checkout@v6
-
-      - name: Set Up Bun
-        uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
-
-      - name: Restore Bun Cache
-        id: bun-cache
-        uses: actions/cache/restore@v5
+      - uses: actions/cache/restore@v5
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-bun-
+      - name: Install Dependencies
+        run: bun ci
+      - name: Lint
+        run: bunx ultracite check
 
-      - name: Restore Turbo Cache
-        id: turbo-cache
-        uses: actions/cache/restore@v5
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/cache/restore@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+      - name: Install Dependencies
+        run: bun ci
+      - name: Typecheck
+        run: bun run check-types
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/cache/restore@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+      - name: Install Dependencies
+        run: bun ci
+      - name: Unit Tests
+        run: bun test
+
+  build:
+    name: Build / Compile
+    needs: [lint, typecheck, unit-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/cache/restore@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+      - uses: actions/cache/restore@v5
         with:
           path: .turbo
           key: ${{ runner.os }}-turbo-${{ github.ref_name }}-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-turbo-${{ github.ref_name }}-
             ${{ runner.os }}-turbo-
-
       - name: Install Dependencies
         run: bun ci
+      - name: Build
+        run: bun run build
 
-      - name: Run Lint
-        run: bunx ultracite check
-
-      - name: Run Type Checks
-        run: bun run check-types
-
-      - name: Save Bun Cache
-        if: always() && steps.bun-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
+  integration-tests:
+    name: Integration Tests
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/cache/restore@v5
         with:
           path: ~/.bun/install/cache
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
-
-      - name: Save Turbo Cache
-        if: always() && steps.turbo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: .turbo
-          key: ${{ runner.os }}-turbo-${{ github.ref_name }}-${{ github.sha }}
-
-  build-desktop:
-    name: Build Electron Desktop App
-    needs: lint-and-types
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-    strategy:
-      matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-
-    steps:
-      - name: Check Out Repository
-        uses: actions/checkout@v6
-
-      - name: Set Up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: package.json
-
       - name: Install Dependencies
         run: bun ci
+      - name: Serve Smoke
+        run: |
+          OPENCODE_AUTO_START=false PORT=2100 bun run --cwd apps/serve dev &
+          SERVER_PID=$!
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:2100/health > /dev/null && break
+            sleep 1
+            if [ "$i" = "30" ]; then echo "serve did not become healthy"; exit 1; fi
+          done
+          trap 'kill $SERVER_PID' EXIT
 
-      - name: Build Electron Desktop App
-        run: bun run --cwd apps/desktop build
+          curl -sf http://localhost:2100/health | grep -q '"status":"ok"'
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:2100/tasks \
+            -H 'content-type: application/json' -d '{}')
+          [ "$CODE" = "422" ] || { echo "expected 422 for invalid task payload, got $CODE"; exit 1; }
+          curl -sf http://localhost:2100/workspace | grep -q '"revision"'
+          echo "integration smoke passed"
 
-      - name: Package Electron App
-        run: bun run --cwd apps/desktop package
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: desktop-${{ matrix.os }}
-          path: |
-            apps/desktop/release/*.dmg
-            apps/desktop/release/*.exe
-            apps/desktop/release/*.AppImage
-            apps/desktop/release/*.deb
-          if-no-files-found: warn
-
-  release:
-    name: Create Electron Release
-    needs: build-desktop
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release == true)
+  security:
+    name: Security Checks
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
-
     steps:
-      - name: Check Out Repository
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Resolve Release Tag
-        id: tag
+      - name: Secret Scan (gitleaks)
+        # gitleaks-action@v2 requires a paid license for orgs; run the OSS binary directly.
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz | tar -xz gitleaks
+          ./gitleaks detect --source . --redact --verbose
+
+  docker-build:
+    name: Docker Build
+    needs: [build, integration-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Detect Dockerfile
+        id: detect
+        run: |
+          if [ -f Dockerfile ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
           else
-            VERSION=$(node -p "require('./apps/desktop/package.json').version")
-            echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "No Dockerfile yet — skipping (activates with deployment phase)"
           fi
-
-      - name: Download All Artifacts
-        uses: actions/download-artifact@v8
+      - uses: docker/setup-buildx-action@v3
+        if: steps.detect.outputs.exists == 'true'
+      - uses: docker/build-push-action@v6
+        if: steps.detect.outputs.exists == 'true'
         with:
-          path: release-artifacts
+          context: .
+          push: false
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Create Electron Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          files: release-artifacts/**/*
-          generate_release_notes: true
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  ci-result:
+    name: CI Result
+    needs:
+      - lint
+      - typecheck
+      - unit-tests
+      - build
+      - integration-tests
+      - security
+      - docker-build
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate Results
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] || \
+             [ "${{ contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "CI FAILED"
+            exit 1
+          fi
+          echo "CI PASSED"

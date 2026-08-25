@@ -11,8 +11,6 @@ import {
 import posthog from "posthog-js";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { useKanbanHistory } from "@/features/kanban/hooks/use-kanban-history";
-import { useKanbanSync } from "@/features/spacetime/use-kanban-sync";
-import { useSpacetimeConnection } from "@/features/spacetime/use-spacetime-connection";
 import {
   attachPromptTask,
   attachSessionToBoard,
@@ -80,29 +78,6 @@ export function ChorusWorkspaceProvider({
   const revisionRef = useRef(0);
 
   const kanbanHistory = useKanbanHistory();
-
-  const { connection: spacetimeConnection, connected: spacetimeConnected } =
-    useSpacetimeConnection();
-
-  const kanbanSync = useKanbanSync(spacetimeConnection, selectedBoardId);
-
-  useEffect(() => {
-    if (!(spacetimeConnected && kanbanSync.columns)) {
-      return;
-    }
-
-    setBoards((currentBoards) => {
-      return currentBoards.map((board) => {
-        if (board.boardId !== selectedBoardId) {
-          return board;
-        }
-        return {
-          ...board,
-          columns: kanbanSync.columns as WorkspaceBoard["columns"],
-        };
-      });
-    });
-  }, [spacetimeConnected, kanbanSync.columns, selectedBoardId]);
 
   const restorePrompt = useEffectEvent((text: string) => {
     setRestoredPrompt(text);

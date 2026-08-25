@@ -2,6 +2,19 @@ import { describe, expect, test } from "bun:test";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2";
 import { normalizeEvent } from "./event-stream";
 
+// Real opencode streams deliver message.updated (role=assistant) before any
+// of that message's part events; the normalizer relies on it to classify
+// parts. Every part-event test therefore records the parent message first.
+function assistantMessageUpdated(sessionID: string, messageID: string) {
+  return {
+    type: "message.updated",
+    properties: {
+      sessionID,
+      info: { id: messageID, role: "assistant" },
+    },
+  } as OpencodeEvent;
+}
+
 describe("normalizeEvent", () => {
   test("normalizes text part as writing activity", () => {
     const raw = {
@@ -20,6 +33,7 @@ describe("normalizeEvent", () => {
       },
     } as OpencodeEvent;
 
+    normalizeEvent(assistantMessageUpdated("sess-1", "msg-1"));
     const result = normalizeEvent(raw);
 
     expect(result.type).toBe("message.part.updated");
@@ -50,6 +64,7 @@ describe("normalizeEvent", () => {
       },
     } as OpencodeEvent;
 
+    normalizeEvent(assistantMessageUpdated("sess-1", "msg-1"));
     const result = normalizeEvent(raw);
 
     expect(result.activity).toBe("thinking");
@@ -82,6 +97,7 @@ describe("normalizeEvent", () => {
       },
     } as OpencodeEvent;
 
+    normalizeEvent(assistantMessageUpdated("sess-1", "msg-1"));
     const result = normalizeEvent(raw);
 
     expect(result.activity).toBe("writing");
@@ -106,6 +122,7 @@ describe("normalizeEvent", () => {
       },
     } as OpencodeEvent;
 
+    normalizeEvent(assistantMessageUpdated("sess-1", "msg-1"));
     const result = normalizeEvent(raw);
 
     expect(result.activity).toBe("thinking");

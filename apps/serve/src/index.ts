@@ -11,7 +11,6 @@ import { OpenCodeProcessManager } from "./opencode/process-manager";
 import { NativeFolderPicker } from "./projects/folder-picker";
 import { ProjectService } from "./projects/service";
 import { createHttpRoutes } from "./routes";
-import { policyRoutes } from "./routes/policy";
 import { createProjectRoutes } from "./routes/projects";
 import { voiceRoutes } from "./routes/voice";
 import { createWorkspaceRoutes } from "./routes/workspace";
@@ -232,7 +231,6 @@ const app = new Elysia()
   .use(createProjectRoutes(projectService))
   .use(createWorkspaceRoutes(workspaceStore, wsManager))
   .use(voiceRoutes)
-  .use(policyRoutes)
   .use(createWsHandler(bridge, wsManager, boardTasks))
   .listen(config.port);
 
@@ -256,7 +254,7 @@ try {
 const SHUTDOWN_TIMEOUT_MS = 5000;
 let isShuttingDown = false;
 
-function gracefulShutdown(signal: string): void {
+async function gracefulShutdown(signal: string): Promise<void> {
   if (isShuttingDown) {
     return;
   }
@@ -270,10 +268,14 @@ function gracefulShutdown(signal: string): void {
   }, SHUTDOWN_TIMEOUT_MS);
 
   try {
+    // Order matters: stop intake first, then tear down state channels,
+    // then children. Each step awaited so the bounded budget is honest
+    // and later async flushes (snapshot/coalescer) slot in without
+    // reordering.
     wsManager.close();
     bridge.stop();
-    processManager.stop();
-    app.server?.stop();
+    await app.server?.stop();
+    await processManager.stop();
     clearTimeout(shutdownTimeout);
     logger.info("shutdown-complete");
     process.exit(0);

@@ -181,9 +181,9 @@ describe("createLogger factory", () => {
     expect(logger instanceof ConsoleLogger).toBe(true);
   });
 
-  test("returns PostHogLogger for production without API key (uses defaults)", () => {
+  test("falls back to ConsoleLogger for production without API key", () => {
     const logger = createLogger({ env: "production" });
-    expect(logger instanceof PostHogLogger).toBe(true);
+    expect(logger instanceof ConsoleLogger).toBe(true);
   });
 
   test("returns PostHogLogger for production with custom API key", () => {
@@ -205,7 +205,7 @@ describe("real-time PostHog integration", () => {
   test("PostHogLogger sends events to real PostHog API", async () => {
     const logger = new PostHogLogger({
       env: "production",
-      postHogApiKey: "phc_krra8DDWRAVDTv73hYdpE9MDoinfzEpnz28PeMhz9XbW",
+      postHogApiKey: "test-key-1",
       postHogApiHost: "https://us.i.posthog.com",
       releaseName: "chorus-integration-test",
       releaseVersion: "0.0.16",
@@ -281,29 +281,29 @@ describe("real-time PostHog integration", () => {
 
     const prodLogger = createLogger({
       env: "production",
-      postHogApiKey: "phc_krra8DDWRAVDTv73hYdpE9MDoinfzEpnz28PeMhz9XbW",
+      postHogApiKey: "test-key-1",
       releaseName: "chorus-prod-test",
     });
     expect(prodLogger instanceof PostHogLogger).toBe(true);
 
     const fallbackLogger = createLogger({ env: "production" });
-    expect(fallbackLogger instanceof PostHogLogger).toBe(true);
+    expect(fallbackLogger instanceof ConsoleLogger).toBe(true);
   });
 
-  test("PostHogLogger uses default credentials when not provided", () => {
-    const logger = new PostHogLogger({
-      env: "production",
-    });
-
-    logger.info("default-credentials-test");
-    logger.captureEvent("default-config-event");
-    expect(logger).toBeDefined();
+  test("PostHogLogger throws when constructed without an API key", () => {
+    let thrown: unknown;
+    try {
+      new PostHogLogger({ env: "production" });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
   });
 
   test("full workflow: log, event, exception, shutdown", async () => {
     const logger = createLogger({
       env: "production",
-      postHogApiKey: "phc_krra8DDWRAVDTv73hYdpE9MDoinfzEpnz28PeMhz9XbW",
+      postHogApiKey: "test-key-1",
       releaseName: "chorus-full-workflow",
       releaseVersion: "0.0.16",
     });

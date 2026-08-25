@@ -31,29 +31,9 @@ describe("OpenCodeBridge", () => {
     expect(status.uptime).toBeGreaterThanOrEqual(0);
   });
 
-  test("races exposes adapter race manager", () => {
-    const bridge = new OpenCodeBridge("http://localhost:4096", "/tmp");
-
-    expect(bridge.races).toBeDefined();
-    expect(typeof bridge.races.createRaceSessions).toBe("function");
-    expect(typeof bridge.races.promptAll).toBe("function");
-  });
-
   test("forkSession is available on bridge", () => {
     const bridge = new OpenCodeBridge("http://localhost:4096", "/tmp");
 
     expect(typeof bridge.forkSession).toBe("function");
-  });
-
-  test("startRace is available on bridge", () => {
-    const bridge = new OpenCodeBridge("http://localhost:4096", "/tmp");
-
-    expect(typeof bridge.startRace).toBe("function");
-  });
-
-  test("promptRace is available on bridge", () => {
-    const bridge = new OpenCodeBridge("http://localhost:4096", "/tmp");
-
-    expect(typeof bridge.promptRace).toBe("function");
   });
 });

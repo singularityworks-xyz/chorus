@@ -6,7 +6,6 @@ import {
   CornerUpRight,
   Mic,
   Network,
-  Play,
   Shield,
   Workflow,
   XCircle,
@@ -143,9 +142,9 @@ export default function HelpPage() {
                 <div>
                   <h3 className="mb-2 font-semibold text-xl">Real-time Sync</h3>
                   <p className="text-sm text-zinc-400 leading-relaxed">
-                    State syncs through SpacetimeDB so you can watch and control
-                    the same session from desktop and mobile. Every device sees
-                    the same live operations floor.
+                    State syncs over a live WebSocket connection so you can
+                    watch and control the same session from desktop and mobile.
+                    Every device sees the same live operations floor.
                   </p>
                 </div>
               </div>
@@ -223,21 +222,6 @@ export default function HelpPage() {
                   </p>
                 </div>
               </div>
-
-              {/* Model Races */}
-              <div className="flex items-start gap-4">
-                <div className="mt-1 rounded-lg bg-purple-500/10 p-2">
-                  <Play className="h-5 w-5 text-purple-400" />
-                </div>
-                <div className="flex-1">
-                  <h3 className="mb-1 font-semibold text-lg">Model Races</h3>
-                  <p className="text-sm text-zinc-400">
-                    Run the same task with multiple models side-by-side. Compare
-                    outputs, latency, and quality to pick the best result or
-                    learn which model works best for specific tasks.
-                  </p>
-                </div>
-              </div>
             </div>
           </div>
         </section>
@@ -263,7 +247,7 @@ export default function HelpPage() {
               <div className="flex items-start gap-3">
                 <Network className="mt-0.5 h-5 w-5 text-cyan-400" />
                 <div>
-                  <h3 className="mb-1 font-semibold">SpacetimeDB</h3>
+                  <h3 className="mb-1 font-semibold">Live WebSocket Sync</h3>
                   <p className="text-zinc-400">
                     Shared state plane for real-time replication across all
                     devices. Ensures every client sees the same authoritative
@@ -277,10 +261,11 @@ export default function HelpPage() {
               <div className="flex items-start gap-3">
                 <Shield className="mt-0.5 h-5 w-5 text-green-400" />
                 <div>
-                  <h3 className="mb-1 font-semibold">ArmorIQ</h3>
+                  <h3 className="mb-1 font-semibold">Human Approval Gate</h3>
                   <p className="text-zinc-400">
-                    Policy plane that defines what actions agents can perform.
-                    Shows both allowed and blocked actions with clear reasons.
+                    Permission requests and agent questions pause execution and
+                    wait for your explicit approve or reject — nothing runs
+                    without you.
                   </p>
                 </div>
               </div>
@@ -350,8 +335,9 @@ export default function HelpPage() {
                 <strong className="text-white">
                   Visibility over automation:
                 </strong>{" "}
-                You should see what the agent is allowed to do, what was
-                blocked, and why.
+                You always see what the agent is doing — every step streams to
+                the board, and anything needing permission stops until you
+                decide.
               </p>
             </div>
           </div>
