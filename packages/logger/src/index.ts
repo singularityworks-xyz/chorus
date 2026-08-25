@@ -1,4 +1,5 @@
 import { ConsoleLogger } from "./console-logger";
+import { readEnv } from "./env";
 import { PostHogLogger } from "./posthog-logger";
 import type { Logger, LoggerConfig } from "./types";
 
@@ -7,7 +8,7 @@ export function createLogger(config: LoggerConfig, source?: string): Logger {
     return new ConsoleLogger(source);
   }
 
-  if (!(config.postHogApiKey || process.env.POSTHOG_API_KEY)) {
+  if (!(config.postHogApiKey || readEnv("POSTHOG_API_KEY"))) {
     return new ConsoleLogger(source);
   }
 

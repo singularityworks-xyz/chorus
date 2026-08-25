@@ -1,8 +1,9 @@
 import { PostHog as PostHogClient } from "posthog-node";
+import { readEnv } from "./env";
 import type { Logger, LoggerConfig, LogLevel } from "./types";
 
 const DEFAULT_CONFIG = {
-  apiKey: process.env.POSTHOG_API_KEY ?? "",
+  apiKey: readEnv("POSTHOG_API_KEY") ?? "",
   apiHost: "https://us.i.posthog.com",
   projectId: "368625",
   releaseName: "chorus",
