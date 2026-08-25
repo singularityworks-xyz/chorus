@@ -131,10 +131,10 @@ push_subs (endpoint TEXT PRIMARY KEY, keys TEXT NOT NULL, created_at INTEGER);
 meta      (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ```
 
-- Write path: mutate in-memory → `INSERT event` (+ commit) → assign seq → broadcast. Crash between insert and broadcast is safe (clients catch up via resume).
+- Write path: compute next state → `INSERT event` + commit inside an immediate transaction → **only then** swap the in-memory snapshot and assign seq for broadcast. A failed INSERT/commit leaves in-memory state untouched (candidate discarded); a crash before commit loses nothing durable. A test must cover the failed-commit path asserting memory and log stay consistent. Crash between commit and broadcast is safe (clients catch up via resume).
 - **Snapshots every N events** (default 1000) or on graceful shutdown; events older than the newest snapshot are pruned.
 - **Retention**: default 30 days for terminal-run detail (steps/deltas), configurable via env; card/board records persist until boards are deleted. Hard size cap (default 512 MB) triggers oldest-first compaction.
-- Atomic replaces of the DB file are used for restore/import; the old `workspace.json` loader runs once as a migration, then is deleted.
+- Restore/import of `chorus.db` happens **offline**: stop accepting writes and close all connections → `wal_checkpoint(TRUNCATE)` → remove/rename stale `chorus.db-wal` / `chorus.db-shm` sidecars → replace the main database file → reopen and verify integrity. Exports use `VACUUM INTO`. Tests must prove committed WAL data survives a restore cycle. The old `workspace.json` loader runs once as a migration, then is deleted.
 
 Explicitly fixed by this design (from the 2026 audit): silent-wipe-on-corrupt (#6), lost-update races (#7/#8), full-snapshot write amplification (#14), duplicate delivery (#12).
 
@@ -144,8 +144,8 @@ Explicitly fixed by this design (from the 2026 audit): silent-wipe-on-corrupt (#
 
 The threat model is real: a public URL that spawns shell-executing agents on your machine.
 
-1. **Token gate**: `CHORUS_TOKEN` (env or config file, generated on first start if absent). All HTTP routes except `GET /health` require it; a successful `POST /auth/login` exchanges it for an HttpOnly, SameSite=Strict session cookie.
-2. **WebSocket auth**: browser sends the token in the `hello` message; connections failing auth within 5 s are closed. No anonymous sockets, ever.
+1. **Token gate**: `CHORUS_TOKEN` (env, or generated on first start if absent). All HTTP routes except `GET /health` require it; a successful `POST /auth/login` exchanges it for an HttpOnly, SameSite=Strict session cookie. A newly generated token is **never emitted through the application logger** (§6.7): it is persisted to `<DATA_DIR>/chorus.token` with `0600` permissions and the bootstrap message only points the operator at that file path.
+2. **WebSocket auth**: the WS upgrade is authenticated with the **same HttpOnly session cookie** (browsers attach it to same-origin upgrade requests automatically) or, for clients behind proxies that strip cookies, a short-lived single-use ticket obtained from an authenticated HTTP endpoint and presented once at upgrade. Connections failing auth are closed immediately. The server never accepts an unauthenticated socket, and browser JavaScript never needs to read or transmit `CHORUS_TOKEN` itself.
 3. **CORS locked down**: same-origin only in production; explicit allowlist env for local dev ports.
 4. **Path sandboxing**: every filesystem-touching operation (snapshots, diffs, worktrees, prompt file-parts) resolves against the board's registered root and rejects escapes. Absolute paths from clients are rejected unless inside a registered repo/worktree.
 5. **No shell interpolation**: all git/exec invocations go through argument arrays (`execFile`-style). The current string-built `git ${args}` pattern is banned and must be removed.

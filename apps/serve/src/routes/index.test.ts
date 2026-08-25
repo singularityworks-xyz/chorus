@@ -123,6 +123,7 @@ describe("HTTP routes", () => {
       expect(boardTasks.queuePrompt).toHaveBeenCalledWith({
         boardId: "board-1",
         directory: "/tmp/repo",
+        reviewMode: "auto",
         text: "build a feature",
       });
     });
@@ -147,6 +148,7 @@ describe("HTTP routes", () => {
       expect(boardTasks.queuePrompt).toHaveBeenCalledWith({
         boardId: "board-1",
         directory: "/tmp/repo",
+        reviewMode: "auto",
         text: "do work",
         model: { providerID: "anthropic", modelID: "claude-sonnet-4" },
         agent: "build",

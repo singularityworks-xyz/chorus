@@ -261,10 +261,11 @@ export default function HelpPage() {
               <div className="flex items-start gap-3">
                 <Shield className="mt-0.5 h-5 w-5 text-green-400" />
                 <div>
-                  <h3 className="mb-1 font-semibold">ArmorIQ</h3>
+                  <h3 className="mb-1 font-semibold">Human Approval Gate</h3>
                   <p className="text-zinc-400">
-                    Policy plane that defines what actions agents can perform.
-                    Shows both allowed and blocked actions with clear reasons.
+                    Permission requests and agent questions pause execution and
+                    wait for your explicit approve or reject — nothing runs
+                    without you.
                   </p>
                 </div>
               </div>
@@ -334,8 +335,9 @@ export default function HelpPage() {
                 <strong className="text-white">
                   Visibility over automation:
                 </strong>{" "}
-                You should see what the agent is allowed to do, what was
-                blocked, and why.
+                You always see what the agent is doing — every step streams to
+                the board, and anything needing permission stops until you
+                decide.
               </p>
             </div>
           </div>

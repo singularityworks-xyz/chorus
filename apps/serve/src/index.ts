@@ -254,7 +254,7 @@ try {
 const SHUTDOWN_TIMEOUT_MS = 5000;
 let isShuttingDown = false;
 
-function gracefulShutdown(signal: string): void {
+async function gracefulShutdown(signal: string): Promise<void> {
   if (isShuttingDown) {
     return;
   }
@@ -268,10 +268,14 @@ function gracefulShutdown(signal: string): void {
   }, SHUTDOWN_TIMEOUT_MS);
 
   try {
+    // Order matters: stop intake first, then tear down state channels,
+    // then children. Each step awaited so the bounded budget is honest
+    // and later async flushes (snapshot/coalescer) slot in without
+    // reordering.
     wsManager.close();
     bridge.stop();
-    processManager.stop();
-    app.server?.stop();
+    await app.server?.stop();
+    await processManager.stop();
     clearTimeout(shutdownTimeout);
     logger.info("shutdown-complete");
     process.exit(0);
