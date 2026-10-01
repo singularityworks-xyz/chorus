@@ -311,8 +311,7 @@ function parseDiffStatOutput(output: string): {
   let linesRemoved = 0;
 
   const lines = output.split("\n");
-  // @ts-expect-error Array.at() is ES2022 but supported in bun
-  const statLine = lines.at(-1) || "";
+  const statLine = lines.at(-1) ?? "";
   const insertMatch = statLine.match(INSERTION_REGEX);
   const deleteMatch = statLine.match(DELETION_REGEX);
   if (insertMatch) {

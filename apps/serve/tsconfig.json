@@ -13,6 +13,9 @@
     /* Language and Environment */
     "target": "ES2021" /* Set the JavaScript language version for emitted JavaScript and include compatible library declarations. */,
     // "lib": [],                                        /* Specify a set of bundled library declaration files that describe the target runtime environment. */
+    // ES2022 for Array.prototype.at / Object.hasOwn, which bun supports. Without
+    // it, `.at(-1)` needs a @ts-expect-error even though it runs fine.
+    "lib": ["ES2022"],
     // "jsx": "preserve",                                /* Specify what JSX code is generated. */
     // "experimentalDecorators": true,                   /* Enable experimental support for TC39 stage 2 draft decorators. */
     // "emitDecoratorMetadata": true,                    /* Emit design-type metadata for decorated declarations in source files. */

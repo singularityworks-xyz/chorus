@@ -1,4 +1,4 @@
-import { access, copyFile, mkdir, rm } from "node:fs/promises";
+import { access, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createLogger } from "@chorus/logger";
@@ -42,41 +42,77 @@ const bridge = new OpenCodeBridge(
 );
 const wsManager = createWsClientManager();
 
-async function resolveWorkspaceSnapshotPath() {
-  const homeWorkspaceDir = path.join(homedir(), ".chorus");
-  const homeWorkspacePath = path.join(homeWorkspaceDir, "workspace.json");
-  const legacyWorkspacePath = path.join(
-    process.cwd(),
-    ".chorus",
-    "workspace.json"
+/**
+ * Temporary bridge for the legacy `workspace.updated` fan-out.
+ *
+ * The store no longer hands callers a snapshot to broadcast — it hands them a
+ * commit. Until Phase 3 lands the hub that replays sequenced deltas, the
+ * transport still speaks whole snapshots, so this reads the post-commit state
+ * and sends it. Deliberately kept in one place so Phase 3 can delete it with a
+ * single deletion rather than hunting four call sites.
+ */
+function broadcastLegacySnapshot(
+  wsManager: ReturnType<typeof createWsClientManager>,
+  store: WorkspaceStore
+): void {
+  wsManager.broadcastRaw(
+    JSON.stringify({
+      type: "workspace.updated",
+      payload: store.getSnapshot(),
+      timestamp: Date.now(),
+    })
   );
-
-  await mkdir(homeWorkspaceDir, { recursive: true });
-
-  try {
-    await access(homeWorkspacePath);
-    return homeWorkspacePath;
-  } catch {
-    // No home snapshot yet. Fall through to migration check.
-  }
-
-  try {
-    await access(legacyWorkspacePath);
-    await copyFile(legacyWorkspacePath, homeWorkspacePath);
-    await rm(legacyWorkspacePath, { force: true });
-    logger.info("workspace-snapshot-migrated", {
-      from: legacyWorkspacePath,
-      to: homeWorkspacePath,
-    });
-  } catch {
-    // No legacy snapshot to migrate.
-  }
-
-  return homeWorkspacePath;
 }
 
-const workspaceStore = new WorkspaceStore(await resolveWorkspaceSnapshotPath());
-await workspaceStore.load();
+async function fileExists(candidate: string): Promise<boolean> {
+  try {
+    await access(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Pre-Phase-2 workspace snapshots, imported once into SQLite.
+ *
+ * Both locations are checked: `~/.chorus/workspace.json` where the old store
+ * wrote, and `./.chorus/workspace.json` from the pre-`~/.chorus` era. The
+ * importer renames whichever it consumes to `.imported` rather than deleting
+ * it, so the operator decides when the migration is trustworthy.
+ */
+function legacySnapshotPaths(): string[] {
+  return [
+    path.join(homedir(), ".chorus", "workspace.json"),
+    path.join(process.cwd(), ".chorus", "workspace.json"),
+  ];
+}
+
+const workspaceStore = new WorkspaceStore(config.dataDir, {
+  dbSizeCapMb: config.dbSizeCapMb,
+  retentionDays: config.retentionDays,
+  snapshotInterval: config.snapshotInterval,
+});
+
+await mkdir(config.dataDir, { recursive: true });
+
+if (config.enableLegacyWorkspaceImport) {
+  for (const candidate of legacySnapshotPaths()) {
+    if (await fileExists(candidate)) {
+      await workspaceStore.load(candidate);
+      logger.info("workspace-legacy-import-attempted", { from: candidate });
+      break;
+    }
+  }
+} else {
+  await workspaceStore.load();
+}
+
+logger.info("workspace-ready", {
+  dataDir: config.dataDir,
+  database: workspaceStore.databasePath,
+  headSeq: workspaceStore.headSeq(),
+});
 
 const watchdog = new SessionWatchdog(bridge, {
   onTimeout: (sessionId, info, message) => {
@@ -94,24 +130,18 @@ const watchdog = new SessionWatchdog(bridge, {
         error: message,
         timestamp: Date.now(),
       })
-      .then((snapshot) => {
-        if (!snapshot) {
+      .then((commit) => {
+        if (!commit) {
           return;
         }
-        const board = snapshot.boards.find(
-          (b) => b.session.sessionId === sessionId
-        );
-        logger.info("workspace-snapshot-after-timeout", {
+        logger.info("workspace-commit-after-timeout", {
           sessionID: sessionId,
-          boardId: board?.boardId,
+          boardId: commit.boardId,
+          seq: commit.lastSeq,
         });
-        wsManager.broadcastRaw(
-          JSON.stringify({
-            type: "workspace.updated",
-            payload: snapshot,
-            timestamp: Date.now(),
-          })
-        );
+        // Legacy full-snapshot fan-out; Phase 3 replaces this with the hub
+        // replaying sequenced deltas off the store's commit point.
+        broadcastLegacySnapshot(wsManager, workspaceStore);
       })
       .catch((error) => {
         logger.error(
@@ -157,45 +187,19 @@ bridge.subscribe((event) => {
 
   workspaceStore
     .applyAgentEvent(event)
-    .then((snapshot) => {
-      if (!snapshot) {
+    .then((commit) => {
+      if (!commit) {
         return;
       }
 
-      const board = snapshot.boards.find(
-        (b) => b.session.sessionId === event.sessionID
-      );
-
-      logger.info("workspace-snapshot-broadcast", {
+      logger.info("workspace-commit", {
         sessionID: event.sessionID,
-        revision: snapshot.revision,
-        boardId: board?.boardId,
-        taskCount: board
-          ? Object.values(board.columns).reduce(
-              (sum, tasks) => sum + tasks.length,
-              0
-            )
-          : 0,
-        steps: board
-          ? Object.values(board.columns)
-              .flat()
-              .filter((t) => t.run)
-              .flatMap((t) => t.run?.steps ?? [])
-              .map((s) => ({
-                kind: s.kind,
-                summary: s.summary,
-                status: s.status,
-              }))
-          : [],
+        boardId: commit.boardId,
+        seq: commit.lastSeq,
+        events: commit.events.map((entry) => entry.type),
       });
 
-      wsManager.broadcastRaw(
-        JSON.stringify({
-          type: "workspace.updated",
-          payload: snapshot,
-          timestamp: Date.now(),
-        })
-      );
+      broadcastLegacySnapshot(wsManager, workspaceStore);
     })
     .catch((error) => {
       logger.error(
@@ -275,6 +279,11 @@ async function gracefulShutdown(signal: string): Promise<void> {
     wsManager.close();
     bridge.stop();
     await app.server?.stop();
+    // Order matters: stop intake, then tear down state channels, then flush
+    // durable state, then children. store.close() drains the serial queue,
+    // writes a final snapshot, and folds the WAL so a cold copy of chorus.db is
+    // a complete backup.
+    await workspaceStore.close();
     await processManager.stop();
     clearTimeout(shutdownTimeout);
     logger.info("shutdown-complete");

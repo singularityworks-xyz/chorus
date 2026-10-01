@@ -8,7 +8,15 @@ const SHELL_EXEC_IMPORT =
   /import\s*\{[^}]*\bexec\b[^}]*\}\s*from\s*["']node:child_process["']/;
 const PROMISISED_EXEC = /promisify\(\s*exec\s*\)/;
 const SHELL_EXEC_CALL = /\bexecAsync\s*\(/;
-const SHELL_STRING_TEMPLATE = /\bexec(?:Async)?\s*\(\s*`/;
+/**
+ * A shell-string exec call.
+ *
+ * The negative lookbehind skips `db.exec(...)`, which is SQLite's SQL
+ * executor rather than child_process's — the Phase 2 database layer trips this
+ * otherwise. What remains is the RCE shape this guard exists for: a bare
+ * `exec(` / `execAsync(` built from a template string.
+ */
+const SHELL_STRING_TEMPLATE = /(?<![.\w])exec(?:Async)?\s*\(\s*`/;
 
 function collectSourceFiles(dir: string): string[] {
   const glob = new Bun.Glob("**/*.ts");
