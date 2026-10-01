@@ -63,6 +63,10 @@ to make it pass, and never expand scope beyond the assigned phase.
 7. **Commit** only when explicitly asked, using `<type>[<AREA>]: <summary>` + body paragraph
    (what/where/behavior + test evidence). One phase = one commit. Never commit secrets,
    never amend a hook-rejected commit, never force-push.
+8. **Publish** only when explicitly asked: push a phase-number-free branch, open a PR, and
+   **merge normally (`gh pr merge --merge`) — never `--squash` or `--rebase`.** Each phase has
+   to stay individually revertable on `main`, so the commit history is part of the deliverable.
+   Wait for CI to report clean before merging; never merge on pending or failing checks.
 
 ## 5. Quality gates per work type
 
