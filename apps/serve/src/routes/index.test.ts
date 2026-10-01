@@ -1,6 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
 import { Elysia } from "elysia";
-import { createWsClientManager } from "../events/broadcaster";
 import { createHttpRoutes } from "./index";
 
 function makeMockBridge() {
@@ -50,9 +49,8 @@ describe("HTTP routes", () => {
   function makeApp() {
     const bridge = makeMockBridge();
     const boardTasks = makeMockBoardTasks();
-    const wsManager = createWsClientManager();
     const app = new Elysia().use(
-      createHttpRoutes(bridge as never, boardTasks as never, wsManager)
+      createHttpRoutes(bridge as never, boardTasks as never)
     );
     return { app, bridge, boardTasks };
   }

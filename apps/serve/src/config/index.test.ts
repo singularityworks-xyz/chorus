@@ -23,6 +23,7 @@ describe("loadConfig", () => {
     process.env.RETENTION_DAYS = undefined as unknown as string;
     process.env.DB_SIZE_CAP_MB = undefined as unknown as string;
     process.env.SNAPSHOT_INTERVAL = undefined as unknown as string;
+    process.env.COALESCE_MS = undefined as unknown as string;
 
     const config = loadConfig();
 
@@ -35,6 +36,7 @@ describe("loadConfig", () => {
     expect(config.retentionDays).toBe(30);
     expect(config.dbSizeCapMb).toBe(512);
     expect(config.snapshotInterval).toBe(1000);
+    expect(config.coalesceMs).toBe(100);
     // Off by default so the legacy import path can be deleted once migrated.
     expect(config.enableLegacyWorkspaceImport).toBe(false);
   });
@@ -89,6 +91,7 @@ describe("loadConfig", () => {
     process.env.RETENTION_DAYS = "7";
     process.env.DB_SIZE_CAP_MB = "256";
     process.env.SNAPSHOT_INTERVAL = "500";
+    process.env.COALESCE_MS = "75";
     process.env.CHORUS_ENABLE_LEGACY_WORKSPACE_IMPORT = "true";
 
     const config = loadConfig();
@@ -99,6 +102,7 @@ describe("loadConfig", () => {
       opencodeBaseUrl: "http://opencode:4096",
       opencodeDirectory: "/workspace",
       autoStartOpencode: true,
+      coalesceMs: 75,
       dataDir: "/data",
       retentionDays: 7,
       dbSizeCapMb: 256,

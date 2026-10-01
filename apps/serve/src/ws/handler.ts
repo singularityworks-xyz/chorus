@@ -1,9 +1,8 @@
 import { queueBoardPromptInputSchema } from "@chorus/contracts";
 import { Elysia, t } from "elysia";
 import type { OpenCodeBridge } from "../bridge/opencode/bridge";
-import type { WsClientManager } from "../events/broadcaster";
-import { createWorkspaceMessage } from "../routes/workspace";
 import type { BoardTaskService } from "../tasks/board-task-service";
+import type { HubSocket, WorkspaceHub } from "./hub";
 import type { WsMessage } from "./types";
 import {
   SUPPORTED_MESSAGE_TYPES,
@@ -11,16 +10,48 @@ import {
   WS_RESPONSE_TYPE,
 } from "./types";
 
-interface ClientData {
-  sessionId: string;
-  subscriptions: Set<string>;
+/**
+ * Adapts Elysia's websocket context to the hub's transport interface.
+ *
+ * Two Elysia details make this more than a cast. It hands each handler a
+ * different wrapper object for the same connection, so the socket has to be
+ * identified by `ctx.id` — comparing objects silently misses every lookup. And
+ * it does not expose `getBufferedAmount` on the context at all, only on
+ * `ctx.raw`.
+ */
+function toHubSocket(ctx: unknown): HubSocket {
+  const elysiaCtx = ctx as {
+    id?: string;
+    raw?: { getBufferedAmount?: () => number };
+    send: (data: string) => unknown;
+  };
+
+  const raw = elysiaCtx.raw;
+
+  return {
+    id: elysiaCtx.id ?? "",
+    ...(typeof raw?.getBufferedAmount === "function"
+      ? { getBufferedAmount: () => raw.getBufferedAmount?.() ?? 0 }
+      : {}),
+    send: (data: string) => elysiaCtx.send(data),
+  };
 }
 
-const clientData = new WeakMap<object, ClientData>();
-
-function generateId(): string {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-}
+/**
+ * Message types the hub owns. These are the state-channel protocol (spec §4);
+ * everything else in this file is a command the client sends over the socket
+ * and the hub has no opinion about.
+ *
+ * Handing these to the hub first is what keeps a single emit path: the hub is
+ * the only thing that ever writes to a client socket, including the legacy
+ * command replies below.
+ */
+const HUB_OWNED_TYPES = new Set<string>([
+  "hello",
+  "pong",
+  "resync",
+  "viewport.sync",
+]);
 
 const WS_PAYLOAD_SCHEMAS = {
   [WS_MESSAGE_TYPE.TASK_QUEUE]: t.Any(),
@@ -86,50 +117,60 @@ const WS_PAYLOAD_SCHEMAS = {
 
 export function createWsHandler(
   bridge: OpenCodeBridge,
-  manager: WsClientManager,
+  hub: WorkspaceHub,
   boardTasks: BoardTaskService
 ) {
   return new Elysia().ws("/ws", {
+    // Transport shape only: "an object with a string type, and optionally a
+    // payload or a resume cursor".
+    //
+    // Elysia's `t.Object` rejects unknown keys, so this has to enumerate the
+    // fields the state-channel protocol actually uses — a schema of just
+    // `{type, payload}` silently rejects every `hello`, because `since` is an
+    // unexpected property, and the client receives a `validation` frame instead
+    // of a snapshot. Protocol validation belongs to the contracts schemas the
+    // hub applies; this only has to stop the transport from mangling frames on
+    // the way in.
     body: t.Object({
       type: t.String(),
       payload: t.Optional(t.Any()),
+      since: t.Optional(t.Number()),
     }),
 
     open(ws) {
-      const sessionId = generateId();
-      const data: ClientData = {
-        sessionId,
-        subscriptions: new Set(),
-      };
-      clientData.set(ws, data);
-      manager.clients.add(ws as never);
-      console.log(`[ws] client connected: ${sessionId}`);
-      ws.send(
-        JSON.stringify({
-          type: WS_RESPONSE_TYPE.CONNECTED,
-          payload: { sessionId },
-          timestamp: Date.now(),
-        })
-      );
+      hub.register(toHubSocket(ws));
     },
 
     message(ws, message) {
-      const data = clientData.get(ws);
-      if (!data) {
+      // Elysia has already parsed and validated the frame against `body`, so the
+      // hub gets the re-serialized form. It re-validates with the contracts
+      // schemas, which is deliberate: the transport shape and the protocol shape
+      // are allowed to disagree, and the protocol wins.
+      const rawMessage = JSON.stringify(message);
+
+      // State-channel traffic goes to the hub and nothing else touches the
+      // socket. Command replies go through the same socket but are produced
+      // here, because the hub has no knowledge of task commands.
+      if (rawTypeIs(rawMessage)) {
+        hub
+          .handleRawMessage(toHubSocket(ws), rawMessage)
+          .catch((error: unknown) => {
+            console.error("[ws] hub message error:", error);
+          });
         return;
       }
 
-      handleMessage(ws, message, bridge, manager, boardTasks, data).catch(
-        (error) => {
+      handleCommand(ws, message, bridge, boardTasks, hub.clientCount()).catch(
+        (error: unknown) => {
           console.error("[ws] handler error:", error);
           ws.send(
             JSON.stringify({
-              type: WS_RESPONSE_TYPE.ERROR,
               payload: {
                 message:
                   error instanceof Error ? error.message : "unknown error",
               },
               timestamp: Date.now(),
+              type: WS_RESPONSE_TYPE.ERROR,
             })
           );
         }
@@ -137,30 +178,35 @@ export function createWsHandler(
     },
 
     close(ws) {
-      manager.clients.delete(ws as never);
-      const data = clientData.get(ws);
-      if (data) {
-        console.log(`[ws] client disconnected: ${data.sessionId}`);
-      }
-      clientData.delete(ws);
+      hub.unregister(toHubSocket(ws));
     },
 
-    drain(ws) {
-      const data = clientData.get(ws);
-      if (data) {
-        console.log(`[ws] client backpressure: ${data.sessionId}`);
-      }
+    drain() {
+      // The hub samples getBufferedAmount() on its own before each send, so a
+      // drain event needs no bookkeeping here — see the spike findings quoted
+      // at the top of ws/hub.ts.
     },
   });
 }
 
-async function handleMessage(
+/** True when the hub, not the command handler, owns this frame. */
+function rawTypeIs(raw: string): boolean {
+  try {
+    const parsed = JSON.parse(raw) as { type?: unknown };
+    return typeof parsed.type === "string" && HUB_OWNED_TYPES.has(parsed.type);
+  } catch {
+    // Unparseable input belongs to the hub so it can answer with a protocol
+    // error rather than the command handler's unknown-message reply.
+    return true;
+  }
+}
+
+async function handleCommand(
   ws: unknown,
   message: { type: string; payload?: unknown },
   bridge: OpenCodeBridge,
-  manager: WsClientManager,
   boardTasks: BoardTaskService,
-  _data: ClientData
+  hubClientCount = 0
 ): Promise<void> {
   const wsSend = (payload: Record<string, unknown>) => {
     (ws as { send: (data: string) => void }).send(JSON.stringify(payload));
@@ -190,9 +236,6 @@ async function handleMessage(
         payload: response,
         timestamp: response.timestamp,
       });
-      manager.broadcastRaw(
-        createWorkspaceMessage(boardTasks.getWorkspaceSnapshot())
-      );
       break;
     }
 
@@ -335,25 +378,12 @@ async function handleMessage(
       break;
     }
 
-    case WS_MESSAGE_TYPE.VIEWPORT_SYNC: {
-      const payload = validate(WS_MESSAGE_TYPE.VIEWPORT_SYNC, msg.payload);
-
-      const rawMessage = JSON.stringify({
-        type: WS_MESSAGE_TYPE.VIEWPORT_SYNC,
-        payload,
-        timestamp: Date.now(),
-      });
-
-      manager.broadcastRaw(rawMessage);
-      break;
-    }
-
     case WS_MESSAGE_TYPE.PRESENCE_PING: {
       wsSend({
         type: WS_RESPONSE_TYPE.PRESENCE_PONG,
         payload: {
           timestamp: Date.now(),
-          clientCount: manager.clients.size,
+          clientCount: hubClientCount,
         },
         timestamp: Date.now(),
       });

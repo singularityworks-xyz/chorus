@@ -1,7 +1,18 @@
 import { describe, expect, mock, test } from "bun:test";
-import { createWsClientManager } from "../events/broadcaster";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { WorkspaceStore } from "../workspace/store";
 import { createWsHandler } from "./handler";
+import { WorkspaceHub } from "./hub";
 import type { WsMessage } from "./types";
+
+function makeHub() {
+  const dir = mkdtempSync(join(tmpdir(), "chorus-ws-handler-"));
+  const store = new WorkspaceStore(dir);
+  const hub = new WorkspaceHub(store);
+  return { dir, hub, store };
+}
 
 function makeMockBridge() {
   return {
@@ -36,26 +47,32 @@ function makeMockBoardTasks() {
 }
 
 describe("WebSocket handler", () => {
-  test("creates WS handler with /ws endpoint", () => {
-    const bridge = makeMockBridge();
-    const wsManager = createWsClientManager();
-    const boardTasks = makeMockBoardTasks();
+  test("creates WS handler with /ws endpoint", async () => {
+    const { dir, hub, store } = makeHub();
+    await store.load();
     const handler = createWsHandler(
-      bridge as never,
-      wsManager,
-      boardTasks as never
+      makeMockBridge() as never,
+      hub,
+      makeMockBoardTasks() as never
     );
 
     expect(handler).toBeDefined();
+    hub.close();
+    rmSync(dir, { force: true, recursive: true });
   });
 
-  test("handler registers ws manager with empty clients", () => {
-    const bridge = makeMockBridge();
-    const wsManager = createWsClientManager();
-    const boardTasks = makeMockBoardTasks();
-    createWsHandler(bridge as never, wsManager, boardTasks as never);
+  test("the handler starts with no connected clients", async () => {
+    const { dir, hub, store } = makeHub();
+    await store.load();
+    createWsHandler(
+      makeMockBridge() as never,
+      hub,
+      makeMockBoardTasks() as never
+    );
 
-    expect(wsManager.clients.size).toBe(0);
+    expect(hub.clientCount()).toBe(0);
+    hub.close();
+    rmSync(dir, { force: true, recursive: true });
   });
 });
 

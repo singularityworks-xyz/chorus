@@ -3,7 +3,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Elysia } from "elysia";
-import { createWsClientManager } from "../events/broadcaster";
 import { WorkspaceStore } from "../workspace/store";
 import { createWorkspaceRoutes } from "./workspace";
 
@@ -23,9 +22,7 @@ describe("workspace routes", () => {
     const { dir, store } = createStore("get");
     await store.load();
 
-    const app = new Elysia().use(
-      createWorkspaceRoutes(store, createWsClientManager())
-    );
+    const app = new Elysia().use(createWorkspaceRoutes(store));
 
     const response = await app.handle(
       new Request("http://localhost/workspace")
@@ -43,8 +40,7 @@ describe("workspace routes", () => {
     const { dir, store } = createStore("put");
     await store.load();
 
-    const wsManager = createWsClientManager();
-    const app = new Elysia().use(createWorkspaceRoutes(store, wsManager));
+    const app = new Elysia().use(createWorkspaceRoutes(store));
 
     const response = await app.handle(
       new Request("http://localhost/workspace/mutations", {
@@ -72,19 +68,17 @@ describe("workspace routes", () => {
     rmSync(dir, { force: true, recursive: true });
   });
 
-  test("a replayed mutationId is idempotent and does not re-broadcast", async () => {
+  test("a replayed mutationId is idempotent and commits only once", async () => {
     const { dir, store } = createStore("dedup");
     await store.load();
 
-    const wsManager = createWsClientManager();
-    const sent: string[] = [];
-    const originalBroadcast = wsManager.broadcastRaw.bind(wsManager);
-    wsManager.broadcastRaw = (message: string) => {
-      sent.push(message);
-      originalBroadcast(message);
-    };
+    // The hub is fed by the store's commit hook, so the meaningful assertion is
+    // that a retried request produces exactly one commit — not that some
+    // transport happened to stay quiet.
+    const commits: number[] = [];
+    store.onCommit((commit) => commits.push(commit.lastSeq));
 
-    const app = new Elysia().use(createWorkspaceRoutes(store, wsManager));
+    const app = new Elysia().use(createWorkspaceRoutes(store));
     const body = JSON.stringify({
       baseRevision: 0,
       clientId: "client-1",
@@ -101,7 +95,7 @@ describe("workspace routes", () => {
       })
     );
     expect(first.status).toBe(200);
-    expect(sent).toHaveLength(1);
+    expect(commits).toHaveLength(1);
 
     const second = await app.handle(
       new Request("http://localhost/workspace/mutations", {
@@ -112,8 +106,8 @@ describe("workspace routes", () => {
     );
 
     expect(second.status).toBe(200);
-    // No new state, so nothing is pushed to clients.
-    expect(sent).toHaveLength(1);
+    // No new state, so no second commit — and therefore nothing new downstream.
+    expect(commits).toHaveLength(1);
     expect(store.getSnapshot().boards).toHaveLength(1);
     expect(store.headSeq()).toBe(1);
 
@@ -125,9 +119,7 @@ describe("workspace routes", () => {
     const { dir, store } = createStore("invalid");
     await store.load();
 
-    const app = new Elysia().use(
-      createWorkspaceRoutes(store, createWsClientManager())
-    );
+    const app = new Elysia().use(createWorkspaceRoutes(store));
 
     const response = await app.handle(
       new Request("http://localhost/workspace/mutations", {

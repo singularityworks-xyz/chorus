@@ -147,6 +147,9 @@ export class WorkspaceStore {
   readonly #options: Required<RetentionOptions>;
   readonly #queue: { promise: Promise<void> } = { promise: Promise.resolve() };
 
+  /** Subscribers notified once per commit, after memory is swapped. */
+  readonly #commitListeners = new Set<(commit: StoreCommit) => void>();
+
   #snapshot: WorkspaceSnapshot = {
     boards: [],
     preferences: EMPTY_PREFERENCES,
@@ -469,6 +472,25 @@ export class WorkspaceStore {
 
   // ── internals ─────────────────────────────────────────────────────────────
 
+  /**
+   * Registers the single downstream emit path (spec §3: "Exactly one emit path
+   * from store → WS hub").
+   *
+   * Every writer already funnels through `#commit`, so subscribing here covers
+   * HTTP routes, the opencode bridge, the session watchdog, and the task
+   * service without any of them knowing a hub exists — and without any of them
+   * being able to forget to broadcast. Fires only after a successful write, so
+   * a subscriber never sees a commit that was rolled back.
+   *
+   * Returns an unsubscribe function.
+   */
+  onCommit(listener: (commit: StoreCommit) => void): () => void {
+    this.#commitListeners.add(listener);
+    return () => {
+      this.#commitListeners.delete(listener);
+    };
+  }
+
   #boardExists(boardId: string): boolean {
     return this.#snapshot.boards.some((board) => board.boardId === boardId);
   }
@@ -737,7 +759,14 @@ export class WorkspaceStore {
     };
     this.#eventsSinceSnapshot += events.length;
 
-    return { boardId, events, firstSeq, lastSeq };
+    const commit = { boardId, events, firstSeq, lastSeq };
+
+    // Post-commit, so a subscriber can never observe state the log rejected.
+    for (const listener of this.#commitListeners) {
+      listener(commit);
+    }
+
+    return commit;
   }
 
   /**

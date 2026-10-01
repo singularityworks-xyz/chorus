@@ -1,20 +1,8 @@
 import { workspaceMutationSchema } from "@chorus/contracts";
 import { Elysia, t } from "elysia";
-import type { WsClientManager } from "../events/broadcaster";
 import type { WorkspaceStore } from "../workspace/store";
 
-export function createWorkspaceMessage(snapshot: unknown) {
-  return JSON.stringify({
-    type: "workspace.updated",
-    payload: snapshot,
-    timestamp: Date.now(),
-  });
-}
-
-export function createWorkspaceRoutes(
-  workspaceStore: WorkspaceStore,
-  wsManager: WsClientManager
-) {
+export function createWorkspaceRoutes(workspaceStore: WorkspaceStore) {
   return new Elysia()
     .get("/workspace", () => workspaceStore.getSnapshot())
     .post(
@@ -29,20 +17,14 @@ export function createWorkspaceRoutes(
           };
         }
 
-        // Returns null when the mutationId was already applied (a retried
-        // request) or addressed nothing — both are no-ops the client already
-        // has the answer for, so respond with current state and stay quiet.
-        const commit = await workspaceStore.applyMutation(parsed.data);
-        const snapshot = workspaceStore.getSnapshot();
+        // The store's own commit hook publishes to the hub, so this route does
+        // not broadcast: there is exactly one emit path and it is not here.
+        // Returns null when the mutationId was already applied or the
+        // mutation addressed nothing — both no-ops the client already has the
+        // answer for.
+        await workspaceStore.applyMutation(parsed.data);
 
-        if (commit) {
-          // Legacy whole-snapshot fan-out. Phase 3 replaces this with the hub
-          // replaying the commit's sequenced events, at which point this
-          // broadcast disappears entirely.
-          wsManager.broadcastRaw(createWorkspaceMessage(snapshot));
-        }
-
-        return snapshot;
+        return workspaceStore.getSnapshot();
       },
       {
         body: t.Any(),
