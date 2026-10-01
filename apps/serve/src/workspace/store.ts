@@ -45,6 +45,13 @@ const SNAPSHOT_BLOB_VERSION = 1;
  * require synthesising a fake one. Client mutations are still exactly one
  * event — enforced by `mutation-map.test.ts` and asserted here at runtime.
  */
+/** One log entry, decoded, for replay and diagnostics. */
+export interface SequencedRecord {
+  boardId: string | null;
+  event: WorkspaceEvent;
+  seq: number;
+}
+
 export interface StoreCommit {
   boardId: string | null;
   /** Appended events, oldest first. Length 1 for every client mutation. */
@@ -233,6 +240,38 @@ export class WorkspaceStore {
 
   headSeq(): number {
     return this.#db.headSeq();
+  }
+
+  /**
+   * Oldest sequence that can still be replayed — the sequence of the newest
+   * snapshot. Events at or below it have been pruned, so a client resuming from
+   * before this point cannot be served a complete gap and must get a snapshot
+   * instead.
+   */
+  replayFloorSeq(): number {
+    return this.#db.latestSnapshot()?.seq ?? 0;
+  }
+
+  /**
+   * Decoded events strictly after `seq`, oldest first.
+   *
+   * This is the read side of the resume path: a reconnecting client sends the
+   * last sequence it saw and gets back exactly the gap, so it never has to
+   * re-fetch a whole snapshot for a one-event miss. Decoding failures throw
+   * rather than yielding a partial list — a client must not be handed a
+   * silently truncated replay.
+   */
+  eventsSince(seq: number, limit?: number): SequencedRecord[] {
+    const rows = this.#db.readEventsSince(
+      seq,
+      limit ?? Number.MAX_SAFE_INTEGER
+    );
+
+    return rows.map((row) => ({
+      boardId: row.boardId,
+      event: this.#decode(row),
+      seq: row.seq,
+    }));
   }
 
   /** Path of the SQLite file, for the restore/export runbook. */
