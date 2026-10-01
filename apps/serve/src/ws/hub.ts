@@ -180,6 +180,11 @@ export function decideResume(
 }
 
 interface Client {
+  /**
+   * Connection id, matching the socket's. Elysia reuses it across the wrapper
+   * objects it hands to `open`, `message`, and `close`, which is what makes a
+   * registry keyed on it work at all.
+   */
   /** Frames the transport refused for backpressure (`send()` returned < 0). */
   backpressuredFrames: number;
   /** Board filter; `null` means every board (the single-operator mirror). */
@@ -214,8 +219,6 @@ export interface HubStats {
   droppedFrames: number;
   headSeq: number;
 }
-
-let clientCounter = 0;
 
 export class WorkspaceHub {
   readonly #clients = new Set<Client>();
@@ -252,7 +255,6 @@ export class WorkspaceHub {
   // ── registry ──────────────────────────────────────────────────────────────
 
   register(socket: HubSocket): Client {
-    clientCounter += 1;
     const client: Client = {
       backpressuredFrames: 0,
       boards: null,
@@ -261,7 +263,10 @@ export class WorkspaceHub {
       droppedFrames: 0,
       commandWindowStart: this.#now(),
       criticalOnly: false,
-      id: `c${clientCounter}`,
+      // The socket's connection id, and the only identity. A separate
+      // generated id here silently broke removal, because the id map is keyed
+      // by the socket id and the two never matched.
+      id: socket.id,
       lastPongAt: this.#now(),
       lastSeq: 0,
       ready: false,
@@ -276,8 +281,7 @@ export class WorkspaceHub {
   unregister(socket: HubSocket): void {
     const client = this.#clientsById.get(socket.id);
     if (client) {
-      this.#clients.delete(client);
-      this.#clientsById.delete(socket.id);
+      this.#drop(client);
     }
   }
 
@@ -672,6 +676,20 @@ export class WorkspaceHub {
     }
   }
 
+  /**
+   * Removes a client from both registries.
+   *
+   * Every removal path must go through here. The heartbeat closes sockets
+   * itself, and clearing only the set left the id map holding a dead client, so
+   * a later frame on that id resolved to a closed socket.
+   */
+  #drop(client: Client): void {
+    this.#clients.delete(client);
+    if (this.#clientsById.get(client.id) === client) {
+      this.#clientsById.delete(client.id);
+    }
+  }
+
   // ── lifecycle ─────────────────────────────────────────────────────────────
 
   #startHeartbeat(): void {
@@ -680,10 +698,12 @@ export class WorkspaceHub {
       for (const client of [...this.#clients]) {
         if (client.lastPongAt < cutoff) {
           client.socket.close?.(4000, "pong timeout");
-          this.#clients.delete(client);
+          this.#drop(client);
           continue;
         }
-        client.socket.send(JSON.stringify({ at: this.#now(), type: "ping" }));
+        // Routed through #send so a ping that is itself refused counts toward
+        // congestion. A client that cannot take a ping is not healthy.
+        this.#send(client, { at: this.#now(), type: "ping" });
       }
     }, this.#pingIntervalMs);
     this.#heartbeatTimer.unref?.();

@@ -9,6 +9,7 @@ import {
   decideResume,
   HIGH_WATER_MARK,
   type HubSocket,
+  PONG_TIMEOUT_MS,
   WorkspaceHub,
 } from "./hub";
 
@@ -857,6 +858,89 @@ describe("backpressure recovery", () => {
     // received the handshake rather than the frames being dropped on the floor.
     expect(registered.sent.length).toBeGreaterThan(0);
     expect(hub.clientCount()).toBe(1);
+
+    hub.close();
+    cleanup();
+  });
+});
+
+describe("heartbeat", () => {
+  test("a client that misses two pongs is closed and fully deregistered", async () => {
+    const store = makeStore();
+    await store.load();
+    let clock = 1_000_000;
+    const hub = new WorkspaceHub(store, {
+      now: () => clock,
+      pingIntervalMs: 1,
+    });
+    const socket = makeSocket();
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    // Three intervals, no pong ever arrives.
+    clock += PONG_TIMEOUT_MS * 3;
+    await Bun.sleep(25);
+
+    expect(socket.closeCalls.at(-1)?.code).toBe(4000);
+    expect(socket.closeCalls.at(-1)?.reason).toBe("pong timeout");
+    expect(hub.clientCount()).toBe(0);
+
+    // Regression: the heartbeat used to clear only the client set, leaving the
+    // id map holding a dead client. A late frame on that id then resolved to a
+    // closed socket instead of being dropped as unknown.
+    const before = socket.sent.length;
+    await hub.handleRawMessage(
+      socket,
+      JSON.stringify({ since: 0, type: "hello" })
+    );
+    expect(socket.sent.length).toBe(before);
+
+    hub.close();
+    cleanup();
+  });
+
+  test("a pong resets the deadline", async () => {
+    const store = makeStore();
+    await store.load();
+    let clock = 1_000_000;
+    const hub = new WorkspaceHub(store, {
+      now: () => clock,
+      pingIntervalMs: 1,
+    });
+    const socket = makeSocket();
+    await connect(hub, socket, 0);
+
+    for (let round = 0; round < 4; round += 1) {
+      clock += PONG_TIMEOUT_MS;
+      await hub.handleRawMessage(socket, JSON.stringify({ type: "pong" }));
+      await Bun.sleep(6);
+      expect(socket.closeCalls).toHaveLength(0);
+    }
+
+    expect(hub.clientCount()).toBe(1);
+    hub.close();
+    cleanup();
+  });
+
+  test("the heartbeat ping is sequenced accounting, not a bare write", async () => {
+    const store = makeStore();
+    await store.load();
+    let clock = 1_000_000;
+    const hub = new WorkspaceHub(store, {
+      now: () => clock,
+      pingIntervalMs: 1,
+    });
+    const socket = makeSocket();
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    // A transport that refuses the ping must register as backpressured, so a
+    // client that cannot even take a heartbeat gets treated as sick.
+    socket.send = () => -1;
+    clock += 1000;
+    await Bun.sleep(10);
+
+    expect(hub.stats().backpressuredFrames).toBeGreaterThan(0);
 
     hub.close();
     cleanup();
