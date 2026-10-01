@@ -1,15 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { Task, WorkspaceBoard } from "./base";
 import { workspaceBoardSchema } from "./base";
-import type { WorkspaceEvent } from "./events";
+import type { WorkspaceColumnId, WorkspaceEvent } from "./events";
 import {
   applyEventToBoard,
   applyEventToBoards,
   applyEventToWorkspace,
-  extractPlanFromSteps,
-  findTaskColumn,
-  formatElapsed,
-  moveCard,
 } from "./projector";
 
 const T0 = 1_700_000_000_000;
@@ -47,6 +43,19 @@ function makeBoard(overrides: Partial<WorkspaceBoard> = {}): WorkspaceBoard {
 
 function columnOf(board: WorkspaceBoard, columnId: string): Task[] {
   return (board.columns[columnId] ?? []) as Task[];
+}
+
+/** Local stand-in for the now-private `findTaskColumn`. */
+function laneOf(
+  board: WorkspaceBoard,
+  taskId: string
+): WorkspaceColumnId | null {
+  for (const lane of ["queue", "in_progress", "approve", "done"] as const) {
+    if (columnOf(board, lane).some((task) => task.id === taskId)) {
+      return lane;
+    }
+  }
+  return null;
 }
 
 describe("purity", () => {
@@ -328,7 +337,7 @@ describe("card lifecycle events", () => {
       column: "queue",
     });
 
-    expect(findTaskColumn(next.columns, TASK)).toBe("queue");
+    expect(laneOf(next, TASK)).toBe("queue");
   });
 
   test("card.started moves the card to in_progress and relabels it", () => {
@@ -348,7 +357,7 @@ describe("card lifecycle events", () => {
       taskId: TASK,
     });
 
-    expect(findTaskColumn(next.columns, TASK)).toBe("in_progress");
+    expect(laneOf(next, TASK)).toBe("in_progress");
     expect(columnOf(next, "queue")).toHaveLength(0);
     expect(columnOf(next, "in_progress")[0].labelVariant).toBe("primary-light");
   });
@@ -362,7 +371,7 @@ describe("card lifecycle events", () => {
       column: "done",
     });
 
-    expect(findTaskColumn(next.columns, TASK)).toBe("done");
+    expect(laneOf(next, TASK)).toBe("done");
   });
 
   test("card.waiting_for_approval routes to approve for both request kinds", () => {
@@ -375,7 +384,7 @@ describe("card lifecycle events", () => {
         kind,
       });
 
-      expect(findTaskColumn(next.columns, TASK)).toBe("approve");
+      expect(laneOf(next, TASK)).toBe("approve");
       expect(columnOf(next, "approve")[0].labelVariant).toBe("warning-light");
     }
   });
@@ -388,7 +397,7 @@ describe("card lifecycle events", () => {
       taskId: TASK,
     });
 
-    expect(findTaskColumn(next.columns, TASK)).toBe("done");
+    expect(laneOf(next, TASK)).toBe("done");
     expect(next.session.currentTaskId).toBeUndefined();
   });
 
@@ -401,7 +410,7 @@ describe("card lifecycle events", () => {
       error: "boom",
     });
 
-    expect(findTaskColumn(next.columns, TASK)).toBe("done");
+    expect(laneOf(next, TASK)).toBe("done");
     expect(next.session.state).toBe("error");
     expect(next.session.errorMessage).toBe("boom");
   });
@@ -604,7 +613,7 @@ describe("run and step events", () => {
     expect(run?.startedAt).toBe(T0);
   });
 
-  test("a delta event for a card with no run opens one rather than dropping text", () => {
+  test("a delta for a card with no run opens the run and keeps the text", () => {
     const next = applyEventToBoard(makeBoard(), {
       type: "step.delta_appended",
       ts: T0,
@@ -614,8 +623,9 @@ describe("run and step events", () => {
       delta: "tokens",
     });
 
-    // no step s1 exists, so the delta has nowhere to land and is dropped
-    expect(columnOf(next, "in_progress")[0].run?.steps).toEqual([]);
+    const run = columnOf(next, "in_progress")[0].run;
+    expect(run?.steps).toHaveLength(1);
+    expect(run?.steps[0].content).toBe("tokens");
   });
 });
 
@@ -660,7 +670,7 @@ describe("session events", () => {
       boardId: BOARD,
     });
 
-    expect(findTaskColumn(next.columns, TASK)).toBe("done");
+    expect(laneOf(next, TASK)).toBe("done");
     expect(next.session.currentTaskId).toBeUndefined();
     expect(next.session.state).toBe("active");
   });
@@ -700,7 +710,7 @@ describe("session events", () => {
       boardId: BOARD,
     });
 
-    expect(findTaskColumn(next.columns, TASK)).toBe("approve");
+    expect(laneOf(next, TASK)).toBe("approve");
     expect(columnOf(next, "approve")[0].plan).toBe("the plan");
   });
 
@@ -719,7 +729,7 @@ describe("session events", () => {
       error: "exploded",
     });
 
-    expect(findTaskColumn(next.columns, TASK)).toBe("done");
+    expect(laneOf(next, TASK)).toBe("done");
     expect(next.session.state).toBe("error");
     expect(next.session.errorMessage).toBe("exploded");
     expect(next.session.currentTaskId).toBeUndefined();
@@ -733,7 +743,7 @@ describe("session events", () => {
       error: "no activity",
     });
 
-    expect(findTaskColumn(next.columns, TASK)).toBe("done");
+    expect(laneOf(next, TASK)).toBe("done");
     expect(next.session.state).toBe("active");
     expect(next.session.errorMessage).toBe("no activity");
   });
@@ -836,51 +846,107 @@ describe("workspace-scoped events", () => {
   });
 });
 
-describe("helpers", () => {
-  test("formatElapsed formats minutes and seconds", () => {
-    expect(formatElapsed(T0, T0)).toBe("0m 00s");
-    expect(formatElapsed(T0, T0 + 5000)).toBe("0m 05s");
-    expect(formatElapsed(T0, T0 + 125_000)).toBe("2m 05s");
-  });
-
-  test("formatElapsed clamps negative drift to zero", () => {
-    expect(formatElapsed(T0, T0 - 10_000)).toBe("0m 00s");
-  });
-
-  test("moveCard does not duplicate a card already in the target lane", () => {
+describe("formatting via the public API", () => {
+  function elapsedAfter(ts: number): string | undefined {
     const board = makeBoard();
-    const moved = moveCard(board.columns, TASK, "in_progress");
-    expect(moved).toBe(board.columns);
+    const next = applyEventToBoard(board, {
+      type: "run.started",
+      ts,
+      boardId: BOARD,
+      taskId: TASK,
+      model: "claude",
+      startedAt: T0,
+      taskTitle: "Fix the bug",
+    });
+    return columnOf(next, "in_progress")[0].run?.elapsed;
+  }
+
+  test("elapsed is formatted from the event timestamp", () => {
+    expect(elapsedAfter(T0)).toBe("0m 00s");
+    expect(elapsedAfter(T0 + 5000)).toBe("0m 05s");
+    expect(elapsedAfter(T0 + 125_000)).toBe("2m 05s");
   });
 
-  test("extractPlanFromSteps joins response and thinking content", () => {
-    const plan = extractPlanFromSteps([
-      {
-        id: "a",
-        kind: "thinking",
-        status: "done",
-        summary: "s",
-        content: "one",
-      },
-      { id: "b", kind: "file_edit", status: "done", summary: "edit" },
-      {
-        id: "c",
-        kind: "response",
-        status: "done",
-        summary: "s",
-        content: "two",
-      },
-    ]);
-
-    expect(plan).toBe("one\n\ntwo");
+  test("negative clock drift clamps to zero", () => {
+    expect(elapsedAfter(T0 - 10_000)).toBe("0m 00s");
   });
 
-  test("extractPlanFromSteps returns null when there is nothing to plan", () => {
-    expect(extractPlanFromSteps([])).toBeNull();
-    expect(
-      extractPlanFromSteps([
-        { id: "a", kind: "file_edit", status: "done", summary: "edit" },
-      ])
-    ).toBeNull();
+  test("a manual-review idle extracts the plan from response content", () => {
+    const board = makeBoard({
+      reviewMode: "manual",
+      columns: {
+        queue: [],
+        in_progress: [
+          makeTask({
+            run: {
+              elapsed: "0m 00s",
+              model: "claude",
+              startedAt: T0,
+              steps: [
+                {
+                  id: "a",
+                  kind: "thinking",
+                  status: "done",
+                  summary: "s",
+                  content: "one",
+                },
+                { id: "b", kind: "file_edit", status: "done", summary: "edit" },
+                {
+                  id: "c",
+                  kind: "response",
+                  status: "done",
+                  summary: "s",
+                  content: "two",
+                },
+              ],
+              taskTitle: "Fix the bug",
+            },
+          }),
+        ],
+        approve: [],
+        done: [],
+      },
+    });
+
+    const next = applyEventToBoard(board, {
+      type: "session.idle",
+      ts: T0,
+      boardId: BOARD,
+    });
+
+    // file_edit steps are excluded from plan text; response/thinking are joined
+    expect(columnOf(next, "approve")[0].plan).toBe("one\n\ntwo");
+  });
+
+  test("a manual-review idle with no prose yields no plan", () => {
+    const board = makeBoard({
+      reviewMode: "manual",
+      columns: {
+        queue: [],
+        in_progress: [
+          makeTask({
+            run: {
+              elapsed: "0m 00s",
+              model: "claude",
+              startedAt: T0,
+              steps: [
+                { id: "b", kind: "file_edit", status: "done", summary: "edit" },
+              ],
+              taskTitle: "Fix the bug",
+            },
+          }),
+        ],
+        approve: [],
+        done: [],
+      },
+    });
+
+    const next = applyEventToBoard(board, {
+      type: "session.idle",
+      ts: T0,
+      boardId: BOARD,
+    });
+
+    expect(columnOf(next, "approve")[0].plan).toBeUndefined();
   });
 });

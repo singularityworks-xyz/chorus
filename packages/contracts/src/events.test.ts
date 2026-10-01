@@ -299,57 +299,67 @@ describe("board scoping", () => {
 });
 
 describe("control vs coalescible events", () => {
-  const controlTypes: WorkspaceEvent["type"][] = [
-    "board.created",
-    "board.removed",
-    "board.selected",
-    "board.review_mode_set",
-    "board.model_set",
-    "board.columns_replaced",
-    "board.session_patched",
-    "card.created",
-    "card.queued",
-    "card.started",
-    "card.moved",
-    "card.waiting_for_approval",
-    "card.completed",
-    "card.failed",
-    "session.attached",
-    "session.starting",
-    "session.idle",
-    "session.error",
-    "session.timeout",
+  /**
+   * The two types allowed to be batched. Everything else MUST be control, so an
+   * event added later without updating `COALESCIBLE_EVENT_TYPES` is delivered
+   * immediately instead of becoming droppable under backpressure.
+   */
+  const EXPECTED_COALESCIBLE: WorkspaceEvent["type"][] = [
+    "step.upserted",
+    "step.delta_appended",
   ];
 
-  test("every control event is classified as control", () => {
-    for (const type of controlTypes) {
-      expect(isControlEvent(EVENT_CORPUS[type])).toBe(true);
-      expect(isCoalescibleEvent(EVENT_CORPUS[type])).toBe(false);
-    }
+  test("exactly the step events are coalescible", () => {
+    const coalescible = ALL_TYPES.filter((type) =>
+      isCoalescibleEvent(EVENT_CORPUS[type])
+    );
+
+    expect(coalescible.sort()).toEqual([...EXPECTED_COALESCIBLE].sort());
   });
 
-  test("step and run events are coalescible", () => {
-    for (const type of [
-      "step.upserted",
-      "step.delta_appended",
-      "run.started",
-    ] as const) {
-      expect(isControlEvent(EVENT_CORPUS[type])).toBe(false);
-      expect(isCoalescibleEvent(EVENT_CORPUS[type])).toBe(true);
-    }
+  test("every non-coalescible event is classified as control", () => {
+    // This is the table that actually protects Phase 3. It previously asserted
+    // only that the two predicates disagreed — which is arithmetic, since
+    // isCoalescibleEvent is defined as !isControlEvent, so it could never fail.
+    const control = ALL_TYPES.filter((type) =>
+      isControlEvent(EVENT_CORPUS[type])
+    );
+
+    expect(control.sort()).toEqual(
+      ALL_TYPES.filter((t) => !EXPECTED_COALESCIBLE.includes(t)).sort()
+    );
+  });
+
+  test("run.started is a control event, not batchable", () => {
+    // It flips session.state to active and binds currentTaskId. Batched or
+    // dropped, the card renders stuck with no run.
+    expect(isControlEvent(EVENT_CORPUS["run.started"])).toBe(true);
+    expect(isCoalescibleEvent(EVENT_CORPUS["run.started"])).toBe(false);
+  });
+
+  test("a plan update is a control event, not batchable", () => {
+    // Reachable from the board.task.plan.update mutation. Batchable, it would
+    // be dropped in critical-only mode and the card would lose its plan text.
+    expect(isControlEvent(EVENT_CORPUS["board.task_plan_updated"])).toBe(true);
   });
 
   test("an approval request is never coalescible", () => {
     expect(isControlEvent(EVENT_CORPUS["card.waiting_for_approval"])).toBe(
       true
     );
+    expect(isCoalescibleEvent(EVENT_CORPUS["card.waiting_for_approval"])).toBe(
+      false
+    );
   });
 
-  test("every event variant is exactly one of control or coalescible", () => {
-    for (const type of ALL_TYPES) {
-      const control = isControlEvent(EVENT_CORPUS[type]);
-      const coalescible = isCoalescibleEvent(EVENT_CORPUS[type]);
-      expect(control).not.toBe(coalescible);
+  test("workspace-scoped preference events are control", () => {
+    for (const type of [
+      "preference.composer_hint_dismissed",
+      "preference.speech_voice_set",
+      "preference.board_view_mode_set",
+      "preference.recent_model_added",
+    ] as const) {
+      expect(isControlEvent(EVENT_CORPUS[type])).toBe(true);
     }
   });
 });
@@ -409,6 +419,86 @@ describe("wire envelopes", () => {
       data: versioned,
     });
     expect(message.seq).toBe(2087);
+  });
+
+  test("a snapshot with a malformed board is rejected", () => {
+    // The snapshot is the client's entire resume path; `z.unknown()` here would
+    // hand arbitrary shapes straight to the UI.
+    expect(() =>
+      snapshotMessageSchema.parse({
+        type: "snapshot",
+        seq: 1,
+        data: {
+          boards: [{ boardId: "b1" }],
+          preferences: {},
+          selectedBoardId: "b1",
+          v: 1,
+        },
+      })
+    ).toThrow();
+  });
+
+  test("a snapshot with malformed preferences is rejected", () => {
+    expect(() =>
+      snapshotMessageSchema.parse({
+        type: "snapshot",
+        seq: 1,
+        data: {
+          boards: [board],
+          preferences: { recentlyUsedModels: "nope" },
+          selectedBoardId: "b1",
+          v: 1,
+        },
+      })
+    ).toThrow();
+  });
+
+  test("rejects an envelope whose boardId disagrees with the event", () => {
+    // Phase 3 fans out by the envelope value. A mismatch routes the patch to
+    // the wrong board's subscribers and is unrecoverable client-side.
+    expect(() =>
+      sequencedEventSchema.parse({
+        type: "event",
+        seq: 1042,
+        ts: TS,
+        boardId: "board-other",
+        event: EVENT_CORPUS["card.started"],
+      })
+    ).toThrow();
+  });
+
+  test("rejects an envelope claiming a board for a workspace-scoped event", () => {
+    expect(() =>
+      sequencedEventSchema.parse({
+        type: "event",
+        seq: 1043,
+        ts: TS,
+        boardId: "board-1",
+        event: EVENT_CORPUS["preference.speech_voice_set"],
+      })
+    ).toThrow();
+  });
+
+  test("accepts a workspace-scoped envelope with a null boardId", () => {
+    const message = sequencedEventSchema.parse({
+      type: "event",
+      seq: 1044,
+      ts: TS,
+      boardId: null,
+      event: EVENT_CORPUS["preference.speech_voice_set"],
+    });
+    expect(message.boardId).toBeNull();
+  });
+
+  test("accepts a deselected board.selected envelope", () => {
+    const message = sequencedEventSchema.parse({
+      type: "event",
+      seq: 1045,
+      ts: TS,
+      boardId: null,
+      event: { type: "board.selected", ts: TS, boardId: null },
+    });
+    expect(message.boardId).toBeNull();
   });
 
   test("rejects a snapshot with an unknown version", () => {

@@ -288,8 +288,24 @@ export const BOARD_SCOPED_EVENT_TYPES = [
   "session.timeout",
 ] as const satisfies readonly WorkspaceEventType[];
 
+const BOARD_SCOPED_EVENT_TYPE_SET: ReadonlySet<string> = new Set(
+  BOARD_SCOPED_EVENT_TYPES
+);
+
+/**
+ * Narrows to `BoardScopedEvent`.
+ *
+ * Membership is checked against `BOARD_SCOPED_EVENT_TYPES` rather than merely
+ * testing for a `boardId` key, because `board.selected` also carries a
+ * `boardId` while being workspace-scoped (its id is `string | null`, so it is
+ * excluded from `BoardScopedEvent`). A key-presence test would wrongly claim it.
+ */
 export function isBoardScopedEvent(
   event: WorkspaceEvent
 ): event is BoardScopedEvent {
-  return "boardId" in event && event.boardId !== null;
+  return (
+    "boardId" in event &&
+    event.boardId !== null &&
+    BOARD_SCOPED_EVENT_TYPE_SET.has(event.type)
+  );
 }

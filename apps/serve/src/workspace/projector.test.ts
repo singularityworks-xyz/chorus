@@ -424,6 +424,40 @@ describe("streamed deltas", () => {
     expect(stepsOf(next)[0].content).toBe("orphan tokens");
   });
 
+  test("orphan deltas for one message accumulate into a single step", () => {
+    let board = makeBoard();
+
+    for (const chunk of ["alpha ", "beta ", "gamma"]) {
+      board = applyAgentEventToBoard(
+        board,
+        agentEvent({
+          activity: "writing",
+          delta: chunk,
+          messageID: "msg_orphan",
+        })
+      );
+    }
+
+    expect(stepsOf(board)).toHaveLength(1);
+    expect(stepsOf(board)[0].content).toBe("alpha beta gamma");
+  });
+
+  test("orphan delta ids are reproducible so log replay matches", () => {
+    const event = agentEvent({
+      activity: "writing",
+      delta: "x",
+      messageID: "msg_replay",
+    });
+
+    const [first] = toWorkspaceEvents(event, { boardId: BOARD, taskId: TASK });
+    const [second] = toWorkspaceEvents(event, { boardId: BOARD, taskId: TASK });
+
+    expect(first.type).toBe("step.delta_appended");
+    expect(first.type === "step.delta_appended" && first.stepId).toBe(
+      second.type === "step.delta_appended" && second.stepId
+    );
+  });
+
   test("step ids are stable across the stream", () => {
     const board = boardWithStreamingStep("a");
     const ids = stepsOf(board).map((step) => step.id);

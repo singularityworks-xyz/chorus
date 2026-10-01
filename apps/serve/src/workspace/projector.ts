@@ -135,21 +135,18 @@ export function toWorkspaceEvents(
       delta: event.delta,
     });
   } else if (event.delta) {
-    // A delta with no part scope cannot be merged into an existing step. Open a
-    // response step that carries the text outright — routing it through
-    // `buildStep` would key `content` off `event.text` and silently drop it.
+    // A delta with no part scope cannot target a part-identified step. Route it
+    // to a stable synthetic id keyed on the message so consecutive orphans
+    // collapse into one step instead of fragmenting, and so replaying the log
+    // reconstructs the same steps. `step.delta_appended` opens the step when it
+    // is missing, so the first orphan delta is not lost.
     events.push({
-      type: "step.upserted",
+      type: "step.delta_appended",
       boardId: scope.boardId,
       taskId: scope.taskId,
       ts,
-      step: {
-        id: `${event.type}-${ts}`,
-        kind: "response",
-        status: "running",
-        summary: event.delta.slice(0, SUMMARY_MAX),
-        content: event.delta,
-      },
+      stepId: `orphan-${event.messageID ?? event.sessionID ?? "stream"}`,
+      delta: event.delta,
     });
   } else {
     const step = buildStep(event);

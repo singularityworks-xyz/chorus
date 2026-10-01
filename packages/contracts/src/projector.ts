@@ -12,7 +12,7 @@ import type {
   WorkspaceColumnId,
   WorkspaceEvent,
 } from "./events";
-import { WORKSPACE_COLUMN_IDS } from "./events";
+import { isBoardScopedEvent, WORKSPACE_COLUMN_IDS } from "./events";
 
 /**
  * The single shared projector (spec §4 / plan Phase 1).
@@ -78,7 +78,7 @@ export function findTaskInColumns(
   return null;
 }
 
-export function findTaskColumn(
+function findTaskColumn(
   columns: Columns,
   taskId: string
 ): WorkspaceColumnId | null {
@@ -107,7 +107,7 @@ function makeLabelVariant(columnId: WorkspaceColumnId): Task["labelVariant"] {
  * Moves a card between lanes. Returns the original object when the card is
  * absent or already in the target lane so callers can cheaply detect no-ops.
  */
-export function moveCard(
+function moveCard(
   columns: Columns,
   taskId: string,
   targetColumn: WorkspaceColumnId
@@ -136,7 +136,7 @@ export function moveCard(
   return next;
 }
 
-export function formatElapsed(startedAt: number, now: number): string {
+function formatElapsed(startedAt: number, now: number): string {
   const elapsedMs = Math.max(now - startedAt, 0);
   const totalSeconds = Math.floor(elapsedMs / 1000);
   const minutes = Math.floor(totalSeconds / 60);
@@ -192,7 +192,14 @@ function upsertStep(
   return { ...run, elapsed: formatElapsed(run.startedAt ?? now, now), steps };
 }
 
-/** Appends streamed text to an existing step. No-op when the step is gone. */
+/**
+ * Appends streamed text to a step, opening the step if it does not exist yet.
+ *
+ * Creating on demand matters: a delta can legitimately arrive before the event
+ * that would have upserted its step (a stream starting mid-part, or a replay
+ * resuming between the two log entries). Dropping it loses the first tokens of
+ * the response, which is exactly what the pre-Phase-1 copy did.
+ */
 function appendDelta(
   run: AgentRunContext,
   stepId: string,
@@ -201,7 +208,20 @@ function appendDelta(
 ): AgentRunContext {
   const index = run.steps.findIndex((entry) => entry.id === stepId);
   if (index === -1) {
-    return run;
+    return {
+      ...run,
+      elapsed: formatElapsed(run.startedAt ?? now, now),
+      steps: [
+        ...run.steps,
+        {
+          id: stepId,
+          kind: "response",
+          status: "running",
+          summary: delta.slice(0, SUMMARY_MAX),
+          content: delta,
+        },
+      ],
+    };
   }
 
   const existing = run.steps[index];
@@ -221,7 +241,7 @@ function appendDelta(
   return { ...run, elapsed: formatElapsed(run.startedAt ?? now, now), steps };
 }
 
-export function extractPlanFromSteps(steps: AgentStep[]): string | null {
+function extractPlanFromSteps(steps: AgentStep[]): string | null {
   const responseSteps = steps.filter(
     (step) => step.kind === "response" || step.kind === "thinking"
   );
@@ -302,6 +322,11 @@ type CardRunStepEvent = Extract<
   { type: `card.${string}` | `run.${string}` | `step.${string}` }
 >;
 
+type BoardLifecycleEvent = Extract<
+  BoardScopedEvent,
+  { type: `board.${string}` }
+>;
+
 function isSessionScopedEvent(
   event: BoardScopedEvent
 ): event is SessionScopedEvent {
@@ -323,9 +348,26 @@ function isCardRunStepEvent(
  * reference when the event does not apply, which lets callers detect no-ops by
  * reference equality and keeps React re-renders cheap.
  */
+/**
+ * Compile-time exhaustiveness for the handler switches.
+ *
+ * Passing anything other than `never` here is a type error, so adding a
+ * `WorkspaceEvent` variant without routing it through a handler fails the
+ * build instead of silently falling through to `return board`. Type aliases
+ * were tried first and proved useless: TypeScript checks an *unused* alias's
+ * constraint lazily, so `Assert<Exclude<...> extends never ? true : false>`
+ * passed even with a deliberately incomplete handler list.
+ */
+function unhandledBoardEvent(
+  _event: never,
+  board: WorkspaceBoard
+): WorkspaceBoard {
+  return board;
+}
+
 function applyBoardScopedEvent(
   board: WorkspaceBoard,
-  event: BoardScopedEvent
+  event: BoardLifecycleEvent
 ): WorkspaceBoard {
   switch (event.type) {
     // ── board lifecycle ──
@@ -360,7 +402,7 @@ function applyBoardScopedEvent(
       return board;
 
     default:
-      return board;
+      return unhandledBoardEvent(event, board);
   }
 }
 
@@ -489,7 +531,7 @@ function applyCardEvent(
       );
 
     default:
-      return board;
+      return unhandledBoardEvent(event, board);
   }
 }
 
@@ -598,21 +640,19 @@ export function applyEventToBoard(
   board: WorkspaceBoard,
   event: WorkspaceEvent
 ): WorkspaceBoard {
-  if (!("boardId" in event) || event.boardId !== board.boardId) {
+  if (!isBoardScopedEvent(event) || event.boardId !== board.boardId) {
     return board;
   }
 
-  const scoped = event as BoardScopedEvent;
-
-  if (isSessionScopedEvent(scoped)) {
-    return applySessionEvent(board, scoped);
+  if (isSessionScopedEvent(event)) {
+    return applySessionEvent(board, event);
   }
 
-  if (isCardRunStepEvent(scoped)) {
-    return applyCardEvent(board, scoped, scoped.ts);
+  if (isCardRunStepEvent(event)) {
+    return applyCardEvent(board, event, event.ts);
   }
 
-  return applyBoardScopedEvent(board, scoped);
+  return applyBoardScopedEvent(board, event);
 }
 
 /**

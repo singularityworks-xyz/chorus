@@ -1,5 +1,9 @@
 import { z } from "zod";
-import type { WorkspaceSnapshotInput } from "./base";
+import {
+  type WorkspaceSnapshotInput,
+  workspaceBoardSchema,
+  workspacePreferencesSchema,
+} from "./base";
 import type { WorkspaceEvent } from "./events";
 import { WORKSPACE_SNAPSHOT_VERSION, workspaceEventSchema } from "./events";
 
@@ -49,59 +53,18 @@ export type ClientPong = z.infer<typeof clientPongSchema>;
 export type ViewportSync = z.infer<typeof viewportSyncSchema>;
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
 
-// ── Server → client ─────────────────────────────────────────────────────────
-
-export const serverReadySchema = z.object({
-  head: z.number().int().nonnegative(),
-  type: z.literal("ready"),
-});
+// ── Snapshot blob ───────────────────────────────────────────────────────────
 
 /**
- * One sequenced event. `boardId` rides along so the hub can fan out per-board
- * deltas without re-diffing the workspace snapshot.
+ * The versioned workspace blob a `snapshot` message carries (spec §5, `v: 1`).
+ *
+ * Fully typed rather than `unknown`: this is the client's entire resume path,
+ * so an unvalidated snapshot would hand arbitrary shapes straight to the UI.
+ * Bump `WORKSPACE_SNAPSHOT_VERSION` on any incompatible change.
  */
-export const sequencedEventSchema = z.object({
-  boardId: z.string().min(1).nullable(),
-  event: workspaceEventSchema,
-  seq: z.number().int().nonnegative(),
-  ts: z.number().int().nonnegative(),
-  type: z.literal("event"),
-});
-
-export const snapshotMessageSchema = z.object({
-  data: z.object({
-    boards: z.array(z.unknown()),
-    preferences: z.unknown(),
-    selectedBoardId: z.string().min(1).nullable(),
-    v: z.literal(WORKSPACE_SNAPSHOT_VERSION),
-  }),
-  seq: z.number().int().nonnegative(),
-  type: z.literal("snapshot"),
-});
-
-export const serverErrorSchema = z.object({
-  detail: z.string().optional(),
-  message: z.string(),
-  type: z.literal("error"),
-});
-
-export const serverMessageSchema = z.discriminatedUnion("type", [
-  serverReadySchema,
-  sequencedEventSchema,
-  snapshotMessageSchema,
-  serverErrorSchema,
-]);
-
-export type ServerReady = z.infer<typeof serverReadySchema>;
-export type SequencedEvent = z.infer<typeof sequencedEventSchema>;
-export type SnapshotMessage = z.infer<typeof snapshotMessageSchema>;
-export type ServerError = z.infer<typeof serverErrorSchema>;
-export type ServerMessage = z.infer<typeof serverMessageSchema>;
-
-/** The versioned blob a `snapshot` message carries (spec §5, `v: 1`). */
 export const versionedSnapshotSchema = z.object({
-  boards: z.array(z.unknown()),
-  preferences: z.unknown(),
+  boards: workspaceBoardSchema.array(),
+  preferences: workspacePreferencesSchema,
   selectedBoardId: z.string().min(1).nullable(),
   v: z.literal(WORKSPACE_SNAPSHOT_VERSION),
 });
@@ -119,44 +82,100 @@ export function createVersionedSnapshot(
   };
 }
 
+// ── Server → client ─────────────────────────────────────────────────────────
+
+export const serverReadySchema = z.object({
+  head: z.number().int().nonnegative(),
+  type: z.literal("ready"),
+});
+
+/** The board a patch belongs to, or null when the patch is workspace-scoped. */
+export function boardIdOfEvent(event: WorkspaceEvent): string | null {
+  return "boardId" in event ? event.boardId : null;
+}
+
+/**
+ * One sequenced event. `boardId` duplicates the event's own board so the hub
+ * can fan out per-board deltas without re-diffing the workspace snapshot — so
+ * the two must agree, and the schema refuses to build a message where they do
+ * not. A mismatch would route a patch to the wrong board's subscribers, which
+ * is unrecoverable for the client.
+ */
+export const sequencedEventSchema = z
+  .object({
+    boardId: z.string().min(1).nullable(),
+    event: workspaceEventSchema,
+    seq: z.number().int().nonnegative(),
+    ts: z.number().int().nonnegative(),
+    type: z.literal("event"),
+  })
+  .superRefine((message, ctx) => {
+    const actual = boardIdOfEvent(message.event);
+    if (message.boardId !== actual) {
+      ctx.addIssue({
+        code: "custom",
+        message: `envelope boardId ${String(message.boardId)} does not match event board ${String(actual)}`,
+        path: ["boardId"],
+      });
+    }
+  });
+
+export const snapshotMessageSchema = z.object({
+  data: versionedSnapshotSchema,
+  seq: z.number().int().nonnegative(),
+  type: z.literal("snapshot"),
+});
+
+export const serverErrorSchema = z.object({
+  detail: z.string().optional(),
+  message: z.string(),
+  type: z.literal("error"),
+});
+
+/**
+ * Union of every downstream message. Each variant is parsed individually by the
+ * hub, so this exists for tests and for any client that accepts all shapes.
+ */
+export const serverMessageSchema = z.union([
+  serverReadySchema,
+  sequencedEventSchema,
+  snapshotMessageSchema,
+  serverErrorSchema,
+]);
+
+export type ServerReady = z.infer<typeof serverReadySchema>;
+export type SequencedEvent = z.infer<typeof sequencedEventSchema>;
+export type SnapshotMessage = z.infer<typeof snapshotMessageSchema>;
+export type ServerError = z.infer<typeof serverErrorSchema>;
+export type ServerMessage = z.infer<typeof serverMessageSchema>;
+
 /** WebSocket close codes used by the hub. */
 export const WS_CLOSE_UNAUTHORIZED = 4401;
 export const WS_CLOSE_RATE_LIMITED = 4429;
 
-// ── Control events ──────────────────────────────────────────────────────────
+// ── Control vs coalescible ──────────────────────────────────────────────────
 
 /**
- * Control events must bypass coalescing (plan Phase 3): a pending approval or
- * a state transition is worthless if it arrives 2 s late on a phone radio.
- * Step/response deltas are the only things worth batching.
+ * Only high-frequency step traffic is coalescible. Everything else is a
+ * **control** event and is delivered immediately (plan Phase 3): a pending
+ * approval, a lane transition, or a session-state flip is worthless if it
+ * arrives 2 s late on a phone radio — and worthless a second time if
+ * critical-only backpressure drops it.
+ *
+ * The classification is deliberately inverted: it enumerates the two types that
+ * may be batched instead of the twenty-odd that may not. A new event type added
+ * later therefore defaults to *control* (delivered immediately) rather than
+ * silently becoming coalescible and droppable under load.
  */
-const CONTROL_EVENT_TYPES = new Set<WorkspaceEvent["type"]>([
-  "board.created",
-  "board.removed",
-  "board.selected",
-  "board.review_mode_set",
-  "board.model_set",
-  "board.columns_replaced",
-  "board.session_patched",
-  "card.created",
-  "card.queued",
-  "card.started",
-  "card.moved",
-  "card.waiting_for_approval",
-  "card.completed",
-  "card.failed",
-  "session.attached",
-  "session.starting",
-  "session.idle",
-  "session.error",
-  "session.timeout",
+const COALESCIBLE_EVENT_TYPES = new Set<WorkspaceEvent["type"]>([
+  "step.upserted",
+  "step.delta_appended",
 ]);
 
-export function isControlEvent(event: WorkspaceEvent): boolean {
-  return CONTROL_EVENT_TYPES.has(event.type);
+export function isCoalescibleEvent(event: WorkspaceEvent): boolean {
+  return COALESCIBLE_EVENT_TYPES.has(event.type);
 }
 
-/** True when the client should keep buffered deltas for this event. */
-export function isCoalescibleEvent(event: WorkspaceEvent): boolean {
-  return !isControlEvent(event);
+export function isControlEvent(event: WorkspaceEvent): boolean {
+  return !isCoalescibleEvent(event);
 }
