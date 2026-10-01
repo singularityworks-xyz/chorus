@@ -1,19 +1,64 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+// biome-ignore-all lint/suspicious/useAwait: every public write returns the serial queue's promise; async is the contract callers rely on
+import { access, readFile, rename } from "node:fs/promises";
 import {
+  applyEventToBoard,
   type BoardSeed,
   type WorkspaceBoard,
+  type WorkspaceEvent,
   type WorkspaceHistoryEntry,
   type WorkspaceMutation,
   type WorkspaceSnapshot,
   type WorkspaceSnapshotInput,
-  workspaceSnapshotInputSchema,
+  workspaceBoardSchema,
   workspaceSnapshotSchema,
 } from "@chorus/contracts";
+import { createLogger } from "@chorus/logger";
 import type { NormalizedAgentEvent } from "@chorus/oc-adapter";
-import { applyAgentEventToBoard, attachSessionToBoard } from "./projector";
+import { ChorusDatabase, type StoredEvent } from "./db";
+import { attachSessionToBoard, toWorkspaceEvents } from "./projector";
+import {
+  DEFAULT_RETENTION_DAYS,
+  isOverSizeCap,
+  MUTATION_ID_RETENTION_MS,
+  type RetentionOptions,
+  retentionCutoff,
+  shouldSnapshot,
+  stripTerminalRunDetails,
+} from "./retention";
 
-function createHistoryId(board: Pick<WorkspaceBoard, "repo">) {
+const logger = createLogger(
+  {
+    env: process.env.NODE_ENV === "production" ? "production" : "development",
+  },
+  "STORE"
+);
+
+const SNAPSHOT_BLOB_VERSION = 1;
+
+/**
+ * Result of a committed mutation or agent event.
+ *
+ * Pre-implementation decision #1 specified `{ boardId, event }`. This carries an
+ * `events` array instead because one agent event legitimately expands into
+ * several domain events (a completed tool call appends a step *and* moves the
+ * card). Collapsing that to a single event would either drop the step or
+ * require synthesising a fake one. Client mutations are still exactly one
+ * event — enforced by `mutation-map.test.ts` and asserted here at runtime.
+ */
+export interface StoreCommit {
+  boardId: string | null;
+  /** Appended events, oldest first. Length 1 for every client mutation. */
+  events: WorkspaceEvent[];
+  firstSeq: number;
+  lastSeq: number;
+}
+
+const BOARD_X_OFFSET = 180;
+const BOARD_Y_OFFSET = 120;
+const BOARD_X_START = 120;
+const BOARD_Y_START = 120;
+
+function createHistoryId(board: Pick<WorkspaceBoard, "repo">): string {
   return board.repo.projectId ?? board.repo.worktree ?? board.repo.directory;
 }
 
@@ -26,17 +71,17 @@ function createHistoryEntry(board: WorkspaceBoard): WorkspaceHistoryEntry {
   };
 }
 
-function sortHistory(entries: WorkspaceHistoryEntry[]) {
+function sortHistory(
+  entries: WorkspaceHistoryEntry[]
+): WorkspaceHistoryEntry[] {
   return [...entries].sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
 }
 
-const BOARD_X_OFFSET = 180;
-const BOARD_Y_OFFSET = 120;
-const BOARD_X_START = 120;
-const BOARD_Y_START = 120;
-
 function createBoardFromSeed(seed: BoardSeed, index: number): WorkspaceBoard {
-  return {
+  // Parse so zod defaults (repo.sandboxes, board.reviewMode) are applied here
+  // rather than appearing only after a reload. In-memory state has to be the
+  // same shape a rehydrated snapshot produces, or replay-equality never holds.
+  return workspaceBoardSchema.parse({
     boardId: crypto.randomUUID(),
     title: seed.title,
     repo: seed.repo,
@@ -44,59 +89,139 @@ function createBoardFromSeed(seed: BoardSeed, index: number): WorkspaceBoard {
       x: BOARD_X_START + index * BOARD_X_OFFSET,
       y: BOARD_Y_START + index * BOARD_Y_OFFSET,
     },
-    columns: {
-      queue: [],
-      in_progress: [],
-      approve: [],
-      done: [],
-    },
+    columns: { queue: [], in_progress: [], approve: [], done: [] },
     reviewMode: "auto",
     modelSelection: null,
-    session: {
-      state: "uninitialized",
-    },
-  };
+    session: { state: "uninitialized" },
+  });
 }
 
+/**
+ * Drops `undefined`-valued keys so in-memory state matches what a snapshot
+ * round-trip yields. Without this, a field explicitly set to `undefined`
+ * (e.g. clearing `session.errorMessage`) survives in memory but disappears on
+ * reload, and replay-equality assertions fail on a semantic no-op.
+ */
+function canonical<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+const EMPTY_PREFERENCES: WorkspaceSnapshotInput["preferences"] = {
+  boardViewMode: "relaxed",
+  composerHintDismissed: false,
+  recentlyUsedModels: [],
+  speechVoiceId: null,
+};
+
+interface PersistedBlob {
+  snapshot: WorkspaceSnapshot;
+  v: number;
+}
+
+/**
+ * Single-writer, append-only workspace store backed by SQLite (spec §5).
+ *
+ * Three invariants this class exists to hold:
+ *
+ * 1. **Commit then swap.** A candidate state is computed, appended inside an
+ *    IMMEDIATE transaction, and only assigned to memory once the write
+ *    succeeds. A failed INSERT leaves memory untouched, so in-memory state can
+ *    never run ahead of the durable log. (The pre-Phase-2 store wrote the whole
+ *    snapshot to JSON and silently reset to empty on a parse failure.)
+ * 2. **One writer.** Every state change chains onto a single promise, so there
+ *    is no read-modify-write race between mutations, agent events, and session
+ *    updates. `Promise.all` over state-mutating work is never correct here.
+ * 3. **One projection path.** Live application and boot replay both go through
+ *    `#project`, so a state reconstructed from the log is identical to one built
+ *    live — which is only true because the shared projector is pure.
+ */
 export class WorkspaceStore {
-  readonly #filePath: string;
-  readonly #processedMutationIds = new Set<string>();
+  readonly #db: ChorusDatabase;
+  readonly #options: Required<RetentionOptions>;
+  readonly #queue: { promise: Promise<void> } = { promise: Promise.resolve() };
+
   #snapshot: WorkspaceSnapshot = {
     boards: [],
-    preferences: {
-      boardViewMode: "relaxed",
-      composerHintDismissed: false,
-      recentlyUsedModels: [],
-      speechVoiceId: null,
-    },
+    preferences: EMPTY_PREFERENCES,
     previousWorkspaces: [],
     revision: 0,
     selectedBoardId: null,
   };
 
-  constructor(filePath: string) {
-    this.#filePath = filePath;
+  /** Events appended since the last snapshot, for the N-event snapshot trigger. */
+  #eventsSinceSnapshot = 0;
+
+  constructor(dataDir: string, options: RetentionOptions = {}) {
+    this.#db = new ChorusDatabase(dataDir);
+    this.#options = {
+      dbSizeCapMb: options.dbSizeCapMb ?? 512,
+      retentionDays: options.retentionDays ?? DEFAULT_RETENTION_DAYS,
+      snapshotInterval: options.snapshotInterval ?? 1000,
+    };
   }
 
-  async load(): Promise<void> {
-    try {
-      const contents = await readFile(this.#filePath, "utf8");
-      this.#snapshot = workspaceSnapshotSchema.parse(JSON.parse(contents));
-    } catch {
-      this.#snapshot = {
-        boards: [],
-        preferences: {
-          boardViewMode: "relaxed",
-          composerHintDismissed: false,
-          recentlyUsedModels: [],
-          speechVoiceId: null,
-        },
-        previousWorkspaces: [],
-        revision: 0,
-        selectedBoardId: null,
-      };
+  // ── lifecycle ─────────────────────────────────────────────────────────────
+
+  /**
+   * Rehydrates from the newest snapshot plus the tail of the log, then prunes
+   * stale idempotency keys.
+   *
+   * `legacySnapshotPath` triggers the one-shot `workspace.json` import. Corrupt
+   * legacy JSON throws with the path rather than falling back to an empty
+   * workspace — silently starting empty would look identical to data loss.
+   */
+  async load(legacySnapshotPath?: string): Promise<void> {
+    this.#db.pruneMutationIds(Date.now() - MUTATION_ID_RETENTION_MS);
+
+    const snapshot = this.#db.latestSnapshot();
+
+    if (snapshot) {
+      this.#snapshot = this.#parseBlob(snapshot.blob);
+      const tail = this.#db.readEventsSince(snapshot.seq);
+      for (const stored of tail) {
+        this.#snapshot = this.#project(this.#snapshot, this.#decode(stored));
+      }
+      this.#eventsSinceSnapshot = tail.length;
+      logger.info("workspace-rehydrated", {
+        fromSnapshotSeq: snapshot.seq,
+        replayed: tail.length,
+        headSeq: this.#db.headSeq(),
+      });
+      return;
     }
+
+    const imported = legacySnapshotPath
+      ? await this.#importLegacySnapshot(legacySnapshotPath)
+      : null;
+
+    if (imported) {
+      this.#snapshot = imported;
+      logger.info("workspace-imported-legacy-snapshot", {
+        boards: imported.boards.length,
+      });
+    }
+
+    await this.writeSnapshot();
   }
+
+  /** Resolves when every queued state change has committed. */
+  async drain(): Promise<void> {
+    await this.#enqueue(async () => undefined);
+  }
+
+  /**
+   * Order matters (spec §5): drain the queue, write a final snapshot so boot
+   * does not replay a long tail, then fold the WAL back so a cold copy of
+   * `chorus.db` is a complete backup.
+   */
+  async close(): Promise<void> {
+    await this.drain();
+    await this.writeSnapshot();
+    this.#db.checkpointTruncate();
+    this.#db.close();
+  }
+
+  // ── reads ─────────────────────────────────────────────────────────────────
 
   getSnapshot(): WorkspaceSnapshot {
     return structuredClone(this.#snapshot);
@@ -106,366 +231,738 @@ export class WorkspaceStore {
     return this.#snapshot.boards.find((board) => board.boardId === boardId);
   }
 
-  async replaceSnapshot(
-    input: WorkspaceSnapshotInput
-  ): Promise<WorkspaceSnapshot> {
-    const parsed = workspaceSnapshotInputSchema.parse(input);
-    const historyById = new Map(
-      this.#snapshot.previousWorkspaces.map((entry) => [entry.id, entry])
-    );
-
-    for (const board of parsed.boards) {
-      historyById.set(createHistoryId(board), createHistoryEntry(board));
-    }
-
-    this.#snapshot = {
-      boards: parsed.boards,
-      preferences: parsed.preferences,
-      previousWorkspaces: sortHistory([...historyById.values()]),
-      revision: this.#snapshot.revision + 1,
-      selectedBoardId:
-        parsed.selectedBoardId &&
-        parsed.boards.some((board) => board.boardId === parsed.selectedBoardId)
-          ? parsed.selectedBoardId
-          : (parsed.boards[0]?.boardId ?? null),
-    };
-
-    await this.#persist();
-    return this.getSnapshot();
+  headSeq(): number {
+    return this.#db.headSeq();
   }
 
-  async applyMutation(mutation: WorkspaceMutation): Promise<WorkspaceSnapshot> {
-    if (this.#processedMutationIds.has(mutation.mutationId)) {
-      return this.getSnapshot();
-    }
+  /** Path of the SQLite file, for the restore/export runbook. */
+  get databasePath(): string {
+    return this.#db.path;
+  }
 
-    const snapshot = this.getSnapshot();
-    let nextSnapshot: WorkspaceSnapshot;
+  exportTo(destination: string): void {
+    this.#db.exportTo(destination);
+  }
 
-    switch (mutation.type) {
-      case "board.create": {
-        const board = createBoardFromSeed(
-          mutation.payload.seed,
-          snapshot.boards.length
-        );
-        nextSnapshot = await this.replaceSnapshot({
-          boards: [...snapshot.boards, board],
-          preferences: snapshot.preferences,
-          selectedBoardId: board.boardId,
-        });
-        break;
+  // ── writes ────────────────────────────────────────────────────────────────
+
+  /**
+   * Applies one client mutation as exactly one event.
+   *
+   * Returns null when the mutation was already applied (idempotent replay of a
+   * retried request) or when it addressed nothing. Callers read `getSnapshot()`
+   * in that case — there is no new state to broadcast.
+   */
+  async applyMutation(
+    mutation: WorkspaceMutation
+  ): Promise<StoreCommit | null> {
+    return this.#enqueue(async () => {
+      if (this.#db.mutationIdSeen(mutation.mutationId)) {
+        return null;
       }
 
-      case "board.remove": {
-        const boards = snapshot.boards.filter(
-          (board) => board.boardId !== mutation.payload.boardId
-        );
-        nextSnapshot = await this.replaceSnapshot({
-          boards,
-          preferences: snapshot.preferences,
-          selectedBoardId:
-            snapshot.selectedBoardId === mutation.payload.boardId
-              ? (boards[0]?.boardId ?? null)
-              : snapshot.selectedBoardId,
-        });
-        break;
+      const now = Date.now();
+      const produced = this.#mutationToEvents(mutation, now);
+
+      if (!produced) {
+        return null;
       }
 
-      case "board.select": {
-        nextSnapshot = await this.replaceSnapshot({
-          boards: snapshot.boards,
-          preferences: snapshot.preferences,
-          selectedBoardId:
-            mutation.payload.boardId &&
-            snapshot.boards.some(
-              (board) => board.boardId === mutation.payload.boardId
-            )
-              ? mutation.payload.boardId
-              : null,
-        });
-        break;
-      }
-
-      case "board.move": {
-        nextSnapshot = await this.replaceSnapshot({
-          boards: snapshot.boards.map((board) =>
-            board.boardId === mutation.payload.boardId
-              ? {
-                  ...board,
-                  position: mutation.payload.position,
-                }
-              : board
-          ),
-          preferences: snapshot.preferences,
-          selectedBoardId: snapshot.selectedBoardId,
-        });
-        break;
-      }
-
-      case "board.columns.replace": {
-        nextSnapshot = await this.replaceSnapshot({
-          boards: snapshot.boards.map((board) =>
-            board.boardId === mutation.payload.boardId
-              ? {
-                  ...board,
-                  columns: mutation.payload.columns,
-                }
-              : board
-          ),
-          preferences: snapshot.preferences,
-          selectedBoardId: snapshot.selectedBoardId,
-        });
-        break;
-      }
-
-      case "board.session.patch": {
-        nextSnapshot = await this.replaceSnapshot({
-          boards: snapshot.boards.map((board) =>
-            board.boardId === mutation.payload.boardId
-              ? {
-                  ...board,
-                  session: {
-                    ...board.session,
-                    ...mutation.payload.session,
-                  },
-                }
-              : board
-          ),
-          preferences: snapshot.preferences,
-          selectedBoardId: snapshot.selectedBoardId,
-        });
-        break;
-      }
-
-      case "preference.dismiss_composer_hint": {
-        nextSnapshot = await this.replaceSnapshot({
-          boards: snapshot.boards,
-          preferences: {
-            ...snapshot.preferences,
-            composerHintDismissed: true,
-          },
-          selectedBoardId: snapshot.selectedBoardId,
-        });
-        break;
-      }
-
-      case "preference.speech_voice.set": {
-        nextSnapshot = await this.replaceSnapshot({
-          boards: snapshot.boards,
-          preferences: {
-            ...snapshot.preferences,
-            speechVoiceId: mutation.payload.voiceId,
-          },
-          selectedBoardId: snapshot.selectedBoardId,
-        });
-        break;
-      }
-
-      case "board.review_mode.set": {
-        nextSnapshot = await this.replaceSnapshot({
-          boards: snapshot.boards.map((board) =>
-            board.boardId === mutation.payload.boardId
-              ? {
-                  ...board,
-                  reviewMode: mutation.payload.reviewMode,
-                }
-              : board
-          ),
-          preferences: snapshot.preferences,
-          selectedBoardId: snapshot.selectedBoardId,
-        });
-        break;
-      }
-
-      case "board.model.set": {
-        nextSnapshot = await this.replaceSnapshot({
-          boards: snapshot.boards.map((board) =>
-            board.boardId === mutation.payload.boardId
-              ? {
-                  ...board,
-                  modelSelection: mutation.payload.model,
-                }
-              : board
-          ),
-          preferences: snapshot.preferences,
-          selectedBoardId: snapshot.selectedBoardId,
-        });
-        break;
-      }
-
-      case "board.task.plan.update": {
-        nextSnapshot = await this.replaceSnapshot({
-          boards: snapshot.boards.map((board) => {
-            if (board.boardId !== mutation.payload.boardId) {
-              return board;
-            }
-            const updatedColumns = Object.fromEntries(
-              Object.entries(board.columns).map(([colId, tasks]) => [
-                colId,
-                tasks.map((task) =>
-                  task.id === mutation.payload.taskId
-                    ? {
-                        ...task,
-                        plan: mutation.payload.plan,
-                        questions: mutation.payload.questions ?? task.questions,
-                      }
-                    : task
-                ),
-              ])
-            );
-            return {
-              ...board,
-              columns: updatedColumns,
-            };
-          }),
-          preferences: snapshot.preferences,
-          selectedBoardId: snapshot.selectedBoardId,
-        });
-        break;
-      }
-
-      case "preference.recently_used_models.add": {
-        const existing = snapshot.preferences.recentlyUsedModels;
-        const filtered = existing.filter(
-          (m) =>
-            !(
-              m.providerID === mutation.payload.model.providerID &&
-              m.modelID === mutation.payload.model.modelID
-            )
-        );
-        const updated = [mutation.payload.model, ...filtered].slice(0, 5);
-        nextSnapshot = await this.replaceSnapshot({
-          boards: snapshot.boards,
-          preferences: {
-            ...snapshot.preferences,
-            recentlyUsedModels: updated,
-          },
-          selectedBoardId: snapshot.selectedBoardId,
-        });
-        break;
-      }
-
-      case "preference.board_view_mode.set": {
-        nextSnapshot = await this.replaceSnapshot({
-          boards: snapshot.boards,
-          preferences: {
-            ...snapshot.preferences,
-            boardViewMode: mutation.payload.mode,
-          },
-          selectedBoardId: snapshot.selectedBoardId,
-        });
-        break;
-      }
-
-      default:
+      if (produced.events.length !== 1) {
         throw new Error(
-          `Unsupported workspace mutation type: ${String(mutation)}`
+          `mutation ${mutation.type} produced ${produced.events.length} events; the 1-mutation-to-1-event contract requires exactly 1`
         );
-    }
+      }
 
-    this.#rememberMutation(mutation.mutationId);
-    return nextSnapshot;
+      return this.#commit(produced.events, produced.boardId, {
+        id: mutation.mutationId,
+        ts: now,
+      });
+    });
   }
 
+  /** Applies one normalized agent event, which may expand to several events. */
+  async applyAgentEvent(
+    agentEvent: NormalizedAgentEvent
+  ): Promise<StoreCommit | null> {
+    if (!agentEvent.sessionID) {
+      return null;
+    }
+
+    return this.#enqueue(async () => {
+      const board = this.#snapshot.boards.find(
+        (entry) => entry.session.sessionId === agentEvent.sessionID
+      );
+
+      if (!board) {
+        return null;
+      }
+
+      const events = toWorkspaceEvents(agentEvent, {
+        boardId: board.boardId,
+        taskId: board.session.currentTaskId ?? "",
+      }).filter((event) => !("taskId" in event) || event.taskId !== "");
+
+      if (events.length === 0) {
+        return null;
+      }
+
+      return this.#commit(events, board.boardId, null);
+    });
+  }
+
+  /**
+   * Session bookkeeping (attach, state transitions) is state-mutating work and
+   * goes through the same queue as mutations — plan risk #5. A single unguarded
+   * direct write here would reintroduce lost-update races.
+   */
   async updateBoardSession(
     boardId: string,
     update: Partial<WorkspaceBoard["session"]>
-  ): Promise<WorkspaceSnapshot> {
-    const boards = this.#snapshot.boards.map((board) =>
-      board.boardId === boardId
-        ? (() => {
-            if (update.sessionId) {
-              const boardWithSession = attachSessionToBoard(
-                board,
-                update.sessionId
-              );
-              return {
-                ...boardWithSession,
-                session: {
-                  ...boardWithSession.session,
-                  ...update,
-                },
-              };
-            }
+  ): Promise<StoreCommit | null> {
+    return this.#enqueue(async () => {
+      const board = this.getBoard(boardId);
+      if (!board) {
+        return null;
+      }
 
-            return {
-              ...board,
-              session: {
-                ...board.session,
-                ...update,
-              },
-            };
-          })()
-        : board
-    );
+      const events: WorkspaceEvent[] = [];
 
-    return await this.replaceSnapshot({
-      boards,
-      preferences: this.#snapshot.preferences,
-      selectedBoardId: this.#snapshot.selectedBoardId,
+      if (update.sessionId) {
+        const attached = attachSessionToBoard(board, update.sessionId);
+        const sessionEvent = diffSessionEvent(board, attached);
+        if (sessionEvent) {
+          events.push(sessionEvent);
+        }
+      }
+
+      const patch = withoutKeys(update, ["sessionId"]);
+      if (Object.keys(patch).length > 0) {
+        events.push({
+          type: "board.session_patched",
+          boardId,
+          ts: Date.now(),
+          session: patch,
+        });
+      }
+
+      if (events.length === 0) {
+        return null;
+      }
+
+      return this.#commit(events, boardId, null);
     });
   }
 
   async updateBoardReviewMode(
     boardId: string,
     reviewMode: "manual" | "auto"
-  ): Promise<WorkspaceSnapshot> {
-    const boards = this.#snapshot.boards.map((board) =>
-      board.boardId === boardId
-        ? {
-            ...board,
+  ): Promise<StoreCommit | null> {
+    return this.#enqueue(async () => {
+      if (!this.getBoard(boardId)) {
+        return null;
+      }
+
+      return this.#commit(
+        [
+          {
+            type: "board.review_mode_set",
+            boardId,
+            ts: Date.now(),
             reviewMode,
-          }
-        : board
+          },
+        ],
+        boardId,
+        null
+      );
+    });
+  }
+
+  /**
+   * Writes a full-state snapshot and folds the covered events away. Also the
+   * only place retention is applied, so both paths cannot diverge.
+   */
+  async writeSnapshot(): Promise<void> {
+    await this.#enqueue(async () => {
+      this.#snapshot = this.#applyRetention(this.#snapshot);
+      const head = this.#db.headSeq();
+      this.#db.writeSnapshot(
+        head,
+        Date.now(),
+        JSON.stringify({
+          snapshot: this.#snapshot,
+          v: SNAPSHOT_BLOB_VERSION,
+        } satisfies PersistedBlob)
+      );
+      this.#db.pruneEventsBefore(head);
+      this.#eventsSinceSnapshot = 0;
+    });
+  }
+
+  /**
+   * Boot-and-hourly retention pass: prune terminal-run detail, then snapshot so
+   * the pruning is durable and the event tail stops growing.
+   */
+  async runRetention(): Promise<void> {
+    await this.writeSnapshot();
+    logger.info("workspace-retention-ran", {
+      eventsRemaining: this.#db.eventCount(),
+      headSeq: this.#db.headSeq(),
+    });
+  }
+
+  /** Compacts the log if the file outgrew its cap. Safe to call on a timer. */
+  async compactIfOversized(): Promise<boolean> {
+    const oversized = isOverSizeCap(
+      this.#db.dbSizeBytes(),
+      this.#options.dbSizeCapMb
     );
 
-    return await this.replaceSnapshot({
-      boards,
-      preferences: this.#snapshot.preferences,
-      selectedBoardId: this.#snapshot.selectedBoardId,
-    });
+    if (
+      oversized ||
+      shouldSnapshot(this.#eventsSinceSnapshot, this.#options.snapshotInterval)
+    ) {
+      await this.writeSnapshot();
+    }
+
+    return oversized;
   }
 
-  async applyAgentEvent(
-    event: NormalizedAgentEvent
+  // ── internals ─────────────────────────────────────────────────────────────
+
+  #boardExists(boardId: string): boolean {
+    return this.#snapshot.boards.some((board) => board.boardId === boardId);
+  }
+
+  /**
+   * Translates one client mutation into exactly one event (plan Phase 1, task
+   * 5). The table is `MUTATION_EVENT_MAP` in `@chorus/contracts`; this is the
+   * store's half of that contract.
+   *
+   * `board.create` is the only case needing server-side generation — the board
+   * id and layout position — so the event carries the whole constructed board
+   * and replay stays a pure projection rather than re-running a generator.
+   */
+  #mutationToEvents(
+    mutation: WorkspaceMutation,
+    now: number
+  ): { boardId: string | null; events: WorkspaceEvent[] } | null {
+    switch (mutation.type) {
+      case "board.create": {
+        const board = createBoardFromSeed(
+          mutation.payload.seed,
+          this.#snapshot.boards.length
+        );
+        return {
+          boardId: board.boardId,
+          events: [
+            { type: "board.created", boardId: board.boardId, board, ts: now },
+          ],
+        };
+      }
+
+      case "board.remove":
+        if (!this.#boardExists(mutation.payload.boardId)) {
+          return null;
+        }
+        return {
+          boardId: mutation.payload.boardId,
+          events: [
+            {
+              type: "board.removed",
+              boardId: mutation.payload.boardId,
+              ts: now,
+            },
+          ],
+        };
+
+      case "board.select":
+        return {
+          boardId: mutation.payload.boardId,
+          events: [
+            {
+              type: "board.selected",
+              boardId: mutation.payload.boardId,
+              ts: now,
+            },
+          ],
+        };
+
+      case "board.move":
+        if (!this.#boardExists(mutation.payload.boardId)) {
+          return null;
+        }
+        return {
+          boardId: mutation.payload.boardId,
+          events: [
+            {
+              type: "board.moved",
+              boardId: mutation.payload.boardId,
+              ts: now,
+              position: mutation.payload.position,
+            },
+          ],
+        };
+
+      case "board.columns.replace":
+        if (!this.#boardExists(mutation.payload.boardId)) {
+          return null;
+        }
+        return {
+          boardId: mutation.payload.boardId,
+          events: [
+            {
+              type: "board.columns_replaced",
+              boardId: mutation.payload.boardId,
+              ts: now,
+              columns: mutation.payload.columns,
+            },
+          ],
+        };
+
+      case "board.session.patch":
+        if (!this.#boardExists(mutation.payload.boardId)) {
+          return null;
+        }
+        return {
+          boardId: mutation.payload.boardId,
+          events: [
+            {
+              type: "board.session_patched",
+              boardId: mutation.payload.boardId,
+              ts: now,
+              session: mutation.payload.session,
+            },
+          ],
+        };
+
+      case "board.model.set":
+        if (!this.#boardExists(mutation.payload.boardId)) {
+          return null;
+        }
+        return {
+          boardId: mutation.payload.boardId,
+          events: [
+            {
+              type: "board.model_set",
+              boardId: mutation.payload.boardId,
+              ts: now,
+              model: mutation.payload.model,
+            },
+          ],
+        };
+
+      case "board.review_mode.set":
+        if (!this.#boardExists(mutation.payload.boardId)) {
+          return null;
+        }
+        return {
+          boardId: mutation.payload.boardId,
+          events: [
+            {
+              type: "board.review_mode_set",
+              boardId: mutation.payload.boardId,
+              ts: now,
+              reviewMode: mutation.payload.reviewMode,
+            },
+          ],
+        };
+
+      case "board.task.plan.update":
+        if (!this.#boardExists(mutation.payload.boardId)) {
+          return null;
+        }
+        return {
+          boardId: mutation.payload.boardId,
+          events: [
+            {
+              type: "board.task_plan_updated",
+              boardId: mutation.payload.boardId,
+              ts: now,
+              taskId: mutation.payload.taskId,
+              plan: mutation.payload.plan,
+              questions: mutation.payload.questions,
+            },
+          ],
+        };
+
+      case "preference.recently_used_models.add":
+        return {
+          boardId: null,
+          events: [
+            {
+              type: "preference.recent_model_added",
+              ts: now,
+              model: mutation.payload.model,
+            },
+          ],
+        };
+
+      case "preference.dismiss_composer_hint":
+        return {
+          boardId: null,
+          events: [{ type: "preference.composer_hint_dismissed", ts: now }],
+        };
+
+      // Two mutations intentionally converge on one event: `set_voice` and
+      // `speech_voice.set` are the same intent, and the pre-Phase-2 switch only
+      // handled the latter — sending the former threw "Unsupported workspace
+      // mutation type".
+      case "preference.speech_voice.set":
+        return {
+          boardId: null,
+          events: [
+            {
+              type: "preference.speech_voice_set",
+              ts: now,
+              voiceId: mutation.payload.voiceId,
+            },
+          ],
+        };
+
+      case "preference.set_voice":
+        return {
+          boardId: null,
+          events: [
+            {
+              type: "preference.speech_voice_set",
+              ts: now,
+              voiceId: mutation.payload.voice,
+            },
+          ],
+        };
+
+      case "preference.board_view_mode.set":
+        return {
+          boardId: null,
+          events: [
+            {
+              type: "preference.board_view_mode_set",
+              ts: now,
+              mode: mutation.payload.mode,
+            },
+          ],
+        };
+
+      default:
+        throw new Error(
+          `unhandled workspace mutation type: ${String(
+            (mutation as { type: string }).type
+          )}`
+        );
+    }
+  }
+
+  /**
+   * The single serialization point. `this.#queue` is replaced with a promise
+   * that never rejects, so one failed write cannot poison every later task —
+   * each caller still observes its own rejection through the returned promise.
+   */
+  #enqueue<T>(work: () => Promise<T>): Promise<T> {
+    const result = this.#queue.promise.then(work);
+    this.#queue.promise = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+
+  /**
+   * Appends events, then swaps memory. Order is the whole point: if the
+   * transaction throws, `this.#snapshot` is never assigned and the in-memory
+   * state still matches the last durable commit.
+   */
+  #commit(
+    events: WorkspaceEvent[],
+    boardId: string | null,
+    mutationKey: { id: string; ts: number } | null
+  ): StoreCommit {
+    const { firstSeq, lastSeq } = this.#db.appendEvents(
+      events.map((event) => ({
+        boardId: boardIdOf(event),
+        payload: JSON.stringify(event),
+        ts: event.ts,
+        type: event.type,
+      })),
+      mutationKey
+    );
+
+    let next = this.#snapshot;
+    for (const event of events) {
+      next = this.#project(next, event);
+    }
+
+    this.#snapshot = {
+      ...next,
+      revision: this.#snapshot.revision + 1,
+    };
+    this.#eventsSinceSnapshot += events.length;
+
+    return { boardId, events, firstSeq, lastSeq };
+  }
+
+  /**
+   * The only place an event becomes state.
+   *
+   * Boot replay and live application both land here, which is what guarantees a
+   * board rebuilt from the log is byte-identical to one built incrementally.
+   * Collection-level events (create/remove/select) are handled here because
+   * `applyEventToBoard` deliberately ignores them.
+   */
+  #project(
+    snapshot: WorkspaceSnapshot,
+    event: WorkspaceEvent
+  ): WorkspaceSnapshot {
+    switch (event.type) {
+      case "board.created":
+        return {
+          ...snapshot,
+          boards: [...snapshot.boards, event.board],
+          selectedBoardId: event.board.boardId,
+        };
+
+      case "board.removed": {
+        const boards = snapshot.boards.filter(
+          (board) => board.boardId !== event.boardId
+        );
+        return {
+          ...snapshot,
+          boards,
+          selectedBoardId:
+            snapshot.selectedBoardId === event.boardId
+              ? (boards[0]?.boardId ?? null)
+              : snapshot.selectedBoardId,
+        };
+      }
+
+      case "board.selected":
+        return { ...snapshot, selectedBoardId: event.boardId };
+
+      case "board.task_plan_updated": {
+        // Plan text is board-scoped but the projector's copy lives in the
+        // contracts package; route through it rather than duplicating.
+        const boards = snapshot.boards.map((board) =>
+          board.boardId === event.boardId
+            ? applyEventToBoard(board, event)
+            : board
+        );
+        return withHistory(snapshot, boards);
+      }
+
+      case "preference.recent_model_added": {
+        const withoutDuplicate = (
+          snapshot.preferences.recentlyUsedModels ?? []
+        ).filter(
+          (model) =>
+            model.providerID !== event.model.providerID ||
+            model.modelID !== event.model.modelID
+        );
+        return {
+          ...snapshot,
+          preferences: {
+            ...snapshot.preferences,
+            recentlyUsedModels: [event.model, ...withoutDuplicate].slice(0, 5),
+          },
+        };
+      }
+
+      case "preference.composer_hint_dismissed":
+      case "preference.speech_voice_set":
+      case "preference.board_view_mode_set":
+        return applyWorkspacePreference(snapshot, event);
+
+      default: {
+        if (!("boardId" in event) || event.boardId === null) {
+          return snapshot;
+        }
+
+        const boards = snapshot.boards.map((board) =>
+          board.boardId === event.boardId
+            ? canonical(applyEventToBoard(board, event))
+            : board
+        );
+
+        return boards.some((board, index) => board !== snapshot.boards[index])
+          ? withHistory(snapshot, boards)
+          : snapshot;
+      }
+    }
+  }
+
+  #applyRetention(snapshot: WorkspaceSnapshot): WorkspaceSnapshot {
+    return stripTerminalRunDetails(
+      snapshot,
+      retentionCutoff(Date.now(), this.#options.retentionDays)
+    );
+  }
+
+  #parseBlob(blob: string): WorkspaceSnapshot {
+    let parsed: PersistedBlob;
+    try {
+      parsed = JSON.parse(blob) as PersistedBlob;
+    } catch (error) {
+      throw new Error(
+        `corrupt workspace snapshot in ${this.#db.path}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+
+    if (parsed.v !== SNAPSHOT_BLOB_VERSION) {
+      throw new Error(
+        `unsupported workspace snapshot version ${String(parsed.v)} in ${this.#db.path}`
+      );
+    }
+
+    try {
+      return workspaceSnapshotSchema.parse(parsed.snapshot);
+    } catch (error) {
+      throw new Error(
+        `corrupt workspace snapshot in ${this.#db.path}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  #decode(stored: StoredEvent): WorkspaceEvent {
+    try {
+      return JSON.parse(stored.payload) as WorkspaceEvent;
+    } catch (error) {
+      throw new Error(
+        `corrupt event at seq ${stored.seq} in ${this.#db.path}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  /**
+   * One-shot import of the pre-Phase-2 `workspace.json`.
+   *
+   * Guarded by an explicit env flag so the path can be deleted once the first
+   * production migration is confirmed, and loud on corruption: a silently
+   * emptied workspace is indistinguishable from data loss.
+   */
+  async #importLegacySnapshot(
+    legacyPath: string
   ): Promise<WorkspaceSnapshot | null> {
-    if (!event.sessionID) {
+    let raw: string;
+    try {
+      await access(legacyPath);
+    } catch {
       return null;
     }
 
-    let didChange = false;
-    const boards = this.#snapshot.boards.map((board) => {
-      if (board.session.sessionId !== event.sessionID) {
-        return board;
-      }
+    raw = await readFile(legacyPath, "utf8");
 
-      didChange = true;
-      return applyAgentEventToBoard(board, event);
-    });
-
-    if (!didChange) {
-      return null;
+    let parsed: WorkspaceSnapshot;
+    try {
+      parsed = workspaceSnapshotSchema.parse(JSON.parse(raw));
+    } catch (error) {
+      throw new Error(
+        `refusing to start: legacy workspace snapshot at ${legacyPath} is corrupt (${
+          error instanceof Error ? error.message : String(error)
+        }). Move it aside to start with an empty workspace.`
+      );
     }
 
-    return await this.replaceSnapshot({
-      boards,
-      preferences: this.#snapshot.preferences,
-      selectedBoardId: this.#snapshot.selectedBoardId,
+    const migrated = this.#project(parsed, {
+      type: "board.selected",
+      boardId: parsed.selectedBoardId,
+      ts: Date.now(),
     });
-  }
 
-  async #persist(): Promise<void> {
-    await mkdir(dirname(this.#filePath), { recursive: true });
-    await writeFile(this.#filePath, JSON.stringify(this.#snapshot, null, 2));
-  }
-
-  #rememberMutation(mutationId: string): void {
-    this.#processedMutationIds.add(mutationId);
-    if (this.#processedMutationIds.size > 250) {
-      const oldest = this.#processedMutationIds.values().next().value;
-      if (oldest) {
-        this.#processedMutationIds.delete(oldest);
-      }
-    }
+    // Park the original rather than deleting it: the operator decides when the
+    // migration is trustworthy.
+    await rename(legacyPath, `${legacyPath}.imported`).catch(() => undefined);
+    return migrated;
   }
 }
+
+function withoutKeys<T extends object>(
+  value: T,
+  keys: readonly (keyof T)[]
+): Partial<T> {
+  const copy: Partial<T> = { ...value };
+  for (const key of keys) {
+    delete copy[key];
+  }
+  return copy;
+}
+
+function boardIdOf(event: WorkspaceEvent): string | null {
+  return "boardId" in event ? event.boardId : null;
+}
+
+/** Keeps the "recently opened workspaces" rail populated as boards change. */
+function withHistory(
+  snapshot: WorkspaceSnapshot,
+  boards: WorkspaceBoard[]
+): WorkspaceSnapshot {
+  const historyById = new Map(
+    snapshot.previousWorkspaces.map((entry) => [entry.id, entry])
+  );
+
+  for (const board of boards) {
+    historyById.set(createHistoryId(board), createHistoryEntry(board));
+  }
+
+  return {
+    ...snapshot,
+    boards,
+    previousWorkspaces: sortHistory([...historyById.values()]),
+  };
+}
+
+function applyWorkspacePreference(
+  snapshot: WorkspaceSnapshot,
+  event: WorkspaceEvent
+): WorkspaceSnapshot {
+  if (event.type === "preference.composer_hint_dismissed") {
+    return {
+      ...snapshot,
+      preferences: { ...snapshot.preferences, composerHintDismissed: true },
+    };
+  }
+
+  if (event.type === "preference.speech_voice_set") {
+    return {
+      ...snapshot,
+      preferences: { ...snapshot.preferences, speechVoiceId: event.voiceId },
+    };
+  }
+
+  if (event.type === "preference.board_view_mode_set") {
+    return {
+      ...snapshot,
+      preferences: { ...snapshot.preferences, boardViewMode: event.mode },
+    };
+  }
+
+  return snapshot;
+}
+
+/**
+ * Derives the `session.attached` event from an attach call, so binding a
+ * session goes through the shared projector instead of hand-rolling the board
+ * rewrite the way the pre-Phase-2 store did.
+ */
+function diffSessionEvent(
+  before: WorkspaceBoard,
+  after: WorkspaceBoard
+): WorkspaceEvent | null {
+  if (after.session.sessionId === before.session.sessionId) {
+    return null;
+  }
+
+  return {
+    type: "session.attached",
+    boardId: before.boardId,
+    sessionId: after.session.sessionId ?? "",
+    taskId: before.session.currentTaskId,
+    ts: Date.now(),
+  };
+}
+
+export { createBoardFromSeed };

@@ -1,6 +1,8 @@
 import { describe, expect, mock, test } from "bun:test";
-import { rm } from "node:fs/promises";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { WorkspaceBoard } from "@chorus/contracts";
 import { WorkspaceStore } from "../workspace/store";
 import { BoardTaskService } from "./board-task-service";
 
@@ -13,52 +15,64 @@ function makeMockBridge() {
   };
 }
 
+const REPO = { directory: "/tmp/repo", sandboxes: [], worktree: "/tmp/repo" };
+
+/**
+ * Board ids are server-generated (the client sends a seed and the store mints
+ * the board), so fixtures read the id back off the commit instead of assuming
+ * one. An earlier version of this file hard-coded "board-1" and the
+ * session patch silently no-oped against a board that did not exist.
+ */
+async function seedBoard(
+  workspaceStore: WorkspaceStore,
+  session?: Partial<WorkspaceBoard["session"]>
+) {
+  const created = await workspaceStore.applyMutation({
+    baseRevision: null,
+    clientId: "task-test",
+    mutationId: `seed-${crypto.randomUUID()}`,
+    payload: { seed: { repo: REPO, title: "Repo Board" } },
+    type: "board.create",
+  });
+
+  const event = created?.events[0];
+  if (!created || event?.type !== "board.created") {
+    throw new Error("expected a board.created commit");
+  }
+
+  const boardId = event.board.boardId;
+
+  if (session) {
+    await workspaceStore.applyMutation({
+      baseRevision: null,
+      clientId: "task-test",
+      mutationId: `session-${crypto.randomUUID()}`,
+      payload: { boardId, session },
+      type: "board.session.patch",
+    });
+  }
+
+  return boardId;
+}
+
 describe("BoardTaskService", () => {
   test("creates a session for the first prompt", async () => {
     const bridge = makeMockBridge();
-    const path = join("/tmp", `chorus-board-task-${Date.now()}-create.json`);
-    const workspaceStore = new WorkspaceStore(path);
+    const dir = mkdtempSync(join(tmpdir(), "chorus-board-task-create-"));
+    const workspaceStore = new WorkspaceStore(dir);
     await workspaceStore.load();
-    await workspaceStore.replaceSnapshot({
-      boards: [
-        {
-          boardId: "board-1",
-          columns: {
-            queue: [],
-            in_progress: [],
-            approve: [],
-            done: [],
-          },
-          modelSelection: null,
-          position: { x: 0, y: 0 },
-          repo: {
-            directory: "/tmp/repo",
-            worktree: "/tmp/repo",
-            sandboxes: [],
-          },
-          session: { state: "uninitialized" },
-          title: "Repo Board",
-          reviewMode: "auto",
-        },
-      ],
-      preferences: {
-        boardViewMode: "relaxed",
-        composerHintDismissed: false,
-        recentlyUsedModels: [],
-        speechVoiceId: null,
-      },
-      selectedBoardId: "board-1",
-    });
+    const boardId = await seedBoard(workspaceStore, { state: "uninitialized" });
+
     const service = new BoardTaskService(bridge as never, workspaceStore);
 
     const result = await service.queuePrompt({
-      boardId: "board-1",
+      boardId,
       directory: "/tmp/repo",
       text: "build feature",
       reviewMode: "auto",
     });
 
-    expect(result.boardId).toBe("board-1");
+    expect(result.boardId).toBe(boardId);
     expect(result.sessionId).toBe("sess-123");
     expect(result.createdSession).toBe(true);
     expect(bridge.createSession).toHaveBeenCalledWith({
@@ -73,51 +87,24 @@ describe("BoardTaskService", () => {
       agent: undefined,
     });
 
-    await rm(path, { force: true });
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
   });
 
   test("reuses the persisted session for later prompts", async () => {
     const bridge = makeMockBridge();
-    const path = join("/tmp", `chorus-board-task-${Date.now()}-reuse.json`);
-    const workspaceStore = new WorkspaceStore(path);
+    const dir = mkdtempSync(join(tmpdir(), "chorus-board-task-reuse-"));
+    const workspaceStore = new WorkspaceStore(dir);
     await workspaceStore.load();
-    await workspaceStore.replaceSnapshot({
-      boards: [
-        {
-          boardId: "board-1",
-          columns: {
-            queue: [],
-            in_progress: [],
-            approve: [],
-            done: [],
-          },
-          modelSelection: null,
-          position: { x: 0, y: 0 },
-          repo: {
-            directory: "/tmp/repo",
-            worktree: "/tmp/repo",
-            sandboxes: [],
-          },
-          session: {
-            sessionId: "sess-123",
-            state: "active",
-          },
-          title: "Repo Board",
-          reviewMode: "auto",
-        },
-      ],
-      preferences: {
-        boardViewMode: "relaxed",
-        composerHintDismissed: false,
-        recentlyUsedModels: [],
-        speechVoiceId: null,
-      },
-      selectedBoardId: "board-1",
+    const boardId = await seedBoard(workspaceStore, {
+      sessionId: "sess-123",
+      state: "active",
     });
+
     const service = new BoardTaskService(bridge as never, workspaceStore);
 
     const result = await service.queuePrompt({
-      boardId: "board-1",
+      boardId,
       directory: "/tmp/repo",
       text: "follow up",
       reviewMode: "auto",
@@ -133,6 +120,37 @@ describe("BoardTaskService", () => {
       agent: undefined,
     });
 
-    await rm(path, { force: true });
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("binds the created session onto the board in the event log", async () => {
+    const bridge = makeMockBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-board-task-bind-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, { state: "uninitialized" });
+
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+    await service.queuePrompt({
+      boardId,
+      directory: "/tmp/repo",
+      text: "build feature",
+      reviewMode: "auto",
+    });
+
+    // The session binding has to be durable, not just in-memory: a restart
+    // mid-session must find it again.
+    expect(workspaceStore.getBoard(boardId)?.session.sessionId).toBe(
+      "sess-123"
+    );
+    await workspaceStore.close();
+
+    const reopened = new WorkspaceStore(dir);
+    await reopened.load();
+    expect(reopened.getBoard(boardId)?.session.sessionId).toBe("sess-123");
+    await reopened.close();
+
+    rmSync(dir, { force: true, recursive: true });
   });
 });

@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { loadConfig } from "./index";
 
 describe("loadConfig", () => {
@@ -17,6 +19,10 @@ describe("loadConfig", () => {
     process.env.HOSTNAME = undefined as unknown as string;
     process.env.OPENCODE_BASE_URL = undefined as unknown as string;
     process.env.OPENCODE_DIRECTORY = undefined as unknown as string;
+    process.env.DATA_DIR = undefined as unknown as string;
+    process.env.RETENTION_DAYS = undefined as unknown as string;
+    process.env.DB_SIZE_CAP_MB = undefined as unknown as string;
+    process.env.SNAPSHOT_INTERVAL = undefined as unknown as string;
 
     const config = loadConfig();
 
@@ -24,6 +30,13 @@ describe("loadConfig", () => {
     expect(config.hostname).toBe("localhost");
     expect(config.opencodeBaseUrl).toBe("http://localhost:4096");
     expect(config.opencodeDirectory).toBe(process.cwd());
+    // Parity with where the pre-Phase-2 JSON store kept its state.
+    expect(config.dataDir).toBe(join(homedir(), ".chorus"));
+    expect(config.retentionDays).toBe(30);
+    expect(config.dbSizeCapMb).toBe(512);
+    expect(config.snapshotInterval).toBe(1000);
+    // Off by default so the legacy import path can be deleted once migrated.
+    expect(config.enableLegacyWorkspaceImport).toBe(false);
   });
 
   test("reads PORT from env", () => {
@@ -72,6 +85,11 @@ describe("loadConfig", () => {
     process.env.HOSTNAME = "127.0.0.1";
     process.env.OPENCODE_BASE_URL = "http://opencode:4096";
     process.env.OPENCODE_DIRECTORY = "/workspace";
+    process.env.DATA_DIR = "/data";
+    process.env.RETENTION_DAYS = "7";
+    process.env.DB_SIZE_CAP_MB = "256";
+    process.env.SNAPSHOT_INTERVAL = "500";
+    process.env.CHORUS_ENABLE_LEGACY_WORKSPACE_IMPORT = "true";
 
     const config = loadConfig();
 
@@ -81,7 +99,40 @@ describe("loadConfig", () => {
       opencodeBaseUrl: "http://opencode:4096",
       opencodeDirectory: "/workspace",
       autoStartOpencode: true,
+      dataDir: "/data",
+      retentionDays: 7,
+      dbSizeCapMb: 256,
+      snapshotInterval: 500,
+      enableLegacyWorkspaceImport: true,
     });
+  });
+
+  test("rejects a non-positive or non-numeric retention window", () => {
+    // Each setting is checked on its own: setting all three at once would just
+    // surface whichever happens to be validated first.
+    process.env.RETENTION_DAYS = "0";
+    expect(() => loadConfig()).toThrow('Invalid RETENTION_DAYS "0"');
+
+    process.env.RETENTION_DAYS = "-1";
+    expect(() => loadConfig()).toThrow('Invalid RETENTION_DAYS "-1"');
+
+    process.env.RETENTION_DAYS = "many";
+    expect(() => loadConfig()).toThrow('Invalid RETENTION_DAYS "many"');
+  });
+
+  test("rejects a non-positive size cap", () => {
+    process.env.DB_SIZE_CAP_MB = "0";
+    expect(() => loadConfig()).toThrow('Invalid DB_SIZE_CAP_MB "0"');
+  });
+
+  test("rejects a non-positive snapshot interval", () => {
+    process.env.SNAPSHOT_INTERVAL = "0";
+    expect(() => loadConfig()).toThrow('Invalid SNAPSHOT_INTERVAL "0"');
+  });
+
+  test("treats an empty string as unset for retention settings", () => {
+    process.env.RETENTION_DAYS = "";
+    expect(loadConfig().retentionDays).toBe(30);
   });
 
   test("throws on non-numeric PORT", () => {
