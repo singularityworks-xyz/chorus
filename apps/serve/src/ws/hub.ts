@@ -23,31 +23,35 @@ import type {
  * WebSocket hub for the native `/ws` event log (spec §4).
  *
  * Single owner of every downstream byte. Routes and the bridge do not touch
- * sockets — they hand the hub a `StoreCommit` and the hub decides what goes
- * out. That is the whole point: one emit path from the store's commit point.
+ * sockets — the store hands the hub a commit and the hub decides what goes out.
+ * That is the whole point: one emit path from the store's commit point.
  *
- * ## Backpressure — measured, not assumed
+ * ## Backpressure — measured on the layer we actually run
  *
- * The Day-1 spike (`.context/ws-backpressure-spike.md`, harness in
- * `apps/serve/scripts/ws-backpressure-spike.ts`) established three things that
- * shape this file:
+ * The Day-1 spike (`.context/ws-backpressure-spike.md`, harness
+ * `src/ws/spike.ts`) measures Elysia's `.ws()`, not `Bun.serve`. That matters
+ * more than it sounds: an earlier spike drove `Bun.serve` directly and reported
+ * that `send()`'s return value was useless (always a positive byte count).
+ * On Elysia it is the *primary* signal — the context documents `-1` for
+ * backpressure and `0` for dropped, and a 3 000-message burst into a stalled
+ * reader produced `-1` 2 242 times and `0` 435 times.
  *
- * 1. `send()` returns the bytes accepted in all 4000 sends, including against a
- *    16.0 MiB backlog. It never returns 0 or -1, so its return value is **not**
- *    a congestion signal. The only usable one is `getBufferedAmount()`.
- * 2. There is no implicit cap: the buffer reached 16,782,710 bytes with a
- *    stalled reader and nothing complained.
- * 3. `drain` fires, but the first fire came with 15,059,396 bytes already
- *    queued — a late notification, not an early warning. So `drain` is never
- *    used to set the critical-only flag; it only triggers a re-check.
+ * So congestion is read two ways:
  *
- * Recovery does terminate (the buffer fell to 0 once the reader resumed), so a
- * client flagged critical-only does clear and the flag cannot latch forever.
+ * 1. `send()` returning `< 0` — immediate, and free (no extra syscall).
+ * 2. `raw.getBufferedAmount()` above `HIGH_WATER_MARK` — the magnitude guard,
+ *    because 16 MiB still accumulates silently and 323 of those sends returned a
+ *    positive count against that backlog, so a positive send proves nothing.
  *
- * See `publish()` for how these map onto the two delivery classes.
+ * ## Connection identity
+ *
+ * Clients are keyed by the context's `id` string, never by socket object. Elysia
+ * hands `open`, `message`, and `close` a *different wrapper object* for the same
+ * connection, so an identity-keyed registry misses every lookup — the first cut
+ * of this hub had exactly that bug and the handshake silently produced zero
+ * frames with nothing logged.
  */
-
-/** ~30x a typical step-delta patch, 60x below where `drain` first surfaced. */
+/** ~30x a typical step-delta patch, 64x below the 16 MiB the spike observed. */
 export const HIGH_WATER_MARK = 262_144;
 
 /** Coalescing bucket for workspace-scoped (non-board) events. */
@@ -55,6 +59,12 @@ const WORKSPACE_SCOPE_KEY = "__workspace__";
 
 /** Commands per client per minute before the socket is dropped. */
 export const WS_COMMAND_LIMIT_PER_MINUTE = 60;
+
+/**
+ * Positive sends needed to clear critical-only on transports with no buffer
+ * gauge. With a gauge, a low buffer is sufficient — see `#hasRecovered`.
+ */
+export const RECOVERY_SENDS = 2;
 
 export const PING_INTERVAL_MS = 30_000;
 export const PONG_TIMEOUT_MS = 10_000;
@@ -66,7 +76,18 @@ export const COALESCE_MS = 100;
  */
 export interface HubSocket {
   close?: (code?: number, reason?: string) => void;
+  /**
+   * Byte depth, when the transport exposes it. Elysia does not put this on the
+   * context — only on `ctx.raw` — so it is optional by design.
+   */
   getBufferedAmount?: () => number;
+  /** Stable per-connection id. Object identity is NOT stable across Elysia handlers. */
+  id: string;
+  /**
+   * Sends a frame and returns the transport's status: `< 0` backpressure,
+   * `0` dropped, `> 0` bytes accepted. Transports that do not report a status
+   * may return `undefined`.
+   */
   send: (data: string) => unknown;
 }
 
@@ -159,11 +180,17 @@ export function decideResume(
 }
 
 interface Client {
+  /** Frames the transport refused for backpressure (`send()` returned < 0). */
+  backpressuredFrames: number;
   /** Board filter; `null` means every board (the single-operator mirror). */
   boards: Set<string> | null;
+  /** Consecutive positive sends; recovery needs this to build up. */
+  cleanSends: number;
   commandsThisMinute: number;
   commandWindowStart: number;
   criticalOnly: boolean;
+  /** Frames the transport discarded outright (`send()` returned 0). */
+  droppedFrames: number;
   id: string;
   lastPongAt: number;
   /** Sequences already in this client's buffer. Gaps must be impossible. */
@@ -180,8 +207,11 @@ export interface HubOptions {
 }
 
 export interface HubStats {
+  backpressuredFrames: number;
   clients: number;
   coalescerDepth: number;
+  criticalOnlyClients: number;
+  droppedFrames: number;
   headSeq: number;
 }
 
@@ -224,8 +254,11 @@ export class WorkspaceHub {
   register(socket: HubSocket): Client {
     clientCounter += 1;
     const client: Client = {
+      backpressuredFrames: 0,
       boards: null,
+      cleanSends: 0,
       commandsThisMinute: 0,
+      droppedFrames: 0,
       commandWindowStart: this.#now(),
       criticalOnly: false,
       id: `c${clientCounter}`,
@@ -236,14 +269,15 @@ export class WorkspaceHub {
     };
 
     this.#clients.add(client);
+    this.#clientsById.set(socket.id, client);
     return client;
   }
 
   unregister(socket: HubSocket): void {
-    for (const client of this.#clients) {
-      if (client.socket === socket) {
-        this.#clients.delete(client);
-      }
+    const client = this.#clientsById.get(socket.id);
+    if (client) {
+      this.#clients.delete(client);
+      this.#clientsById.delete(socket.id);
     }
   }
 
@@ -252,12 +286,27 @@ export class WorkspaceHub {
   }
 
   stats(): HubStats {
+    let backpressuredFrames = 0;
+    let criticalOnlyClients = 0;
+    let droppedFrames = 0;
+
+    for (const client of this.#clients) {
+      backpressuredFrames += client.backpressuredFrames;
+      droppedFrames += client.droppedFrames;
+      if (client.criticalOnly) {
+        criticalOnlyClients += 1;
+      }
+    }
+
     return {
+      backpressuredFrames,
       clients: this.#clients.size,
       coalescerDepth: [...this.#pending.values()].reduce(
         (sum, buffer) => sum + buffer.length,
         0
       ),
+      criticalOnlyClients,
+      droppedFrames,
       headSeq: this.#store.headSeq(),
     };
   }
@@ -515,6 +564,43 @@ export class WorkspaceHub {
   }
 
   /**
+   * Congestion check, evaluated *before* each send.
+   *
+   * The byte threshold is the pre-delivery signal (it is the only thing known
+   * before attempting a write); the `send()` status recorded by the previous
+   * send is the confirmation. Both are read because neither alone is sufficient:
+   * a positive send against a 16 MiB backlog proved nothing, and byte depth
+   * alone would not notice a transport reporting congestion.
+   */
+  #isCongested(client: Client, buffered: number): boolean {
+    if (buffered > HIGH_WATER_MARK) {
+      return true;
+    }
+    return client.backpressuredFrames > 0 && client.cleanSends === 0;
+  }
+
+  /**
+   * Recovery test.
+   *
+   * An earlier version required `RECOVERY_SENDS` consecutive positive sends
+   * before clearing. That deadlocked: while critical-only the hub skips
+   * coalescible events, so a client with no control traffic was never sent
+   * anything, never accumulated a clean send, and stayed throttled forever.
+   *
+   * So when the transport exposes a buffer gauge — the normal case — a low
+   * buffer is sufficient proof of health, and send statuses are only counted for
+   * diagnostics. Without a gauge there is nothing but send status to go on, so
+   * that path waits for a positive send (the heartbeat supplies one within
+   * 30 s).
+   */
+  #hasRecovered(client: Client, buffered: number, hasGauge: boolean): boolean {
+    if (hasGauge) {
+      return buffered < HIGH_WATER_MARK / 2;
+    }
+    return client.cleanSends >= RECOVERY_SENDS;
+  }
+
+  /**
    * Per-client delivery with the measured backpressure policy.
    *
    * Above the mark the client is switched to critical-only: control events keep
@@ -532,12 +618,18 @@ export class WorkspaceHub {
     // client is throttled until it disconnects. The spike confirmed the buffer
     // does drain, so the flag has to be able to observe that.
     const buffered = client.socket.getBufferedAmount?.() ?? 0;
-    if (buffered > HIGH_WATER_MARK) {
+    const hasBufferGauge =
+      typeof client.socket.getBufferedAmount === "function";
+
+    if (this.#isCongested(client, buffered)) {
       client.criticalOnly = true;
-    } else if (client.criticalOnly && buffered < HIGH_WATER_MARK / 2) {
-      // Hysteresis: only clear once comfortably below, so a client hovering at
-      // the mark does not flip state on every message.
+    } else if (
+      client.criticalOnly &&
+      this.#hasRecovered(client, buffered, hasBufferGauge)
+    ) {
       client.criticalOnly = false;
+      client.backpressuredFrames = 0;
+      client.cleanSends = 0;
     }
 
     if (client.criticalOnly && this.#isCoalescible(record.event)) {
@@ -617,14 +709,16 @@ export class WorkspaceHub {
 
   // ── helpers ───────────────────────────────────────────────────────────────
 
+  /**
+   * Resolves a socket to its client by connection id. Returns `undefined` for an
+   * unregistered socket, which is a normal race (it closed before we read it),
+   * so callers treat it as a no-op rather than an error.
+   */
   #find(socket: HubSocket): Client | undefined {
-    for (const client of this.#clients) {
-      if (client.socket === socket) {
-        return client;
-      }
-    }
-    return undefined;
+    return this.#clientsById.get(socket.id);
   }
+
+  readonly #clientsById = new Map<string, Client>();
 
   #isCoalescible(event: WorkspaceEvent): boolean {
     return (
@@ -642,8 +736,27 @@ export class WorkspaceHub {
     return client.commandsThisMinute <= WS_COMMAND_LIMIT_PER_MINUTE;
   }
 
+  /**
+   * Sends and records the transport's verdict.
+   *
+   * Elysia reports `-1` for backpressure and `0` for dropped; either means the
+   * socket is sick. Positive is bytes accepted. Counting them separately keeps
+   * "slow" and "gone" distinguishable in diagnostics.
+   */
   #send(client: Client, message: unknown): void {
-    client.socket.send(JSON.stringify(message));
+    const status = client.socket.send(JSON.stringify(message));
+
+    if (typeof status !== "number" || status > 0) {
+      client.cleanSends += 1;
+      return;
+    }
+
+    client.cleanSends = 0;
+    if (status === 0) {
+      client.droppedFrames += 1;
+    } else {
+      client.backpressuredFrames += 1;
+    }
   }
 
   #sendError(socket: HubSocket, message: string): void {

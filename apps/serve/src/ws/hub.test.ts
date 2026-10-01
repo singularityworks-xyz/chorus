@@ -29,6 +29,8 @@ function cleanup() {
   }
 }
 
+let socketCounter = 0;
+
 interface FakeSocket extends HubSocket {
   buffered: number;
   close?: (code?: number, reason?: string) => void;
@@ -43,6 +45,7 @@ function makeSocket(buffered = 0): FakeSocket {
   const socket = {
     buffered,
     closeCalls: [] as { code?: number; reason?: string }[],
+    id: `sock-${socketCounter++}`,
     getBufferedAmount: () => socket.buffered,
     messages: [] as Record<string, unknown>[],
     sent: [] as string[],
@@ -564,7 +567,9 @@ describe("coalescing", () => {
 
     // part-a's two deltas merged; part-b's one stayed separate.
     expect(socket.messages).toHaveLength(2);
-    const seqs = socket.messages.map((m) => m.seq).sort((a, b) => a - b);
+    const seqs = socket.messages
+      .map((m) => m.seq as number)
+      .sort((a, b) => a - b);
     expect(seqs).toEqual([1, 2]);
   });
 
@@ -707,6 +712,152 @@ describe("backpressure", () => {
     hub.flush();
 
     expect(socket.messages).toHaveLength(1);
+    hub.close();
+    cleanup();
+  });
+});
+
+describe("backpressure recovery", () => {
+  function coalescible(boardId: string, seq: number) {
+    return {
+      boardId,
+      event: {
+        boardId,
+        delta: "x",
+        stepId: `s${seq}`,
+        taskId: "t1",
+        ts: seq,
+        type: "step.delta_appended" as const,
+      },
+      seq,
+    };
+  }
+
+  test("a critical-only client recovers from a drained buffer alone", async () => {
+    // Regression: recovery once required N consecutive positive sends, but a
+    // critical-only client is sent nothing coalescible, so it could never
+    // accumulate them and stayed throttled forever.
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    const socket = makeSocket(0);
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    socket.buffered = HIGH_WATER_MARK + 1;
+    hub.publishRecord(coalescible("board-1", 1));
+    hub.flush();
+    expect(socket.messages).toHaveLength(0);
+    expect(hub.stats().criticalOnlyClients).toBe(1);
+
+    // Socket drains; no control traffic ever arrives for this client.
+    socket.buffered = 0;
+    hub.publishRecord(coalescible("board-1", 2));
+    hub.flush();
+
+    expect(socket.messages).toHaveLength(1);
+    expect(hub.stats().criticalOnlyClients).toBe(0);
+
+    hub.close();
+    cleanup();
+  });
+
+  test("without a buffer gauge, recovery waits for a positive send", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    const socket = makeSocket(0);
+    // biome-ignore lint/performance/noDelete: simulates a transport with no gauge
+    delete (socket as { getBufferedAmount?: () => number }).getBufferedAmount;
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    // The gauge reads as absent, so congestion comes from send status alone.
+    hub.publishRecord(coalescible("board-1", 1));
+    hub.flush();
+
+    // A control event still flows to a critical-only client, which is the
+    // positive send that lets recovery happen.
+    hub.publishRecord({
+      boardId: "board-1",
+      event: {
+        boardId: "board-1",
+        kind: "permission",
+        taskId: "t1",
+        ts: 2,
+        type: "card.waiting_for_approval",
+      },
+      seq: 2,
+    });
+    hub.publishRecord(coalescible("board-1", 3));
+    hub.flush();
+
+    expect(socket.messages.some((m) => m.seq === 3)).toBe(true);
+
+    hub.close();
+    cleanup();
+  });
+
+  test("send statuses are counted separately for diagnostics", async () => {
+    // Each mode gets a fresh client: a client that has already registered
+    // backpressure goes critical-only, after which coalescible events are
+    // skipped and no further status is ever reported.
+    const modes = [
+      { expected: "backpressuredFrames", status: -1 },
+      { expected: "droppedFrames", status: 0 },
+    ] as const;
+
+    for (const mode of modes) {
+      const store = makeStore();
+      await store.load();
+      const hub = new WorkspaceHub(store);
+      const socket = makeSocket(0);
+      await connect(hub, socket, 0);
+      socket.send = () => mode.status;
+
+      hub.publishRecord(coalescible("board-1", 1));
+      hub.flush();
+
+      expect(hub.stats()[mode.expected]).toBe(1);
+
+      hub.close();
+    }
+
+    cleanup();
+  });
+
+  test("clients are tracked by connection id, not object identity", async () => {
+    // Elysia hands `open` and `message` different wrapper objects for the same
+    // connection. Keying by object identity silently missed every lookup.
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store);
+    const registered = makeSocket(0);
+    await connect(hub, registered, 0);
+
+    // A different object, same connection id — exactly what Elysia produces.
+    const sameConnection = {
+      ...registered,
+      messages: [] as Record<string, unknown>[],
+      sent: [] as string[],
+      send: (data: string) => {
+        sameConnection.sent.push(data);
+        return data.length;
+      },
+    };
+
+    registered.sent.length = 0;
+
+    await hub.handleRawMessage(
+      sameConnection,
+      JSON.stringify({ since: 0, type: "hello" })
+    );
+
+    // The lookup resolved to the *registered* client by id, so its socket
+    // received the handshake rather than the frames being dropped on the floor.
+    expect(registered.sent.length).toBeGreaterThan(0);
+    expect(hub.clientCount()).toBe(1);
+
     hub.close();
     cleanup();
   });
