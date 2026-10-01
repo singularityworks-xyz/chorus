@@ -32,7 +32,7 @@ to make it pass, and never expand scope beyond the assigned phase.
 - Package manager is `bun`. Install with `bun add` / `bun add -d`. Never hand-edit dep lists.
 - TypeScript: no `as any` (narrow local casts only if unavoidable); inferred/schema-derived
   types; shared enums/unions for statuses and event kinds; zod-validate every cross-app payload.
--materials: shared code goes in `packages/*`; no duplicated logic across apps (the
+- Repo structure: shared code goes in `packages/*`; no duplicated logic across apps (the
   projector lives in `packages/contracts` exactly once — Phase 1).
 - No secrets in code, logs, events, or WS traffic. Every phase ends with the log gate green.
 - No shell-string child processes: `execFile` arg arrays only. The Phase 0 grep test
