@@ -5,7 +5,12 @@ import { join } from "node:path";
 import type { WorkspaceEvent } from "@chorus/contracts";
 import { MAX_REPLAY_GAP } from "@chorus/contracts";
 import { WorkspaceStore } from "../workspace/store";
-import { decideResume, type HubSocket, WorkspaceHub } from "./hub";
+import {
+  decideResume,
+  HIGH_WATER_MARK,
+  type HubSocket,
+  WorkspaceHub,
+} from "./hub";
 
 const dirs: string[] = [];
 
@@ -411,6 +416,297 @@ describe("command rate limit", () => {
     await hub.handleRawMessage(socket, JSON.stringify({ type: "pong" }));
 
     expect(socket.closeCalls).toHaveLength(0);
+    hub.close();
+    cleanup();
+  });
+});
+
+describe("coalescing", () => {
+  function stepEvent(boardId: string, seq: number, stepId: string) {
+    return {
+      boardId,
+      event: {
+        boardId,
+        delta: "x",
+        kind: "step.delta_appended" as const,
+        stepId,
+        taskId: "t1",
+        ts: seq,
+        type: "step.delta_appended" as const,
+      },
+      seq,
+    };
+  }
+
+  function approvalEvent(boardId: string, seq: number) {
+    return {
+      boardId,
+      event: {
+        boardId,
+        kind: "permission" as const,
+        taskId: "t1",
+        ts: seq,
+        type: "card.waiting_for_approval" as const,
+      },
+      seq,
+    };
+  }
+
+  test("step deltas are buffered rather than sent immediately", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    const socket = makeSocket();
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    for (let index = 1; index <= 50; index += 1) {
+      hub.publishRecord(stepEvent("board-1", index, `s${index}`));
+    }
+
+    // Nothing yet: the window is 10s. Fifty *distinct* steps, so nothing merges.
+    expect(socket.messages).toHaveLength(0);
+    expect(hub.stats().coalescerDepth).toBe(50);
+
+    hub.flush();
+    expect(socket.messages).toHaveLength(50);
+
+    hub.close();
+    cleanup();
+  });
+
+  test("an approval request is not buffered", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    const socket = makeSocket();
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    for (let index = 1; index <= 20; index += 1) {
+      hub.publishRecord(stepEvent("board-1", index, `s${index}`));
+    }
+    hub.publishRecord(approvalEvent("board-1", 21));
+
+    // The approval arrived immediately, ahead of the buffered deltas.
+    expect(socket.messages).toHaveLength(1);
+    expect(socket.messages[0]?.seq).toBe(21);
+    expect((socket.messages[0]?.event as { type: string }).type).toBe(
+      "card.waiting_for_approval"
+    );
+
+    hub.close();
+    cleanup();
+  });
+
+  test("a burst of deltas flushes as far fewer messages than it had events", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store, { coalesceMs: 100 });
+    const socket = makeSocket();
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    // A streaming response part: hundreds of token deltas for ONE stepId.
+    for (let index = 1; index <= 500; index += 1) {
+      hub.publishRecord(stepEvent("board-1", index, "part-abc"));
+    }
+
+    await Bun.sleep(250);
+
+    // They merge by step, so 500 deltas collapse to a single frame.
+    expect(socket.messages).toHaveLength(1);
+    expect(socket.messages[0]?.seq).toBe(1);
+    expect(hub.stats().coalescerDepth).toBe(0);
+
+    // ...and the merge is lossless: every token is still there, in order.
+    const merged = socket.messages[0]?.event as { delta: string };
+    expect(merged.delta).toBe("x".repeat(500));
+
+    hub.close();
+    cleanup();
+  });
+
+  test("coalesced events keep their sequence numbers and stay ordered", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    const socket = makeSocket();
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    for (let index = 1; index <= 100; index += 1) {
+      hub.publishRecord(stepEvent("board-1", index, `s${index}`));
+    }
+    hub.flush();
+
+    const seqs = socket.messages.map((m) => m.seq as number);
+    expect(seqs).toEqual(seqs.slice().sort((a, b) => a - b));
+    expect(new Set(seqs).size).toBe(100);
+
+    hub.close();
+    cleanup();
+  });
+
+  test("deltas for different steps do not merge", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    const socket = makeSocket();
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    hub.publishRecord(stepEvent("board-1", 1, "part-a"));
+    hub.publishRecord(stepEvent("board-1", 2, "part-b"));
+    hub.publishRecord(stepEvent("board-1", 3, "part-a"));
+
+    hub.flush();
+
+    // part-a's two deltas merged; part-b's one stayed separate.
+    expect(socket.messages).toHaveLength(2);
+    const seqs = socket.messages.map((m) => m.seq).sort((a, b) => a - b);
+    expect(seqs).toEqual([1, 2]);
+  });
+
+  test("different boards keep separate buffers", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    const socket = makeSocket();
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    hub.publishRecord(stepEvent("board-1", 1, "part-a"));
+    hub.publishRecord(stepEvent("board-2", 2, "part-a"));
+    hub.flush();
+
+    // Same stepId on another board must not absorb the first board's delta.
+    expect(socket.messages).toHaveLength(2);
+  });
+
+  test("flush is a no-op when nothing is buffered", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store);
+    hub.flush();
+    expect(hub.stats().coalescerDepth).toBe(0);
+    hub.close();
+    cleanup();
+  });
+});
+
+describe("backpressure", () => {
+  function bufferedEvent(boardId: string, seq: number) {
+    return {
+      boardId,
+      event: {
+        boardId,
+        delta: "x",
+        stepId: `s${seq}`,
+        taskId: "t1",
+        ts: seq,
+        type: "step.delta_appended" as const,
+      },
+      seq,
+    };
+  }
+
+  test("above the high-water mark, coalescible patches are skipped", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    const socket = makeSocket(0);
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    // Socket has stalled: its buffer is already past the mark.
+    socket.buffered = HIGH_WATER_MARK + 1;
+    hub.publishRecord(bufferedEvent("board-1", 1));
+    hub.flush();
+
+    expect(socket.messages).toHaveLength(0);
+    hub.close();
+    cleanup();
+  });
+
+  test("control events still flow to a critical-only client", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    const socket = makeSocket(0);
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    socket.buffered = HIGH_WATER_MARK + 1;
+    hub.publishRecord(bufferedEvent("board-1", 1));
+    hub.flush();
+    expect(socket.messages).toHaveLength(0);
+
+    // An approval must reach the operator regardless of radio conditions.
+    hub.publishRecord({
+      boardId: "board-1",
+      event: {
+        boardId: "board-1",
+        kind: "permission",
+        taskId: "t1",
+        ts: 2,
+        type: "card.waiting_for_approval",
+      },
+      seq: 2,
+    });
+
+    expect(socket.messages).toHaveLength(1);
+    expect(socket.messages[0]?.seq).toBe(2);
+
+    hub.close();
+    cleanup();
+  });
+
+  test("the flag clears only once the buffer is comfortably low", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    const socket = makeSocket(0);
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    socket.buffered = HIGH_WATER_MARK + 1;
+    hub.publishRecord(bufferedEvent("board-1", 1));
+    hub.flush();
+    expect(socket.messages).toHaveLength(0);
+
+    // Just under the mark but above half of it: hysteresis keeps it flagged.
+    socket.buffered = HIGH_WATER_MARK - 1;
+    hub.publishRecord(bufferedEvent("board-1", 2));
+    hub.flush();
+    expect(socket.messages).toHaveLength(0);
+
+    // Below half: the client recovers.
+    socket.buffered = HIGH_WATER_MARK / 4;
+    hub.publishRecord(bufferedEvent("board-1", 3));
+    hub.flush();
+    expect(socket.messages).toHaveLength(1);
+    expect(socket.messages[0]?.seq).toBe(3);
+
+    hub.close();
+    cleanup();
+  });
+
+  test("a socket reporting no buffered amount is never throttled", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    const socket = makeSocket();
+    // A socket that cannot report its buffered amount must never be throttled.
+    // biome-ignore lint/performance/noDelete: simulates a transport without the method
+    delete (socket as { getBufferedAmount?: () => number }).getBufferedAmount;
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    hub.publishRecord(bufferedEvent("board-1", 1));
+    hub.flush();
+
+    expect(socket.messages).toHaveLength(1);
     hub.close();
     cleanup();
   });

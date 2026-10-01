@@ -70,6 +70,50 @@ export interface HubSocket {
   send: (data: string) => unknown;
 }
 
+/** Identity under which two buffered records describe the same work. */
+function mergeKeyFor(record: SequencedRecord): string {
+  const event = record.event;
+  if (event.type === "step.delta_appended") {
+    return `${record.boardId ?? ""}|delta|${event.taskId}|${event.stepId}`;
+  }
+  if (event.type === "step.upserted") {
+    return `${record.boardId ?? ""}|upsert|${event.taskId}|${event.step.id}`;
+  }
+  return `${record.boardId ?? ""}|${record.seq}`;
+}
+
+/**
+ * Folds `next` into `target` in place when they are mergeable, reporting
+ * whether the merge happened. Returns false when the pair is not the same unit
+ * of work, in which case the caller buffers `next` separately.
+ */
+function mergeRecords(target: SequencedRecord, next: SequencedRecord): boolean {
+  const a = target.event;
+  const b = next.event;
+
+  if (a.type === "step.delta_appended" && b.type === "step.delta_appended") {
+    if (a.taskId !== b.taskId || a.stepId !== b.stepId) {
+      return false;
+    }
+    a.delta = `${a.delta}${b.delta}`;
+    return true;
+  }
+
+  if (a.type === "step.upserted" && b.type === "step.upserted") {
+    if (a.taskId !== b.taskId || a.step.id !== b.step.id) {
+      return false;
+    }
+    // Latest content wins: the later upsert is the more current view of the step.
+    a.step = b.step;
+    return true;
+  }
+
+  // A delta after an upsert for the same step still belongs to that step's
+  // transcript, but the two message shapes differ, so it flushes separately
+  // rather than being silently reshaped.
+  return false;
+}
+
 /**
  * How to satisfy a resuming client.
  *
@@ -156,6 +200,14 @@ export class WorkspaceHub {
    * sequence, or the client loses track of its own position in the log.
    */
   readonly #pending = new Map<string, SequencedRecord[]>();
+
+  /**
+   * Where a record will merge into one already buffered, keyed by the identity
+   * that makes two events the *same* piece of work: a run streaming tokens
+   * arrives as hundreds of deltas for one `stepId`, and sending one frame per
+   * token is exactly what the coalescing window exists to prevent.
+   */
+  readonly #mergeIndex = new Map<string, SequencedRecord>();
   #flushTimer: ReturnType<typeof setTimeout> | null = null;
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -362,18 +414,14 @@ export class WorkspaceHub {
   // ── outbound ──────────────────────────────────────────────────────────────
 
   /**
-   * Fans out one store commit.
+   * Fans out a store commit.
    *
-   * Control events (approvals, lane transitions, session state) are sent
-   * immediately. Coalescible ones (step text and deltas) are buffered per board
-   * and flushed on a timer, so a phone radio sees ~10 messages/second instead of
-   * one per token.
+   * Events are appended contiguously, so each one's sequence is derivable from
+   * the commit's range — no second bookkeeping to keep in sync.
    */
   publish(commit: StoreCommit): void {
-    // Events are appended contiguously, so each one's sequence is derivable
-    // from the commit's range — no second bookkeeping to keep in sync.
     commit.events.forEach((event, index) => {
-      this.#publishRecord({
+      this.publishRecord({
         boardId: boardIdOfEvent(event) ?? commit.boardId,
         event,
         seq: commit.firstSeq + index,
@@ -381,17 +429,51 @@ export class WorkspaceHub {
     });
   }
 
-  #publishRecord(record: SequencedRecord): void {
+  /**
+   * Fans out one already-sequenced record.
+   *
+   * Public because callers that hold a single log entry (a replay, a test
+   * harness, a future admin tool) should not have to synthesise a fake commit
+   * to reach the delivery path.
+   */
+  publishRecord(record: SequencedRecord): void {
     if (this.#isCoalescible(record.event)) {
-      const key = record.boardId ?? WORKSPACE_SCOPE_KEY;
-      const buffer = this.#pending.get(key) ?? [];
-      buffer.push(record);
-      this.#pending.set(key, buffer);
-      this.#scheduleFlush();
+      this.#buffer(record);
       return;
     }
 
     this.#deliver(record);
+  }
+
+  /**
+   * Adds a record to its board's buffer, merging it into an existing entry when
+   * both describe the same unit of work.
+   *
+   * Time-batching alone is not enough. 500 deltas published inside one
+   * `COALESCE_MS` window would still be 500 frames in a single flush — the
+   * window would bound *when* they arrive, not *how many*. Merging by step is
+   * what actually reduces the frame count, and it is lossless: appended deltas
+   * concatenate, and an upsert for a step already buffered keeps the latest.
+   *
+   * Sequence numbers cannot merge, so a merged record keeps the **earliest**
+   * seq of the run it represents. The client then sees a sequence it has already
+   * advanced past, which is harmless — sequences are for gap detection, and no
+   * gap is created.
+   */
+  #buffer(record: SequencedRecord): void {
+    const key = record.boardId ?? WORKSPACE_SCOPE_KEY;
+    const mergeKey = mergeKeyFor(record);
+    const existing = this.#mergeIndex.get(mergeKey);
+
+    if (existing && mergeRecords(existing, record)) {
+      return;
+    }
+
+    const buffer = this.#pending.get(key) ?? [];
+    buffer.push(record);
+    this.#pending.set(key, buffer);
+    this.#mergeIndex.set(mergeKey, record);
+    this.#scheduleFlush();
   }
 
   #scheduleFlush(): void {
@@ -414,6 +496,7 @@ export class WorkspaceHub {
 
     const entries = [...this.#pending.entries()];
     this.#pending.clear();
+    this.#mergeIndex.clear();
 
     for (const [, records] of entries) {
       for (const record of records) {
@@ -443,20 +526,22 @@ export class WorkspaceHub {
       return;
     }
 
-    if (client.criticalOnly && this.#isCoalescible(record.event)) {
-      return;
-    }
-
+    // Re-check the buffer *before* deciding to drop. Doing it the other way
+    // round latches the flag permanently: a critical-only client short-circuits
+    // every coalescible event, so the recovery branch below never runs and the
+    // client is throttled until it disconnects. The spike confirmed the buffer
+    // does drain, so the flag has to be able to observe that.
     const buffered = client.socket.getBufferedAmount?.() ?? 0;
     if (buffered > HIGH_WATER_MARK) {
       client.criticalOnly = true;
-      if (this.#isCoalescible(record.event)) {
-        return;
-      }
     } else if (client.criticalOnly && buffered < HIGH_WATER_MARK / 2) {
       // Hysteresis: only clear once comfortably below, so a client hovering at
       // the mark does not flip state on every message.
       client.criticalOnly = false;
+    }
+
+    if (client.criticalOnly && this.#isCoalescible(record.event)) {
+      return;
     }
 
     this.#sendSequenced(client, record);
@@ -513,6 +598,7 @@ export class WorkspaceHub {
   }
 
   close(): void {
+    this.#mergeIndex.clear();
     if (this.#flushTimer !== null) {
       clearTimeout(this.#flushTimer);
       this.#flushTimer = null;
