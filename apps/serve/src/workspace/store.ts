@@ -45,6 +45,13 @@ const SNAPSHOT_BLOB_VERSION = 1;
  * require synthesising a fake one. Client mutations are still exactly one
  * event — enforced by `mutation-map.test.ts` and asserted here at runtime.
  */
+/** One log entry, decoded, for replay and diagnostics. */
+export interface SequencedRecord {
+  boardId: string | null;
+  event: WorkspaceEvent;
+  seq: number;
+}
+
 export interface StoreCommit {
   boardId: string | null;
   /** Appended events, oldest first. Length 1 for every client mutation. */
@@ -140,6 +147,9 @@ export class WorkspaceStore {
   readonly #options: Required<RetentionOptions>;
   readonly #queue: { promise: Promise<void> } = { promise: Promise.resolve() };
 
+  /** Subscribers notified once per commit, after memory is swapped. */
+  readonly #commitListeners = new Set<(commit: StoreCommit) => void>();
+
   #snapshot: WorkspaceSnapshot = {
     boards: [],
     preferences: EMPTY_PREFERENCES,
@@ -233,6 +243,38 @@ export class WorkspaceStore {
 
   headSeq(): number {
     return this.#db.headSeq();
+  }
+
+  /**
+   * Oldest sequence that can still be replayed — the sequence of the newest
+   * snapshot. Events at or below it have been pruned, so a client resuming from
+   * before this point cannot be served a complete gap and must get a snapshot
+   * instead.
+   */
+  replayFloorSeq(): number {
+    return this.#db.latestSnapshot()?.seq ?? 0;
+  }
+
+  /**
+   * Decoded events strictly after `seq`, oldest first.
+   *
+   * This is the read side of the resume path: a reconnecting client sends the
+   * last sequence it saw and gets back exactly the gap, so it never has to
+   * re-fetch a whole snapshot for a one-event miss. Decoding failures throw
+   * rather than yielding a partial list — a client must not be handed a
+   * silently truncated replay.
+   */
+  eventsSince(seq: number, limit?: number): SequencedRecord[] {
+    const rows = this.#db.readEventsSince(
+      seq,
+      limit ?? Number.MAX_SAFE_INTEGER
+    );
+
+    return rows.map((row) => ({
+      boardId: row.boardId,
+      event: this.#decode(row),
+      seq: row.seq,
+    }));
   }
 
   /** Path of the SQLite file, for the restore/export runbook. */
@@ -429,6 +471,25 @@ export class WorkspaceStore {
   }
 
   // ── internals ─────────────────────────────────────────────────────────────
+
+  /**
+   * Registers the single downstream emit path (spec §3: "Exactly one emit path
+   * from store → WS hub").
+   *
+   * Every writer already funnels through `#commit`, so subscribing here covers
+   * HTTP routes, the opencode bridge, the session watchdog, and the task
+   * service without any of them knowing a hub exists — and without any of them
+   * being able to forget to broadcast. Fires only after a successful write, so
+   * a subscriber never sees a commit that was rolled back.
+   *
+   * Returns an unsubscribe function.
+   */
+  onCommit(listener: (commit: StoreCommit) => void): () => void {
+    this.#commitListeners.add(listener);
+    return () => {
+      this.#commitListeners.delete(listener);
+    };
+  }
 
   #boardExists(boardId: string): boolean {
     return this.#snapshot.boards.some((board) => board.boardId === boardId);
@@ -698,7 +759,24 @@ export class WorkspaceStore {
     };
     this.#eventsSinceSnapshot += events.length;
 
-    return { boardId, events, firstSeq, lastSeq };
+    const commit = { boardId, events, firstSeq, lastSeq };
+
+    // Post-commit, so a subscriber can never observe state the log rejected.
+    //
+    // Isolated on purpose. This runs inside the serial commit queue, and a
+    // subscriber here is the websocket hub, which writes to sockets. A throw
+    // would propagate out of a commit that is already durable and already
+    // applied, so the caller would see `workspace-projection-failed` for a write
+    // that in fact succeeded — a lie about the log, and the worst kind.
+    for (const listener of this.#commitListeners) {
+      try {
+        listener(commit);
+      } catch (error) {
+        console.error("[store] commit listener failed:", error);
+      }
+    }
+
+    return commit;
   }
 
   /**

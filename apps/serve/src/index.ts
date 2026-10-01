@@ -6,7 +6,6 @@ import { cors } from "@elysiajs/cors";
 import { Elysia } from "elysia";
 import { OpenCodeBridge } from "./bridge/opencode/bridge";
 import { loadConfig } from "./config";
-import { createWsClientManager } from "./events/broadcaster";
 import { OpenCodeProcessManager } from "./opencode/process-manager";
 import { NativeFolderPicker } from "./projects/folder-picker";
 import { ProjectService } from "./projects/service";
@@ -19,6 +18,7 @@ import { SessionWatchdog } from "./tasks/session-watchdog";
 import { serveWebFrontend } from "./web-frontend";
 import { WorkspaceStore } from "./workspace/store";
 import { createWsHandler } from "./ws/handler";
+import { WorkspaceHub } from "./ws/hub";
 
 const config = loadConfig();
 const logger = createLogger(
@@ -40,29 +40,6 @@ const bridge = new OpenCodeBridge(
   config.opencodeBaseUrl,
   config.opencodeDirectory
 );
-const wsManager = createWsClientManager();
-
-/**
- * Temporary bridge for the legacy `workspace.updated` fan-out.
- *
- * The store no longer hands callers a snapshot to broadcast — it hands them a
- * commit. Until Phase 3 lands the hub that replays sequenced deltas, the
- * transport still speaks whole snapshots, so this reads the post-commit state
- * and sends it. Deliberately kept in one place so Phase 3 can delete it with a
- * single deletion rather than hunting four call sites.
- */
-function broadcastLegacySnapshot(
-  wsManager: ReturnType<typeof createWsClientManager>,
-  store: WorkspaceStore
-): void {
-  wsManager.broadcastRaw(
-    JSON.stringify({
-      type: "workspace.updated",
-      payload: store.getSnapshot(),
-      timestamp: Date.now(),
-    })
-  );
-}
 
 async function fileExists(candidate: string): Promise<boolean> {
   try {
@@ -114,6 +91,22 @@ logger.info("workspace-ready", {
   headSeq: workspaceStore.headSeq(),
 });
 
+/**
+ * The one downstream emit path (spec §3).
+ *
+ * Subscribing here rather than at each call site is the point: HTTP routes,
+ * the opencode bridge, the session watchdog, and the task service all mutate
+ * the store through its serial queue, so all of them reach the hub without any
+ * of them holding a socket reference or remembering to broadcast.
+ */
+const hub = new WorkspaceHub(workspaceStore, {
+  coalesceMs: config.coalesceMs,
+});
+
+workspaceStore.onCommit((commit) => {
+  hub.publish(commit);
+});
+
 const watchdog = new SessionWatchdog(bridge, {
   onTimeout: (sessionId, info, message) => {
     logger.warn("watchdog-timeout", {
@@ -141,7 +134,6 @@ const watchdog = new SessionWatchdog(bridge, {
         });
         // Legacy full-snapshot fan-out; Phase 3 replaces this with the hub
         // replaying sequenced deltas off the store's commit point.
-        broadcastLegacySnapshot(wsManager, workspaceStore);
       })
       .catch((error) => {
         logger.error(
@@ -166,8 +158,9 @@ const projectService = new ProjectService(
 );
 
 bridge.subscribe((event) => {
-  wsManager.broadcast(event);
-
+  // No raw opencode event fan-out. Agent events reach clients as sequenced
+  // Chorus events through the store, so external payload shapes never appear on
+  // the wire (spec §2 rule 5).
   if (event.type === "server.heartbeat") {
     return;
   }
@@ -198,8 +191,6 @@ bridge.subscribe((event) => {
         seq: commit.lastSeq,
         events: commit.events.map((entry) => entry.type),
       });
-
-      broadcastLegacySnapshot(wsManager, workspaceStore);
     })
     .catch((error) => {
       logger.error(
@@ -231,11 +222,11 @@ const app = new Elysia()
     return serveWebFrontend(url.pathname);
   })
   // API routes
-  .use(createHttpRoutes(bridge, boardTasks, wsManager))
+  .use(createHttpRoutes(bridge, boardTasks))
   .use(createProjectRoutes(projectService))
-  .use(createWorkspaceRoutes(workspaceStore, wsManager))
+  .use(createWorkspaceRoutes(workspaceStore))
   .use(voiceRoutes)
-  .use(createWsHandler(bridge, wsManager, boardTasks))
+  .use(createWsHandler(bridge, hub, boardTasks))
   .listen(config.port);
 
 logger.info("server-running", {
@@ -276,7 +267,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
     // then children. Each step awaited so the bounded budget is honest
     // and later async flushes (snapshot/coalescer) slot in without
     // reordering.
-    wsManager.close();
+    hub.close();
     bridge.stop();
     await app.server?.stop();
     // Order matters: stop intake, then tear down state channels, then flush

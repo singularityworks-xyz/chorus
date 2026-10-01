@@ -2,11 +2,9 @@ import { queueBoardPromptInputSchema } from "@chorus/contracts";
 import { createLogger } from "@chorus/logger";
 import { Elysia, t } from "elysia";
 import type { OpenCodeBridge } from "../bridge/opencode/bridge";
-import type { WsClientManager } from "../events/broadcaster";
 import { getDiff, getGitStatus, restore, track } from "../snapshot";
 import { getRevertState } from "../snapshot/session-revert";
 import type { BoardTaskService } from "../tasks/board-task-service";
-import { createWorkspaceMessage } from "./workspace";
 
 const logger = createLogger(
   {
@@ -17,8 +15,7 @@ const logger = createLogger(
 
 export function createHttpRoutes(
   bridge: OpenCodeBridge,
-  boardTasks: BoardTaskService,
-  wsManager: WsClientManager
+  boardTasks: BoardTaskService
 ) {
   return new Elysia()
     .get("/health", () => ({
@@ -40,12 +37,9 @@ export function createHttpRoutes(
           };
         }
 
-        return boardTasks.queuePrompt(parsed.data).then((result) => {
-          wsManager.broadcastRaw(
-            createWorkspaceMessage(boardTasks.getWorkspaceSnapshot())
-          );
-          return result;
-        });
+        // No broadcast here: the session write inside the task service commits
+        // to the store, and the store's commit hook feeds the hub.
+        return boardTasks.queuePrompt(parsed.data);
       },
       {
         body: t.Any(),

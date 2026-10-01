@@ -3,6 +3,8 @@ import path from "node:path";
 
 export interface ServerConfig {
   autoStartOpencode: boolean;
+  /** Delta coalescing window in ms (spec §7). */
+  coalesceMs: number;
   /** Where chorus.db, snapshots, and chorus.token live. */
   dataDir: string;
   /** Hard ceiling on chorus.db before the log compacts itself (spec §5). */
@@ -56,6 +58,7 @@ export function loadConfig(): ServerConfig {
     autoStartOpencode: process.env.OPENCODE_AUTO_START !== "false",
     // ~/.chorus keeps parity with where the pre-Phase-2 store wrote, so an
     // existing operator finds their state where they expect it.
+    coalesceMs: positive(process.env.COALESCE_MS, 100, "COALESCE_MS"),
     dataDir: process.env.DATA_DIR ?? path.join(homedir(), ".chorus"),
     dbSizeCapMb: positive(process.env.DB_SIZE_CAP_MB, 512, "DB_SIZE_CAP_MB"),
     retentionDays: positive(process.env.RETENTION_DAYS, 30, "RETENTION_DAYS"),

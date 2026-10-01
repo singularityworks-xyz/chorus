@@ -1,5 +1,4 @@
 import type { QueueBoardPromptInput } from "@chorus/contracts";
-import type { NormalizedAgentEvent } from "@chorus/oc-adapter";
 import type { ServerWebSocket } from "bun";
 
 export const WS_MESSAGE_TYPE = {
@@ -142,42 +141,4 @@ export interface WsResponse<T = unknown> {
   payload: T;
   timestamp: number;
   type: string;
-}
-
-export function broadcast(
-  clients: Set<ServerWebSocket<WsContext>>,
-  event: NormalizedAgentEvent
-): void {
-  const message = JSON.stringify({
-    type: `agent.${event.activity ?? event.type}`,
-    payload: event,
-    timestamp: Date.now(),
-  } satisfies WsResponse<NormalizedAgentEvent>);
-
-  for (const ws of clients) {
-    ws.send(message);
-  }
-}
-
-export function broadcastRaw(
-  clients: Set<ServerWebSocket<WsContext>>,
-  message: string
-): void {
-  for (const ws of clients) {
-    ws.send(message);
-  }
-}
-
-export function sendResponse<T>(
-  ws: ServerWebSocket<WsContext>,
-  type: string,
-  payload: T
-): void {
-  ws.send(
-    JSON.stringify({
-      type,
-      payload,
-      timestamp: Date.now(),
-    } satisfies WsResponse<T>)
-  );
 }
