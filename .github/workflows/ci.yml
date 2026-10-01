@@ -29,6 +29,8 @@ jobs:
         run: bun ci
       - name: Lint
         run: bunx ultracite check
+      - name: Log Gate
+        run: bash scripts/check-log-gate.sh
 
   typecheck:
     name: Typecheck

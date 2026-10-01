@@ -44,8 +44,7 @@ This version has breaking changes — APIs, conventions, and file structure may 
 - use `apps/serve` for bridge/server code when that app exists
 - use `elysia` for http and websocket server code
 - keep routes, websocket handlers, adapters, and event processing in separate files/modules
-- treat `spacetimedb` as the shared realtime state layer
-- treat `websocket` as the low-latency local command channel
+- treat the native `websocket` `/ws` event log as the single shared realtime state layer (commands over HTTP, state over WS)
 - do not duplicate durable state logic in both websocket handlers and UI code
 - normalize external events before using them in app state or UI
 

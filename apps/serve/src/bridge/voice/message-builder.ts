@@ -27,18 +27,11 @@ const COMPLETED_MESSAGES: Record<string, string> = {
   concise: "Task completed.",
 };
 
-const POLICY_BLOCKED_MESSAGES: Record<string, string> = {
-  default:
-    "A policy rule has blocked an action. Please review the policy decision.",
-  concise: "Policy blocked action.",
-};
-
 const MESSAGE_MAP: Record<VoiceNotificationType, Record<string, string>> = {
   approval_needed: APPROVAL_MESSAGES,
   task_blocked: BLOCKED_MESSAGES,
   task_failed: FAILED_MESSAGES,
   task_completed: COMPLETED_MESSAGES,
-  policy_blocked: POLICY_BLOCKED_MESSAGES,
   task_summary: {
     default: "Task summary available.",
     concise: "Summary ready.",
@@ -73,11 +66,7 @@ export function shouldPlayNotification(
   }
 
   if (settings.failuresOnly) {
-    return (
-      type === "task_failed" ||
-      type === "task_blocked" ||
-      type === "policy_blocked"
-    );
+    return type === "task_failed" || type === "task_blocked";
   }
 
   return true;

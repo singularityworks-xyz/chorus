@@ -5,7 +5,6 @@ export const VoiceNotificationTypeEnum = z.enum([
   "task_blocked",
   "task_failed",
   "task_completed",
-  "policy_blocked",
   "task_summary",
 ]);
 

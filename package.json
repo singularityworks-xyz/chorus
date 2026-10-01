@@ -1,6 +1,6 @@
 {
   "name": "chorus",
-  "version": "0.0.97",
+  "version": "0.0.99",
   "private": true,
   "scripts": {
     "build": "turbo run build",
@@ -12,7 +12,8 @@
     "check-types": "tsc --noEmit -p tsconfig.json && turbo run check-types",
     "version-packages": "changeset version",
     "release": "changeset publish",
-    "check": "ultracite fix"
+    "check": "ultracite fix && bun run check:log",
+    "check:log": "bash scripts/check-log-gate.sh"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.10",
@@ -29,7 +30,7 @@
     "vscode": "npm:@codingame/monaco-vscode-extension-api",
     "monaco-editor": "npm:@codingame/monaco-vscode-editor-api"
   },
-  "packageManager": "bun@1.3.11",
+  "packageManager": "bun@1.4.0",
   "workspaces": [
     "apps/*",
     "packages/*"
