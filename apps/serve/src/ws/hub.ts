@@ -77,6 +77,21 @@ export const RECOVERY_SENDS = 2;
  */
 export const MAX_COALESCE_BUFFER = 2000;
 
+/**
+ * Consecutive frames a transport may discard before the socket is closed.
+ *
+ * Backpressure clears on its own once the peer drains. A discarded frame does
+ * not, so a peer that keeps returning 0 is gone and every subsequent control
+ * event would be discarded too.
+ */
+export const MAX_CONSECUTIVE_DROPS = 5;
+
+/** Viewport frames allowed per minute, exempt from the command budget. */
+export const MAX_TELEMETRY_PER_MINUTE = 600;
+
+/** Inbound frames that are liveness or telemetry, not commands. */
+const BUDGET_EXEMPT_TYPES = new Set(["pong", "viewport.sync"]);
+
 export const PING_INTERVAL_MS = 30_000;
 export const PONG_TIMEOUT_MS = 10_000;
 export const COALESCE_MS = 100;
@@ -251,6 +266,7 @@ interface Client {
   cleanSends: number;
   commandsThisMinute: number;
   commandWindowStart: number;
+  consecutiveDrops: number;
   criticalOnly: boolean;
   /** Frames the transport discarded outright (`send()` returned 0). */
   droppedFrames: number;
@@ -261,6 +277,8 @@ interface Client {
   /** True once `hello` completed — nothing is pushed before that. */
   ready: boolean;
   socket: HubSocket;
+  telemetryThisMinute: number;
+  telemetryWindowStart: number;
 }
 
 export interface HubOptions {
@@ -333,8 +351,11 @@ export class WorkspaceHub {
       boards: null,
       cleanSends: 0,
       commandsThisMinute: 0,
+      consecutiveDrops: 0,
       droppedFrames: 0,
       commandWindowStart: this.#now(),
+      telemetryThisMinute: 0,
+      telemetryWindowStart: this.#now(),
       criticalOnly: false,
       // The socket's connection id, and the only identity. A separate
       // generated id here silently broke removal, because the id map is keyed
@@ -420,7 +441,15 @@ export class WorkspaceHub {
       return;
     }
 
-    if (!this.#consumeCommandBudget(client)) {
+    // Telemetry and liveness are not commands. Charging them meant one
+    // second-long canvas drag (60+ viewport.sync frames) hard-closed the socket
+    // with 4429, and a client pinging on a 1 s timer was dropped at 60 s.
+    if (
+      !(
+        BUDGET_EXEMPT_TYPES.has(message.type) ||
+        this.#consumeCommandBudget(client)
+      )
+    ) {
       // Spec §6: cap per-client command rate. Dropping the socket is the point;
       // a silent throttle would just let a flood continue.
       client.socket.close?.(WS_CLOSE_RATE_LIMITED, "command rate exceeded");
@@ -428,11 +457,33 @@ export class WorkspaceHub {
       return;
     }
 
-    switch (message.type) {
+    this.#dispatch(client, socket, parsed, message.type);
+  }
+
+  /**
+   * Routes one validated frame.
+   *
+   * Split out of `handleRawMessage` so the framing concerns (parse, rate limit)
+   * and the per-type handling can be read independently.
+   */
+  #dispatch(
+    client: Client,
+    socket: HubSocket,
+    parsed: unknown,
+    type: string
+  ): void {
+    switch (type) {
       case "hello": {
         const hello = clientHelloSchema.safeParse(parsed);
         if (!hello.success) {
           this.#sendError(socket, "invalid hello");
+          return;
+        }
+        // A second hello mid-stream would replay from the client-supplied
+        // `since` rather than its real cursor, re-sending sequences it already
+        // applied.
+        if (client.ready) {
+          this.#sendError(socket, "already initialised");
           return;
         }
         this.#handleHello(client, hello.data.since);
@@ -442,6 +493,12 @@ export class WorkspaceHub {
       case "resync": {
         if (!resyncRequestSchema.safeParse(parsed).success) {
           this.#sendError(socket, "invalid resync");
+          return;
+        }
+        if (!client.ready) {
+          // Otherwise a snapshot can precede ready and be followed by a second
+          // snapshot from the handshake still in flight.
+          this.#sendError(socket, "resync before hello");
           return;
         }
         this.#sendSnapshot(client);
@@ -461,7 +518,16 @@ export class WorkspaceHub {
           this.#sendError(socket, "invalid viewport.sync");
           return;
         }
-        this.#relayViewport(client, viewport.data.payload);
+        // Viewport payloads carry a projectId, not a boardId, so there is
+        // nothing to scope by today. The filter below is wired for the day a
+        // payload does carry a board, rather than silently ignoring the scope.
+        const { boardId: viewportBoardId } = viewport.data.payload;
+        // Throttled, not disconnected: a stale viewport is worthless but a
+        // dropped connection over one is not a reasonable trade.
+        if (!this.#consumeTelemetryBudget(client)) {
+          return;
+        }
+        this.#relayViewport(client, viewport.data.payload, viewportBoardId);
         return;
       }
 
@@ -645,6 +711,25 @@ export class WorkspaceHub {
     this.#flushTimer.unref?.();
   }
 
+  /**
+   * Sends a command reply to one client through the accounted path.
+   *
+   * The hub is supposed to be the only thing that writes to a client socket. A
+   * reply written directly would never mark a congested client, never count
+   * toward backpressure, and would keep flowing to a peer too slow to drain it.
+   *
+   * Returns false when the client is gone, so callers do not pretend a reply was
+   * delivered.
+   */
+  reply(socket: HubSocket, message: unknown): boolean {
+    const client = this.#find(socket);
+    if (!client) {
+      return false;
+    }
+    this.#send(client, message);
+    return true;
+  }
+
   /** Flushes every buffered board. Exposed so tests need not wait on timers. */
   flush(): void {
     if (this.#pending.size === 0) {
@@ -698,7 +783,15 @@ export class WorkspaceHub {
     if (buffered > HIGH_WATER_MARK) {
       return true;
     }
-    return client.backpressuredFrames > 0 && client.cleanSends === 0;
+    // A drop counts too. `send()` returning 0 means the transport discarded the
+    // frame outright, which is stronger evidence than backpressure that the peer
+    // is gone. Counting only backpressured frames meant a socket returning 0 kept
+    // receiving every control event, silently lost all of them, and was never
+    // marked sick.
+    return (
+      (client.backpressuredFrames > 0 || client.droppedFrames > 0) &&
+      client.cleanSends === 0
+    );
   }
 
   /**
@@ -795,7 +888,11 @@ export class WorkspaceHub {
    * The one sanctioned passthrough (spec §4): viewport relay is ephemeral,
    * unsequenced, unpersisted, and never touches the event log.
    */
-  #relayViewport(origin: Client, payload: Record<string, unknown>): void {
+  #relayViewport(
+    origin: Client,
+    payload: Record<string, unknown>,
+    viewportBoardId: unknown
+  ): void {
     const message = JSON.stringify({
       payload,
       timestamp: this.#now(),
@@ -806,7 +903,19 @@ export class WorkspaceHub {
       if (client === origin || !client.ready) {
         continue;
       }
-      client.socket.send(message);
+      // Same board filter as event delivery. Harmless while every client is
+      // subscribed to all boards, but the moment board scoping lands, board A's
+      // viewport would go to board B's subscribers.
+      if (
+        client.boards &&
+        typeof viewportBoardId === "string" &&
+        !client.boards.has(viewportBoardId)
+      ) {
+        continue;
+      }
+      // Accounted like any other frame: an unaccounted write is one a congested
+      // client keeps receiving.
+      this.#send(client, JSON.parse(message));
     }
   }
 
@@ -847,7 +956,7 @@ export class WorkspaceHub {
     // Latched so a commit still in flight cannot arm a fresh flush timer that
     // nothing will ever clear.
     this.#closed = true;
-    this.#mergeIndex.clear();
+
     if (this.#flushTimer !== null) {
       clearTimeout(this.#flushTimer);
       this.#flushTimer = null;
@@ -856,12 +965,16 @@ export class WorkspaceHub {
       clearInterval(this.#heartbeatTimer);
       this.#heartbeatTimer = null;
     }
-    this.#pending.clear();
+
+    // Spec shutdown order: flush coalescers, then close sockets. Discarding the
+    // window would drop up to `COALESCE_MS` of deltas and leave the client with
+    // sequences it will never learn were consumed.
+    this.flush();
 
     for (const client of [...this.#clients]) {
       client.socket.close?.(1001, "server shutting down");
+      this.#drop(client);
     }
-    this.#clients.clear();
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────
@@ -873,6 +986,17 @@ export class WorkspaceHub {
    */
   #find(socket: HubSocket): Client | undefined {
     return this.#clientsById.get(socket.id);
+  }
+
+  /** ~10 Hz sustained, which is well above any real pan or zoom. */
+  #consumeTelemetryBudget(client: Client): boolean {
+    const now = this.#now();
+    if (now - client.telemetryWindowStart >= 60_000) {
+      client.telemetryWindowStart = now;
+      client.telemetryThisMinute = 0;
+    }
+    client.telemetryThisMinute += 1;
+    return client.telemetryThisMinute <= MAX_TELEMETRY_PER_MINUTE;
   }
 
   #consumeCommandBudget(client: Client): boolean {
@@ -897,20 +1021,38 @@ export class WorkspaceHub {
 
     if (typeof status !== "number" || status > 0) {
       client.cleanSends += 1;
+      client.consecutiveDrops = 0;
       return;
     }
 
     client.cleanSends = 0;
-    if (status === 0) {
-      client.droppedFrames += 1;
-    } else {
+
+    if (status !== 0) {
       client.backpressuredFrames += 1;
+      return;
+    }
+
+    client.droppedFrames += 1;
+    client.consecutiveDrops += 1;
+
+    // Backpressure resolves on its own; a discarded frame does not. A peer that
+    // keeps returning 0 is gone, and leaving it registered means every future
+    // control event is dropped too — silently, into a counter nobody alerts on.
+    if (client.consecutiveDrops >= MAX_CONSECUTIVE_DROPS) {
+      client.socket.close?.(1011, "frames dropped");
+      this.#drop(client);
     }
   }
 
   #sendError(socket: HubSocket, message: string): void {
-    socket.send(
-      JSON.stringify(serverErrorSchema.parse({ message, type: "error" }))
-    );
+    const frame = serverErrorSchema.parse({ message, type: "error" });
+    // Accounted, so a client flooding malformed frames is treated as sick rather
+    // than generating an unbounded stream of unanswered errors.
+    const client = this.#find(socket);
+    if (client) {
+      this.#send(client, frame);
+      return;
+    }
+    socket.send(JSON.stringify(frame));
   }
 }

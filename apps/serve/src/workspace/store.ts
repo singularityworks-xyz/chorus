@@ -762,8 +762,18 @@ export class WorkspaceStore {
     const commit = { boardId, events, firstSeq, lastSeq };
 
     // Post-commit, so a subscriber can never observe state the log rejected.
+    //
+    // Isolated on purpose. This runs inside the serial commit queue, and a
+    // subscriber here is the websocket hub, which writes to sockets. A throw
+    // would propagate out of a commit that is already durable and already
+    // applied, so the caller would see `workspace-projection-failed` for a write
+    // that in fact succeeded — a lie about the log, and the worst kind.
     for (const listener of this.#commitListeners) {
-      listener(commit);
+      try {
+        listener(commit);
+      } catch (error) {
+        console.error("[store] commit listener failed:", error);
+      }
     }
 
     return commit;

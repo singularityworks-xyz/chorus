@@ -160,21 +160,23 @@ export function createWsHandler(
         return;
       }
 
-      handleCommand(ws, message, bridge, boardTasks, hub.clientCount()).catch(
-        (error: unknown) => {
-          console.error("[ws] handler error:", error);
-          ws.send(
-            JSON.stringify({
-              payload: {
-                message:
-                  error instanceof Error ? error.message : "unknown error",
-              },
-              timestamp: Date.now(),
-              type: WS_RESPONSE_TYPE.ERROR,
-            })
-          );
-        }
-      );
+      handleCommand(
+        ws,
+        message,
+        bridge,
+        boardTasks,
+        hub.clientCount(),
+        hub.reply.bind(hub)
+      ).catch((error: unknown) => {
+        console.error("[ws] handler error:", error);
+        hub.reply(ws, {
+          payload: {
+            message: error instanceof Error ? error.message : "unknown error",
+          },
+          timestamp: Date.now(),
+          type: WS_RESPONSE_TYPE.ERROR,
+        });
+      });
     },
 
     close(ws) {
@@ -206,10 +208,25 @@ async function handleCommand(
   message: { type: string; payload?: unknown },
   bridge: OpenCodeBridge,
   boardTasks: BoardTaskService,
-  hubClientCount = 0
+  hubClientCount = 0,
+  reply: (socket: HubSocket, payload: unknown) => boolean = (
+    socket,
+    payload
+  ) => {
+    (socket as { send: (data: string) => unknown }).send(
+      JSON.stringify(payload)
+    );
+    return true;
+  }
 ): Promise<void> {
+  // Replies go through the hub so they are accounted like every other frame.
+  // Writing straight to the socket made this a second, unthrottled write path:
+  // a client too slow to drain control events kept receiving replies, and never
+  // registered as congested.
   const wsSend = (payload: Record<string, unknown>) => {
-    (ws as { send: (data: string) => void }).send(JSON.stringify(payload));
+    // A false result means the client disconnected before its reply arrived.
+    // Nothing to do, and nothing to pretend about.
+    reply(ws as HubSocket, payload);
   };
 
   const msg = message as WsMessage;

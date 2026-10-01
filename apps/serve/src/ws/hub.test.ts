@@ -9,6 +9,7 @@ import {
   decideResume,
   HIGH_WATER_MARK,
   type HubSocket,
+  MAX_CONSECUTIVE_DROPS,
   PONG_TIMEOUT_MS,
   WorkspaceHub,
 } from "./hub";
@@ -459,7 +460,10 @@ describe("command rate limit", () => {
     hub.register(socket);
 
     for (let index = 0; index < 61; index += 1) {
-      await hub.handleRawMessage(socket, JSON.stringify({ type: "pong" }));
+      await hub.handleRawMessage(
+        socket,
+        JSON.stringify({ since: 0, type: "hello" })
+      );
     }
 
     expect(socket.closeCalls.at(-1)?.code).toBe(4429);
@@ -478,12 +482,18 @@ describe("command rate limit", () => {
     hub.register(socket);
 
     for (let index = 0; index < 60; index += 1) {
-      await hub.handleRawMessage(socket, JSON.stringify({ type: "pong" }));
+      await hub.handleRawMessage(
+        socket,
+        JSON.stringify({ since: 0, type: "hello" })
+      );
     }
     expect(socket.closeCalls).toHaveLength(0);
 
     clock += 61_000;
-    await hub.handleRawMessage(socket, JSON.stringify({ type: "pong" }));
+    await hub.handleRawMessage(
+      socket,
+      JSON.stringify({ since: 0, type: "hello" })
+    );
 
     expect(socket.closeCalls).toHaveLength(0);
     hub.close();
@@ -1246,6 +1256,197 @@ describe("coalescing correctness", () => {
     expect(delivered[0]?.fromSeq).toBeGreaterThan(1);
 
     hub.close();
+    cleanup();
+  });
+});
+
+describe("telemetry and liveness are not commands", () => {
+  test("a burst of viewport frames does not close the socket", async () => {
+    // A one-second canvas drag produces well over 60 frames. Charging those
+    // against the command budget hard-closed a perfectly healthy connection
+    // with 4429.
+    const store = makeStore();
+    await store.load();
+    const clock = 1_000_000;
+    const hub = new WorkspaceHub(store, { now: () => clock });
+    const socket = makeSocket();
+    const peer = makeSocket();
+    hub.register(peer);
+    await connect(hub, peer, 0);
+    await connect(hub, socket, 0);
+
+    for (let index = 0; index < 200; index += 1) {
+      await hub.handleRawMessage(
+        socket,
+        JSON.stringify({
+          payload: {
+            projectId: "p1",
+            viewport: { x: index, y: index, zoom: 1 },
+          },
+          type: "viewport.sync",
+        })
+      );
+    }
+
+    expect(socket.closeCalls).toHaveLength(0);
+    expect(hub.clientCount()).toBe(2);
+
+    hub.close();
+    cleanup();
+  });
+
+  test("pong is never charged against the command budget", async () => {
+    // A client pinging every second for a minute was previously disconnected at
+    // 60 s, which is exactly how long a healthy idle session lasts.
+    const store = makeStore();
+    await store.load();
+    let clock = 1_000_000;
+    const hub = new WorkspaceHub(store, { now: () => clock });
+    const socket = makeSocket();
+    await connect(hub, socket, 0);
+
+    for (let second = 0; second < 60; second += 1) {
+      clock += 1000;
+      await hub.handleRawMessage(socket, JSON.stringify({ type: "pong" }));
+    }
+
+    expect(socket.closeCalls).toHaveLength(0);
+    expect(hub.clientCount()).toBe(1);
+
+    hub.close();
+    cleanup();
+  });
+
+  test("a repeated hello is refused rather than replaying again", async () => {
+    // Replaying from the client-supplied `since` rather than its real cursor
+    // re-sends sequences it has already applied.
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store);
+    const socket = makeSocket();
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    await hub.handleRawMessage(
+      socket,
+      JSON.stringify({ since: 0, type: "hello" })
+    );
+
+    expect(socket.messages).toHaveLength(1);
+    expect(socket.messages[0]?.type).toBe("error");
+
+    hub.close();
+    cleanup();
+  });
+
+  test("resync before hello is refused", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store);
+    const socket = makeSocket();
+    hub.register(socket);
+    socket.messages.length = 0;
+
+    await hub.handleRawMessage(socket, JSON.stringify({ type: "resync" }));
+
+    expect(socket.messages.map((m) => m.type)).toEqual(["error"]);
+
+    hub.close();
+    cleanup();
+  });
+
+  test("a peer discarding frames is closed rather than ignored", async () => {
+    // Backpressure resolves on its own; a discarded frame does not. A socket
+    // returning 0 kept receiving every control event and silently lost them all.
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store);
+    const socket = makeSocket();
+    await connect(hub, socket, 0);
+    socket.closeCalls.length = 0;
+    socket.send = () => 0;
+
+    for (let index = 0; index < MAX_CONSECUTIVE_DROPS; index += 1) {
+      hub.publishRecord({
+        boardId: "board-1",
+        event: {
+          boardId: "board-1",
+          kind: "permission",
+          taskId: "t1",
+          ts: index + 1,
+          type: "card.waiting_for_approval",
+        },
+        seq: index + 1,
+      });
+    }
+
+    expect(socket.closeCalls.at(-1)?.code).toBe(1011);
+    expect(hub.clientCount()).toBe(0);
+
+    hub.close();
+    cleanup();
+  });
+
+  test("close flushes the coalescing window instead of discarding it", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    const socket = makeSocket();
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    hub.publishRecord({
+      boardId: "board-1",
+      event: {
+        boardId: "board-1",
+        delta: "pending",
+        stepId: "s1",
+        taskId: "t1",
+        ts: 1,
+        type: "step.delta_appended",
+      },
+      seq: 1,
+    });
+
+    hub.close();
+
+    expect(socket.messages).toHaveLength(1);
+    expect((socket.messages[0]?.event as { delta: string }).delta).toBe(
+      "pending"
+    );
+
+    cleanup();
+  });
+
+  test("a throwing commit listener cannot fail a durable write", async () => {
+    // The listener is the hub, which writes to sockets, and it runs inside the
+    // serial commit queue. A throw here would report a projection failure for a
+    // write that is already durable.
+    const store = makeStore();
+    await store.load();
+
+    let calls = 0;
+    store.onCommit(() => {
+      calls += 1;
+      throw new Error("subscriber exploded");
+    });
+
+    const commit = await store.applyMutation({
+      baseRevision: null,
+      clientId: "t",
+      mutationId: "m1",
+      payload: {
+        seed: {
+          repo: { directory: "/tmp/r", sandboxes: [], worktree: "/tmp/r" },
+          title: "T",
+        },
+      },
+      type: "board.create",
+    });
+
+    expect(calls).toBe(1);
+    expect(commit?.lastSeq).toBe(1);
+
     cleanup();
   });
 });
