@@ -73,6 +73,8 @@ This version has breaking changes — APIs, conventions, and file structure may 
 - the commit body must contain at least one clear paragraph describing what changed, where it changed, and any important behavior or migration detail
 - do not use one-line commits without a body
 - keep the subject concise and put the implementation detail in the body paragraph
+- **merge pull requests normally (`gh pr merge --merge`), never with `--squash` or `--rebase`** — each phase must stay individually revertable on `main`, so the commit history is part of the deliverable
+- wait for CI to reach a clean state before merging; do not merge while checks are pending or failing
 
 ## Chorus-specific rules
 
