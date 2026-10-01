@@ -100,11 +100,26 @@ export function boardIdOfEvent(event: WorkspaceEvent): string | null {
  * the two must agree, and the schema refuses to build a message where they do
  * not. A mismatch would route a patch to the wrong board's subscribers, which
  * is unrecoverable for the client.
+ *
+ * `seq` is the *highest* log sequence this frame carries and `fromSeq` the
+ * lowest, and both matter because the hub coalesces a burst of deltas into one
+ * frame. A frame covering log rows 6..500 reports `fromSeq: 6, seq: 500`: the
+ * client advances its resume cursor to 500 and can verify the next frame
+ * continues at 501.
+ *
+ * Collapsing the range to a single number is what previously broke resume. A
+ * frame covering 6..500 that reported only `seq: 6` left the client resuming
+ * from 6, so `eventsSince(6)` replayed 7..500 and the transcript was appended
+ * twice — permanently, and invisibly, because the replay is a faithful read of
+ * the log.
  */
 export const sequencedEventSchema = z
   .object({
     boardId: z.string().min(1).nullable(),
     event: workspaceEventSchema,
+    /** Lowest log sequence covered by this frame. */
+    fromSeq: z.number().int().nonnegative(),
+    /** Highest log sequence covered; the client's resume cursor after applying. */
     seq: z.number().int().nonnegative(),
     ts: z.number().int().nonnegative(),
     type: z.literal("event"),
@@ -116,6 +131,13 @@ export const sequencedEventSchema = z
         code: "custom",
         message: `envelope boardId ${String(message.boardId)} does not match event board ${String(actual)}`,
         path: ["boardId"],
+      });
+    }
+    if (message.fromSeq > message.seq) {
+      ctx.addIssue({
+        code: "custom",
+        message: `fromSeq ${message.fromSeq} is after seq ${message.seq}`,
+        path: ["fromSeq"],
       });
     }
   });
@@ -132,18 +154,42 @@ export const serverErrorSchema = z.object({
   type: z.literal("error"),
 });
 
+/** Heartbeat. Clients must answer with `pong` or be dropped. */
+export const serverPingSchema = z.object({
+  at: z.number().int().nonnegative(),
+  type: z.literal("ping"),
+});
+
+/**
+ * Ephemeral viewport passthrough (spec §4). Unsequenced and unpersisted by
+ * design — it describes where someone is looking, not what changed.
+ */
+export const serverViewportSyncSchema = z.object({
+  payload: z.record(z.string(), z.unknown()),
+  timestamp: z.number().int().nonnegative(),
+  type: z.literal("viewport.sync"),
+});
+
 /**
  * Union of every downstream message. Each variant is parsed individually by the
  * hub, so this exists for tests and for any client that accepts all shapes.
+ *
+ * Every frame the server emits is in here. A client validating against this
+ * union would otherwise reject the heartbeat and read a healthy server as
+ * broken.
  */
 export const serverMessageSchema = z.union([
+  serverPingSchema,
   serverReadySchema,
+  serverViewportSyncSchema,
   sequencedEventSchema,
   snapshotMessageSchema,
   serverErrorSchema,
 ]);
 
+export type ServerPing = z.infer<typeof serverPingSchema>;
 export type ServerReady = z.infer<typeof serverReadySchema>;
+export type ServerViewportSync = z.infer<typeof serverViewportSyncSchema>;
 export type SequencedEvent = z.infer<typeof sequencedEventSchema>;
 export type SnapshotMessage = z.infer<typeof snapshotMessageSchema>;
 export type ServerError = z.infer<typeof serverErrorSchema>;

@@ -3,6 +3,7 @@ import {
   boardIdOfEvent,
   clientHelloSchema,
   clientPongSchema,
+  isCoalescibleEvent,
   MAX_REPLAY_GAP,
   resyncRequestSchema,
   sequencedEventSchema,
@@ -66,6 +67,16 @@ export const WS_COMMAND_LIMIT_PER_MINUTE = 60;
  */
 export const RECOVERY_SENDS = 2;
 
+/**
+ * Hard cap on records held in one coalescing window.
+ *
+ * Merging only collapses records for the *same* step, and a busy run streams
+ * many distinct parts, so the window grows with the event rate rather than with
+ * the merge rate. Without a bound, a long window during a replay accumulates
+ * thousands of entries that congested clients are about to skip anyway.
+ */
+export const MAX_COALESCE_BUFFER = 2000;
+
 export const PING_INTERVAL_MS = 30_000;
 export const PONG_TIMEOUT_MS = 10_000;
 export const COALESCE_MS = 100;
@@ -92,7 +103,7 @@ export interface HubSocket {
 }
 
 /** Identity under which two buffered records describe the same work. */
-function mergeKeyFor(record: SequencedRecord): string {
+function mergeKeyFor(record: BufferedRecord): string {
   const event = record.event;
   if (event.type === "step.delta_appended") {
     return `${record.boardId ?? ""}|delta|${event.taskId}|${event.stepId}`;
@@ -100,23 +111,69 @@ function mergeKeyFor(record: SequencedRecord): string {
   if (event.type === "step.upserted") {
     return `${record.boardId ?? ""}|upsert|${event.taskId}|${event.step.id}`;
   }
-  return `${record.boardId ?? ""}|${record.seq}`;
+  return `${record.boardId ?? ""}|${record.fromSeq}`;
 }
 
 /**
- * Folds `next` into `target` in place when they are mergeable, reporting
- * whether the merge happened. Returns false when the pair is not the same unit
- * of work, in which case the caller buffers `next` separately.
+ * A record as it sits in the coalescing window, carrying the range of log
+ * sequences it now represents.
+ *
+ * The range is what makes coalescing compatible with resume. Merging folds log
+ * rows 6..500 into one frame, and that frame has to tell the client it covers
+ * all of them — otherwise the client resumes from the earliest sequence, the
+ * server replays 7..500, and the transcript is appended twice.
  */
-function mergeRecords(target: SequencedRecord, next: SequencedRecord): boolean {
+interface BufferedRecord {
+  boardId: string | null;
+  event: WorkspaceEvent;
+  /** Lowest log sequence covered. */
+  fromSeq: number;
+  /** Highest log sequence covered; the client's cursor after applying. */
+  toSeq: number;
+}
+
+function bufferOf(record: SequencedRecord): BufferedRecord {
+  return {
+    boardId: record.boardId,
+    event: record.event,
+    fromSeq: record.seq,
+    toSeq: record.seq,
+  };
+}
+
+/**
+ * Folds `next` into `target` when they are mergeable, reporting whether the
+ * merge happened. Returns false when the pair is not the same unit of work, in
+ * which case the caller buffers `next` separately.
+ *
+ * Builds a new event rather than mutating `target.event`: the record handed to
+ * the hub is the same object the store passed to every commit listener, and a
+ * committed event that changes after commit is not a safe invariant to rely on.
+ */
+function mergeRecords(target: BufferedRecord, next: SequencedRecord): boolean {
   const a = target.event;
   const b = next.event;
+
+  // Contiguity is required, not optional.
+  //
+  // A frame declares the sequence range it covers, so merging must not span a
+  // gap. Folding step A's sequences 1 and 3 into one frame would claim 1..3
+  // while sequence 2 belongs to step B: the client's cursor jumps to 3, B's
+  // delta is then dismissed as already-seen, and its content is lost.
+  //
+  // Interleaved streams therefore compress less. The hot path is unaffected: a
+  // token stream for one part produces consecutive sequences for one step, which
+  // merges in full.
+  if (next.seq !== target.toSeq + 1) {
+    return false;
+  }
 
   if (a.type === "step.delta_appended" && b.type === "step.delta_appended") {
     if (a.taskId !== b.taskId || a.stepId !== b.stepId) {
       return false;
     }
-    a.delta = `${a.delta}${b.delta}`;
+    target.event = { ...a, delta: `${a.delta}${b.delta}`, ts: b.ts };
+    target.toSeq = next.seq;
     return true;
   }
 
@@ -125,7 +182,8 @@ function mergeRecords(target: SequencedRecord, next: SequencedRecord): boolean {
       return false;
     }
     // Latest content wins: the later upsert is the more current view of the step.
-    a.step = b.step;
+    target.event = { ...a, step: b.step, ts: b.ts };
+    target.toSeq = next.seq;
     return true;
   }
 
@@ -222,6 +280,10 @@ export interface HubStats {
 
 export class WorkspaceHub {
   readonly #clients = new Set<Client>();
+
+  /** Same clients as `#clients`, keyed by connection id. Kept adjacent so the two
+   * cannot drift: every removal path must update both. */
+  readonly #clientsById = new Map<string, Client>();
   readonly #store: WorkspaceStore;
   readonly #now: () => number;
   readonly #coalesceMs: number;
@@ -232,7 +294,7 @@ export class WorkspaceHub {
    * `SequencedRecord`s, not bare events: a coalesced delta must keep its
    * sequence, or the client loses track of its own position in the log.
    */
-  readonly #pending = new Map<string, SequencedRecord[]>();
+  readonly #pending = new Map<string, BufferedRecord[]>();
 
   /**
    * Where a record will merge into one already buffered, keyed by the identity
@@ -240,9 +302,11 @@ export class WorkspaceHub {
    * arrives as hundreds of deltas for one `stepId`, and sending one frame per
    * token is exactly what the coalescing window exists to prevent.
    */
-  readonly #mergeIndex = new Map<string, SequencedRecord>();
+  readonly #mergeIndex = new Map<string, BufferedRecord>();
   #flushTimer: ReturnType<typeof setTimeout> | null = null;
+  #closed = false;
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  #pendingDepth = 0;
 
   constructor(store: WorkspaceStore, options: HubOptions = {}) {
     this.#store = store;
@@ -255,6 +319,15 @@ export class WorkspaceHub {
   // ── registry ──────────────────────────────────────────────────────────────
 
   register(socket: HubSocket): Client {
+    // An id can outlive its socket if a connection is replaced in place. Without
+    // this, the new client shadows the old one in the id map while the old stays
+    // in the set — still receiving events and pings into a dead socket, and
+    // unreachable by unregister.
+    const existing = this.#clientsById.get(socket.id);
+    if (existing) {
+      this.#drop(existing);
+    }
+
     const client: Client = {
       backpressuredFrames: 0,
       boards: null,
@@ -426,7 +499,7 @@ export class WorkspaceHub {
 
       case "replay": {
         for (const record of this.#store.eventsSince(decision.fromSeq)) {
-          this.#sendSequenced(client, record);
+          this.#sendSequenced(client, bufferOf(record));
         }
         client.lastSeq = head;
         break;
@@ -473,9 +546,13 @@ export class WorkspaceHub {
    * the commit's range — no second bookkeeping to keep in sync.
    */
   publish(commit: StoreCommit): void {
+    if (this.#closed) {
+      return;
+    }
+
     commit.events.forEach((event, index) => {
       this.publishRecord({
-        boardId: boardIdOfEvent(event) ?? commit.boardId,
+        boardId: boardIdOfEvent(event),
         event,
         seq: commit.firstSeq + index,
       });
@@ -490,12 +567,28 @@ export class WorkspaceHub {
    * to reach the delivery path.
    */
   publishRecord(record: SequencedRecord): void {
-    if (this.#isCoalescible(record.event)) {
+    if (this.#closed) {
+      return;
+    }
+
+    if (isCoalescibleEvent(record.event)) {
       this.#buffer(record);
       return;
     }
 
-    this.#deliver(record);
+    // One commit can expand to a delta *and* a control event with contiguous
+    // sequences, since the projector emits both. Delivering the control event
+    // while the delta still waits in the coalescer hands the client 6, 8, 9,
+    // ..., 7 — a gap, which it resolves by resyncing. So every token burst with
+    // a side event became a full-snapshot storm.
+    //
+    // This lives here rather than in `publish` so every entry point is ordered,
+    // including a replay or an admin tool calling `publishRecord` directly.
+    if (this.#pending.size > 0) {
+      this.flush();
+    }
+
+    this.#deliver(bufferOf(record));
   }
 
   /**
@@ -508,24 +601,35 @@ export class WorkspaceHub {
    * what actually reduces the frame count, and it is lossless: appended deltas
    * concatenate, and an upsert for a step already buffered keeps the latest.
    *
-   * Sequence numbers cannot merge, so a merged record keeps the **earliest**
-   * seq of the run it represents. The client then sees a sequence it has already
-   * advanced past, which is harmless — sequences are for gap detection, and no
-   * gap is created.
+   * A merged record spans a *range* of sequences, and the frame declares it
+   * (`fromSeq`..`toSeq`). Reporting only the earliest would leave the client
+   * resuming from inside the run, and the replay would duplicate the tail of
+   * the transcript permanently.
+   *
+   * The window is also bounded: at `MAX_COALESCE_BUFFER` it flushes immediately
+   * rather than growing. A long window during a heavy replay would otherwise
+   * accumulate thousands of distinct keys, most of which congested clients are
+   * about to skip anyway.
    */
   #buffer(record: SequencedRecord): void {
     const key = record.boardId ?? WORKSPACE_SCOPE_KEY;
-    const mergeKey = mergeKeyFor(record);
+    const buffered = bufferOf(record);
+    const mergeKey = mergeKeyFor(buffered);
     const existing = this.#mergeIndex.get(mergeKey);
 
     if (existing && mergeRecords(existing, record)) {
       return;
     }
 
+    if (this.#pendingDepth >= MAX_COALESCE_BUFFER) {
+      this.flush();
+    }
+
     const buffer = this.#pending.get(key) ?? [];
-    buffer.push(record);
+    buffer.push(buffered);
     this.#pending.set(key, buffer);
-    this.#mergeIndex.set(mergeKey, record);
+    this.#mergeIndex.set(mergeKey, buffered);
+    this.#pendingDepth += 1;
     this.#scheduleFlush();
   }
 
@@ -550,15 +654,29 @@ export class WorkspaceHub {
     const entries = [...this.#pending.entries()];
     this.#pending.clear();
     this.#mergeIndex.clear();
+    this.#pendingDepth = 0;
 
     for (const [, records] of entries) {
-      for (const record of records) {
-        this.#deliver(record);
+      // Merging can leave a buffer whose entries are not in sequence order
+      // (a merge extends an earlier entry's range past a later one). Deliver
+      // ascending so a client's contiguous-run tracking stays meaningful.
+      const ordered = [...records].sort((a, b) => a.fromSeq - b.fromSeq);
+      for (const record of ordered) {
+        // One unserialisable record must not discard the rest of the window:
+        // the records were already removed from the buffers above, so a throw
+        // here would drop them silently, and on the synchronous path it would
+        // escape into the store's commit and fail a write that is already
+        // durable.
+        try {
+          this.#deliver(record);
+        } catch (error) {
+          console.error("[ws] delivery failed:", error);
+        }
       }
     }
   }
 
-  #deliver(record: SequencedRecord): void {
+  #deliver(record: BufferedRecord): void {
     for (const client of this.#clients) {
       if (!client.ready) {
         continue;
@@ -611,8 +729,16 @@ export class WorkspaceHub {
    * flowing, coalescible patches are skipped, and the client catches up via
    * `hello(since)` when it reconnects. Nothing is silently lost.
    */
-  #deliverTo(client: Client, record: SequencedRecord): void {
+  #deliverTo(client: Client, record: BufferedRecord): void {
     if (client.boards && record.boardId && !client.boards.has(record.boardId)) {
+      return;
+    }
+
+    // Idempotence. A coalesced backlog routinely outlives the handshake that
+    // replayed it: a client that reconnects mid-window receives the record via
+    // `eventsSince`, sets its cursor to head, and would otherwise get the same
+    // frame again when the window flushes.
+    if (record.toSeq <= client.lastSeq) {
       return;
     }
 
@@ -636,25 +762,33 @@ export class WorkspaceHub {
       client.cleanSends = 0;
     }
 
-    if (client.criticalOnly && this.#isCoalescible(record.event)) {
+    if (client.criticalOnly && isCoalescibleEvent(record.event)) {
       return;
     }
 
     this.#sendSequenced(client, record);
   }
 
-  #sendSequenced(client: Client, record: SequencedRecord): void {
+  #sendSequenced(client: Client, record: BufferedRecord): void {
     this.#send(
       client,
       sequencedEventSchema.parse({
         boardId: record.boardId,
         event: record.event,
-        seq: record.seq,
+        fromSeq: record.fromSeq,
+        seq: record.toSeq,
         ts: record.event.ts,
         type: "event",
       })
     );
-    client.lastSeq = Math.max(client.lastSeq, record.seq);
+
+    // Advance the cursor only across a contiguous run. Skipping a coalescible
+    // event for a congested client leaves a hole, and a later control event must
+    // not step over it: the client's cursor would jump past the sequence it
+    // never received, and resuming from there would lose it for good.
+    if (record.fromSeq === client.lastSeq + 1) {
+      client.lastSeq = record.toSeq;
+    }
   }
 
   /**
@@ -710,6 +844,9 @@ export class WorkspaceHub {
   }
 
   close(): void {
+    // Latched so a commit still in flight cannot arm a fresh flush timer that
+    // nothing will ever clear.
+    this.#closed = true;
     this.#mergeIndex.clear();
     if (this.#flushTimer !== null) {
       clearTimeout(this.#flushTimer);
@@ -736,14 +873,6 @@ export class WorkspaceHub {
    */
   #find(socket: HubSocket): Client | undefined {
     return this.#clientsById.get(socket.id);
-  }
-
-  readonly #clientsById = new Map<string, Client>();
-
-  #isCoalescible(event: WorkspaceEvent): boolean {
-    return (
-      event.type === "step.upserted" || event.type === "step.delta_appended"
-    );
   }
 
   #consumeCommandBudget(client: Client): boolean {

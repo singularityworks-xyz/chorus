@@ -90,6 +90,72 @@ async function seedBoard(store: WorkspaceStore): Promise<string> {
   return event.board.boardId;
 }
 
+async function seedSession(store: WorkspaceStore): Promise<string> {
+  const created = await store.applyMutation({
+    baseRevision: null,
+    clientId: "repro",
+    mutationId: "seed",
+    payload: {
+      seed: {
+        repo: { directory: "/tmp/r", sandboxes: [], worktree: "/tmp/r" },
+        title: "Repro",
+      },
+    },
+    type: "board.create",
+  });
+  const boardId = created?.boardId as string;
+
+  await store.applyMutation({
+    baseRevision: null,
+    clientId: "repro",
+    mutationId: "cols",
+    payload: {
+      boardId,
+      columns: {
+        approve: [],
+        done: [],
+        in_progress: [
+          {
+            id: "task-1",
+            label: "repo",
+            labelVariant: "primary-light",
+            title: "T",
+          },
+        ],
+        queue: [],
+      },
+    },
+    type: "board.columns.replace",
+  });
+  await store.applyMutation({
+    baseRevision: null,
+    clientId: "repro",
+    mutationId: "sess",
+    payload: {
+      boardId,
+      session: {
+        currentTaskId: "task-1",
+        sessionId: "sess-1",
+        state: "active",
+      },
+    },
+    type: "board.session.patch",
+  });
+  return boardId;
+}
+
+let deltaCounter = 0;
+async function emitDelta(store: WorkspaceStore, content: string) {
+  deltaCounter += 1;
+  await store.applyAgentEvent({
+    delta: content,
+    partID: "p1",
+    sessionID: "sess-1",
+    timestamp: deltaCounter,
+    type: "message.part.updated",
+  });
+}
+
 describe("resume handshake", () => {
   test("a fresh client receives ready then a snapshot", async () => {
     const store = makeStore();
@@ -479,7 +545,7 @@ describe("coalescing", () => {
     cleanup();
   });
 
-  test("an approval request is not buffered", async () => {
+  test("an approval request waits for the buffer so sequences stay ordered", async () => {
     const store = makeStore();
     await store.load();
     const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
@@ -492,12 +558,17 @@ describe("coalescing", () => {
     }
     hub.publishRecord(approvalEvent("board-1", 21));
 
-    // The approval arrived immediately, ahead of the buffered deltas.
-    expect(socket.messages).toHaveLength(1);
-    expect(socket.messages[0]?.seq).toBe(21);
-    expect((socket.messages[0]?.event as { type: string }).type).toBe(
+    // The approval is not buffered itself, but it also does not overtake the
+    // deltas: delivering it first handed the client 21 then 1..20, a gap it
+    // resolves by resyncing, so every token burst with a side event turned into
+    // a full-snapshot storm.
+    expect(socket.messages).toHaveLength(21);
+    expect((socket.messages.at(-1)?.event as { type: string }).type).toBe(
       "card.waiting_for_approval"
     );
+    expect(
+      socket.messages.map((message) => message.seq as number)
+    ).toStrictEqual(Array.from({ length: 21 }, (_, index) => index + 1));
 
     hub.close();
     cleanup();
@@ -520,7 +591,11 @@ describe("coalescing", () => {
 
     // They merge by step, so 500 deltas collapse to a single frame.
     expect(socket.messages).toHaveLength(1);
-    expect(socket.messages[0]?.seq).toBe(1);
+    // The frame declares the whole run it covers. Reporting only `seq: 1` left
+    // the client resuming from inside the run, and the replay appended the tail
+    // of the transcript a second time.
+    expect(socket.messages[0]?.fromSeq).toBe(1);
+    expect(socket.messages[0]?.seq).toBe(500);
     expect(hub.stats().coalescerDepth).toBe(0);
 
     // ...and the merge is lossless: every token is still there, in order.
@@ -566,12 +641,12 @@ describe("coalescing", () => {
 
     hub.flush();
 
-    // part-a's two deltas merged; part-b's one stayed separate.
-    expect(socket.messages).toHaveLength(2);
-    const seqs = socket.messages
-      .map((m) => m.seq as number)
-      .sort((a, b) => a - b);
-    expect(seqs).toEqual([1, 2]);
+    // Sequences 1 and 3 are both part-a but are not contiguous, so they stay
+    // separate. Merging them would claim the range 1..3 while sequence 2 holds
+    // part-b's content: the cursor jumps to 3 and part-b's delta is then
+    // dismissed as already-seen and lost.
+    expect(socket.messages).toHaveLength(3);
+    expect(socket.messages.map((m) => m.seq as number)).toEqual([1, 2, 3]);
   });
 
   test("different boards keep separate buffers", async () => {
@@ -941,6 +1016,234 @@ describe("heartbeat", () => {
     await Bun.sleep(10);
 
     expect(hub.stats().backpressuredFrames).toBeGreaterThan(0);
+
+    hub.close();
+    cleanup();
+  });
+});
+
+describe("sequence accounting across coalescing", () => {
+  // Regression tests for the interaction between coalescing and resume, where a
+  // merged frame reporting a single sequence made clients duplicate or lose
+  // content.
+
+  test("resume after a coalesced flush does not replay merged deltas", async () => {
+    const store = makeStore();
+    await store.load();
+
+    await seedSession(store);
+
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    // Mirror index.ts: the hub learns about commits from the store.
+    store.onCommit((commit) => hub.publish(commit));
+
+    const a = makeSocket(0);
+    hub.register(a);
+    await hub.handleRawMessage(a, JSON.stringify({ since: 0, type: "hello" }));
+    a.messages.length = 0;
+
+    // The seed events above are already buffered; deliver them, then start
+    // counting from the coalesced delta run only.
+    hub.flush();
+    a.messages.length = 0;
+
+    // Same partID: repeated updates to one part is what a token stream looks
+    // like, and it is the only shape that produces mergeable deltas.
+    for (const content of ["d1", "d2", "d3"]) {
+      await emitDelta(store, content);
+    }
+    hub.flush();
+
+    const merged = a.messages.filter((m) => m.type === "event");
+    expect(merged.length).toBeGreaterThan(0);
+    const last = merged.at(-1) as { event: { delta?: string }; seq: number };
+    const consumed = merged
+      .map((m) => (m.event as { delta?: string }).delta ?? "")
+      .join("");
+
+    // The client has now applied everything the hub sent it.
+    expect(consumed.length).toBeGreaterThan(0);
+
+    // Reconnect exactly where the client left off: a well-behaved client asks
+    // for strictly after its cursor.
+    const b = makeSocket(0);
+    hub.register(b);
+    await hub.handleRawMessage(
+      b,
+      JSON.stringify({ since: last.seq, type: "hello" })
+    );
+
+    const replayed = b.messages
+      .filter((m) => m.type === "event")
+      .map((m) => (m.event as { delta?: string }).delta ?? "")
+      .join("");
+
+    // Anything already delivered must not come back.
+    expect(replayed).toBe("");
+
+    hub.close();
+    cleanup();
+  });
+
+  test("a reconnect inside the coalescing window does not double-deliver", async () => {
+    const store = makeStore();
+    await store.load();
+    await seedSession(store);
+
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    store.onCommit((commit) => hub.publish(commit));
+
+    // A delta lands in the coalescing window.
+    const headBefore = store.headSeq();
+    await emitDelta(store, "d11");
+
+    // The client reconnects mid-window and the replay covers the same record.
+    const b = makeSocket(0);
+    hub.register(b);
+    await hub.handleRawMessage(
+      b,
+      JSON.stringify({ since: headBefore, type: "hello" })
+    );
+    const fromReplay = b.messages.filter((m) => m.type === "event");
+    expect(fromReplay.length).toBeGreaterThan(0);
+
+    // The window flushes afterwards. Nothing may be delivered twice.
+    hub.flush();
+
+    const all = b.messages.filter((m) => m.type === "event");
+    expect(all).toHaveLength(fromReplay.length);
+
+    hub.close();
+    cleanup();
+  });
+
+  test("a control event does not overtake a buffered delta", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    const a = makeSocket(0);
+    hub.register(a);
+    await hub.handleRawMessage(a, JSON.stringify({ since: 0, type: "hello" }));
+    a.messages.length = 0;
+
+    hub.publishRecord({
+      boardId: "board-1",
+      event: {
+        boardId: "board-1",
+        delta: "d7",
+        stepId: "s1",
+        taskId: "t1",
+        ts: 7,
+        type: "step.delta_appended",
+      },
+      seq: 7,
+    });
+    hub.publishRecord({
+      boardId: "board-1",
+      event: {
+        boardId: "board-1",
+        kind: "permission",
+        taskId: "t1",
+        ts: 8,
+        type: "card.waiting_for_approval",
+      },
+      seq: 8,
+    });
+
+    const seqs = a.messages
+      .filter((m) => m.type === "event")
+      .map((m) => m.seq as number);
+    expect(seqs).toEqual([7, 8]);
+
+    hub.close();
+    cleanup();
+  });
+});
+
+describe("coalescing correctness", () => {
+  test("contiguous deltas for one step merge into a single range", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    const socket = makeSocket();
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    for (const seq of [10, 11, 12, 13]) {
+      hub.publishRecord({
+        boardId: "board-1",
+        event: {
+          boardId: "board-1",
+          delta: `${seq} `,
+          stepId: "part-1",
+          taskId: "t1",
+          ts: seq,
+          type: "step.delta_appended",
+        },
+        seq,
+      });
+    }
+    hub.flush();
+
+    expect(socket.messages).toHaveLength(1);
+    expect(socket.messages[0]?.fromSeq).toBe(10);
+    expect(socket.messages[0]?.seq).toBe(13);
+    expect((socket.messages[0]?.event as { delta: string }).delta).toBe(
+      "10 11 12 13 "
+    );
+
+    hub.close();
+    cleanup();
+  });
+
+  test("a skipped coalescible event is not stepped over by a later control event", async () => {
+    // Congestion skips a delta. The cursor must stay behind the hole, or the
+    // client resumes past a sequence it never received and loses it for good.
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
+    const socket = makeSocket(0);
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    // Force congestion: the buffer sits above the high-water mark.
+    socket.buffered = HIGH_WATER_MARK + 1;
+
+    hub.publishRecord({
+      boardId: "board-1",
+      event: {
+        boardId: "board-1",
+        delta: "d1",
+        stepId: "s1",
+        taskId: "t1",
+        ts: 1,
+        type: "step.delta_appended",
+      },
+      seq: 1,
+    });
+    hub.flush();
+    expect(socket.messages).toHaveLength(0);
+
+    // A control event still flows, and must not advance past sequence 1.
+    hub.publishRecord({
+      boardId: "board-1",
+      event: {
+        boardId: "board-1",
+        kind: "permission",
+        taskId: "t1",
+        ts: 2,
+        type: "card.waiting_for_approval",
+      },
+      seq: 2,
+    });
+
+    const delivered = socket.messages.filter((m) => m.type === "event");
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]?.fromSeq).toBe(2);
+
+    // The hole is still visible to the client as a gap, which is what makes it
+    // resync rather than silently diverge.
+    expect(delivered[0]?.fromSeq).toBeGreaterThan(1);
 
     hub.close();
     cleanup();

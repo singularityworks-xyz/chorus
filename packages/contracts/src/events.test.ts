@@ -369,6 +369,7 @@ describe("wire envelopes", () => {
     const message = sequencedEventSchema.parse({
       type: "event",
       seq: 1042,
+      fromSeq: 1042,
       ts: TS,
       boardId: "board-1",
       event: EVENT_CORPUS["card.waiting_for_approval"],
@@ -380,11 +381,69 @@ describe("wire envelopes", () => {
     const message = sequencedEventSchema.parse({
       type: "event",
       seq: 1043,
+      fromSeq: 1043,
       ts: TS,
       boardId: null,
       event: EVENT_CORPUS["preference.speech_voice_set"],
     });
     expect(message.boardId).toBeNull();
+  });
+
+  test("a coalesced frame declares the range it covers", () => {
+    const message = sequencedEventSchema.parse({
+      type: "event",
+      fromSeq: 6,
+      seq: 500,
+      ts: TS,
+      boardId: "board-1",
+      event: EVENT_CORPUS["card.waiting_for_approval"],
+    });
+    expect(message.fromSeq).toBe(6);
+    expect(message.seq).toBe(500);
+  });
+
+  test("rejects a frame whose range runs backwards", () => {
+    expect(() =>
+      sequencedEventSchema.parse({
+        type: "event",
+        fromSeq: 501,
+        seq: 500,
+        ts: TS,
+        boardId: "board-1",
+        event: EVENT_CORPUS["card.waiting_for_approval"],
+      })
+    ).toThrow();
+  });
+
+  test("every server frame the hub emits is in the message union", () => {
+    // A client validating with this union would otherwise reject the heartbeat
+    // and read a healthy server as broken.
+    for (const frame of [
+      { at: TS, type: "ping" },
+      { head: 4, protocolVersion: "1", type: "ready" },
+      { payload: { x: 1 }, timestamp: TS, type: "viewport.sync" },
+      {
+        type: "event",
+        fromSeq: 4,
+        seq: 4,
+        ts: TS,
+        boardId: "board-1",
+        event: EVENT_CORPUS["card.started"],
+      },
+      {
+        type: "snapshot",
+        seq: 4,
+        data: {
+          boards: [],
+          preferences: { composerHintDismissed: false },
+          selectedBoardId: null,
+          v: 1,
+        },
+      },
+      { type: "error", message: "boom" },
+    ]) {
+      expect(serverMessageSchema.safeParse(frame).success).toBe(true);
+    }
   });
 
   test("rejects a negative seq", () => {
@@ -460,6 +519,7 @@ describe("wire envelopes", () => {
       sequencedEventSchema.parse({
         type: "event",
         seq: 1042,
+        fromSeq: 1042,
         ts: TS,
         boardId: "board-other",
         event: EVENT_CORPUS["card.started"],
@@ -472,6 +532,7 @@ describe("wire envelopes", () => {
       sequencedEventSchema.parse({
         type: "event",
         seq: 1043,
+        fromSeq: 1043,
         ts: TS,
         boardId: "board-1",
         event: EVENT_CORPUS["preference.speech_voice_set"],
@@ -483,6 +544,7 @@ describe("wire envelopes", () => {
     const message = sequencedEventSchema.parse({
       type: "event",
       seq: 1044,
+      fromSeq: 1044,
       ts: TS,
       boardId: null,
       event: EVENT_CORPUS["preference.speech_voice_set"],
@@ -494,6 +556,7 @@ describe("wire envelopes", () => {
     const message = sequencedEventSchema.parse({
       type: "event",
       seq: 1045,
+      fromSeq: 1045,
       ts: TS,
       boardId: null,
       event: { type: "board.selected", ts: TS, boardId: null },
