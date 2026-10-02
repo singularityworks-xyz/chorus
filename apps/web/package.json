@@ -1,6 +1,6 @@
 {
   "name": "@chorus/web",
-  "version": "0.0.64",
+  "version": "0.0.72",
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000 --turbopack",

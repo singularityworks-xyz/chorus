@@ -2,10 +2,6 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "@xyflow/react/dist/style.css";
 import "./globals.css";
-import { AppHeader } from "@/components/app-header";
-import { PromptInput } from "@/components/prompt-input";
-import { PostHogProvider } from "@/components/providers/posthog-provider";
-import { ChorusWorkspaceProvider } from "@/features/workspace/provider";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -22,6 +18,20 @@ export const metadata: Metadata = {
   description: "many agents, one coordinated output.",
 };
 
+/**
+ * Root layout: document shell only.
+ *
+ * The workspace chrome (header, composer, socket provider) lives in the
+ * `(workspace)` route group rather than here. Two reasons, both learned the hard
+ * way:
+ *
+ * - `/login` must render without it. Gated by a cookie, the workspace shell would
+ *   401 constantly behind the login form, and its fixed header overlays the page
+ *   and swallows clicks on the form.
+ * - The root layout is cached in the client during navigation and does not
+ *   re-render (Next.js 16 docs), so a session check here could not respond to the
+ *   `AUTH_EXPIRED` event the sync layer emits.
+ */
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -32,15 +42,7 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
       lang="en"
     >
-      <body className="flex h-screen flex-col overflow-hidden">
-        <PostHogProvider>
-          <ChorusWorkspaceProvider>
-            <AppHeader />
-            <div className="flex-1 overflow-hidden">{children}</div>
-            <PromptInput />
-          </ChorusWorkspaceProvider>
-        </PostHogProvider>
-      </body>
+      <body className="flex h-screen flex-col overflow-hidden">{children}</body>
     </html>
   );
 }

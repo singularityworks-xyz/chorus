@@ -37,6 +37,7 @@ import {
   KanbanCardNode,
   type KanbanCardNodeData,
 } from "@/features/kanban/components/kanban-card-node";
+import { displayedPosition } from "@/features/workspace/reducer";
 import type {
   WorkspaceBoard,
   WorkspacePreferences,
@@ -335,7 +336,11 @@ function createKanbanCardNode(
   layout: ReturnType<typeof computeBoardLayout>,
   selected: boolean,
   onRemove: (id: string) => void,
-  onUpdateColumns: (id: string, columns: Columns) => void
+  onUpdateColumns: (id: string, columns: Columns) => void,
+  // The optimistic guess wins over `board.position` until the server confirms,
+  // otherwise the board snaps back to its old spot for the length of the
+  // mutation round trip -- exactly what the guess exists to prevent.
+  position: { x: number; y: number }
 ): Node<KanbanCardNodeData> {
   const layoutItem = layout.get(board.boardId);
 
@@ -343,7 +348,7 @@ function createKanbanCardNode(
     id: board.boardId,
     className: AUTO_LAYOUT_NODE_CLASS,
     type: KANBAN_CARD_NODE_TYPE,
-    position: board.position,
+    position,
     data: {
       boardId: board.boardId,
       title: board.title,
@@ -376,7 +381,8 @@ function reconcileNodes(
   layout: ReturnType<typeof computeBoardLayout>,
   selectedBoardId: string | null,
   onRemove: (id: string) => void,
-  onUpdateColumns: (id: string, columns: Columns) => void
+  onUpdateColumns: (id: string, columns: Columns) => void,
+  positionOf: (board: WorkspaceBoard) => { x: number; y: number }
 ): Node<KanbanCardNodeData>[] {
   const currentNodesById = new Map(currentNodes.map((node) => [node.id, node]));
 
@@ -386,7 +392,8 @@ function reconcileNodes(
       layout,
       board.boardId === selectedBoardId,
       onRemove,
-      onUpdateColumns
+      onUpdateColumns,
+      positionOf(board)
     );
     const currentNode = currentNodesById.get(board.boardId);
 
@@ -413,6 +420,7 @@ function reconcileNodes(
 export function BackgroundCanvas() {
   const {
     boards,
+    pendingDrags,
     boardLayoutVersion,
     clearSelection,
     preferences,
@@ -535,6 +543,16 @@ export function BackgroundCanvas() {
       observer.disconnect();
     };
   }, []);
+
+  // A board with an in-flight optimistic drag renders at the guessed position
+  // until the server's `board.moved` lands (or the guess expires). Recomputed per
+  // render rather than memoised on `pendingDrags` alone, because the deadline is
+  // wall-clock: an unexpired guess becomes expired without any state change.
+  const positionOfBoard = useCallback(
+    (board: WorkspaceBoard) =>
+      displayedPosition(board, pendingDrags, Date.now()),
+    [pendingDrags]
+  );
 
   const handleUpdateColumns = useCallback(
     (id: string, columns: Columns) => {
@@ -666,7 +684,8 @@ export function BackgroundCanvas() {
           layout,
           selectedBoardId,
           handleRemoveBoard,
-          handleUpdateColumns
+          handleUpdateColumns,
+          positionOfBoard
         )
       );
     });
@@ -676,6 +695,7 @@ export function BackgroundCanvas() {
     canvasSize.width,
     handleRemoveBoard,
     handleUpdateColumns,
+    positionOfBoard,
     selectedBoardId,
   ]);
 

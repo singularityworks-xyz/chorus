@@ -15,7 +15,6 @@ import {
   Undo2Icon,
   XIcon,
 } from "lucide-react";
-import posthog from "posthog-js";
 import { memo, useCallback, useEffect, useState } from "react";
 import {
   DropdownMenu,
@@ -27,11 +26,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
-  type Columns,
   KanbanCardContent,
   type KanbanCardData,
-  type Task,
 } from "@/features/kanban/components/kanban";
+import { useKanbanCardActions } from "@/features/kanban/hooks/use-kanban-card-actions";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 import {
   fetchGitStatus,
@@ -277,17 +275,27 @@ function KanbanCardNodeComponent({
   const [selectedDiffFile, setSelectedDiffFile] =
     useState<SessionFileDiff | null>(null);
   const [isLoadingDiff, setIsLoadingDiff] = useState(false);
-  const [localColumns, setLocalColumns] = useState<Columns>(cardData.columns);
   const [localGitStatus, setLocalGitStatus] = useState<GitStatus | null>(
     cardData.gitStatus ?? null
   );
 
-  const { kanbanHistory, restorePrompt, updateBoardReviewMode } =
-    useWorkspace();
+  const { kanbanHistory, restorePrompt } = useWorkspace();
 
-  useEffect(() => {
-    setLocalColumns(cardData.columns);
-  }, [cardData.columns]);
+  // Approve, reject, column moves and review mode live in one hook so the phone
+  // lane list runs the same code as this card rather than a copy of it.
+  const {
+    handleApprove,
+    handleColumnsChange,
+    handlePlanChange,
+    handleQuestionsAnswered,
+    handleReject,
+    handleReviewModeChange,
+  } = useKanbanCardActions({
+    boardId: cardData.boardId,
+    columns: cardData.columns,
+    onUpdateColumns: cardData.onUpdateColumns,
+    sessionId: cardData.sessionId,
+  });
 
   const filePath = cardData.filePath ?? cardData.projectName ?? cardData.title;
 
@@ -313,36 +321,15 @@ function KanbanCardNodeComponent({
     };
   }, [filePath]);
 
-  const handleColumnsChange = useCallback(
-    (columns: Columns) => {
-      const prevColumns = localColumns;
-      setLocalColumns(columns);
-
-      const doneTasks = columns.done ?? [];
-      const prevDoneTasks = prevColumns.done ?? [];
-
-      if (doneTasks.length > prevDoneTasks.length) {
-        const newDoneTask = doneTasks.at(-1);
-        if (newDoneTask) {
-          kanbanHistory.recordMove(prevColumns, columns, newDoneTask);
-        }
-      }
-
-      cardData.onUpdateColumns?.(id, columns);
-    },
-    [cardData, id, kanbanHistory, localColumns]
-  );
-
   const handleUndo = useCallback(() => {
     const result = kanbanHistory.undo();
     if (!result) {
       return;
     }
 
-    setLocalColumns(result.columns);
-    cardData.onUpdateColumns?.(id, result.columns);
+    handleColumnsChange(result.columns);
     restorePrompt(result.prompt);
-  }, [kanbanHistory, cardData, id, restorePrompt]);
+  }, [handleColumnsChange, kanbanHistory, restorePrompt]);
 
   const handleRedo = useCallback(() => {
     const result = kanbanHistory.redo();
@@ -350,9 +337,8 @@ function KanbanCardNodeComponent({
       return;
     }
 
-    setLocalColumns(result.columns);
-    cardData.onUpdateColumns?.(id, result.columns);
-  }, [kanbanHistory, cardData, id]);
+    handleColumnsChange(result.columns);
+  }, [handleColumnsChange, kanbanHistory]);
 
   const handleOpenHere = useCallback(() => {
     setEditorMode("file");
@@ -394,200 +380,6 @@ function KanbanCardNodeComponent({
     setDiffVisible(false);
   }, []);
 
-  const findTaskInApprove = useCallback(
-    (taskId: string) => {
-      const approveTasks = localColumns.approve ?? [];
-      return approveTasks.find((t: Task) => t.id === taskId);
-    },
-    [localColumns]
-  );
-
-  const handleApprove = useCallback(
-    async (taskId: string, plan: string, answers: string[]) => {
-      const task = findTaskInApprove(taskId);
-      if (!cardData.sessionId) {
-        posthog.capture("kanban_review_approve_error", {
-          reason: "no_session",
-          boardId: cardData.boardId,
-        });
-        return;
-      }
-
-      posthog.capture("kanban_review_approve_start", {
-        boardId: cardData.boardId,
-        sessionId: cardData.sessionId,
-        taskId,
-        hasPlan: !!plan,
-        hasAnswers: answers.some((a) => a.length > 0),
-      });
-
-      // Move task from approve → in_progress immediately
-      if (!task) {
-        return;
-      }
-      const updatedTask: Task = {
-        ...task,
-        plan: plan || task.plan || task.title,
-      };
-      const nextColumns = {
-        ...localColumns,
-        approve: (localColumns.approve ?? []).filter(
-          (t: Task) => t.id !== taskId
-        ),
-        in_progress: [...(localColumns.in_progress ?? []), updatedTask],
-      };
-      setLocalColumns(nextColumns);
-      cardData.onUpdateColumns?.(id, nextColumns);
-
-      try {
-        const planText = plan || task?.plan || task?.title || "";
-        const questionPairs =
-          task?.questions?.map((q: string, i: number) => ({
-            question: q,
-            answer: answers[i] ?? "",
-          })) ?? [];
-
-        const response = await fetch(
-          `/api/tasks/${cardData.sessionId}/finalize-review`,
-          {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              plan: planText,
-              questions: questionPairs.length > 0 ? questionPairs : undefined,
-            }),
-          }
-        );
-
-        if (!response.ok) {
-          posthog.capture("kanban_review_finalize_failed", {
-            boardId: cardData.boardId,
-            sessionId: cardData.sessionId,
-            taskId,
-            status: response.status,
-          });
-          return;
-        }
-
-        posthog.capture("kanban_review_finalize_success", {
-          boardId: cardData.boardId,
-          sessionId: cardData.sessionId,
-          taskId,
-        });
-      } catch (error) {
-        posthog.capture("kanban_review_finalize_error", {
-          boardId: cardData.boardId,
-          sessionId: cardData.sessionId,
-          taskId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    },
-    [
-      cardData.boardId,
-      cardData.sessionId,
-      cardData.onUpdateColumns,
-      findTaskInApprove,
-      id,
-      localColumns,
-    ]
-  );
-
-  const handleReject = useCallback(
-    async (taskId: string) => {
-      if (!cardData.sessionId) {
-        posthog.capture("kanban_review_reject_error", {
-          reason: "no_session",
-          boardId: cardData.boardId,
-        });
-        return;
-      }
-
-      posthog.capture("kanban_review_reject_start", {
-        boardId: cardData.boardId,
-        sessionId: cardData.sessionId,
-        taskId,
-      });
-
-      // Delete task from approve column
-      const nextColumns = {
-        ...localColumns,
-        approve: (localColumns.approve ?? []).filter(
-          (t: Task) => t.id !== taskId
-        ),
-      };
-      setLocalColumns(nextColumns);
-      cardData.onUpdateColumns?.(id, nextColumns);
-
-      try {
-        const response = await fetch(`/api/tasks/${cardData.sessionId}/abort`, {
-          method: "POST",
-        });
-
-        if (!response.ok) {
-          posthog.capture("kanban_review_abort_failed", {
-            boardId: cardData.boardId,
-            sessionId: cardData.sessionId,
-            taskId,
-            status: response.status,
-          });
-          return;
-        }
-
-        posthog.capture("kanban_review_abort_success", {
-          boardId: cardData.boardId,
-          sessionId: cardData.sessionId,
-          taskId,
-        });
-      } catch (error) {
-        posthog.capture("kanban_review_abort_error", {
-          boardId: cardData.boardId,
-          sessionId: cardData.sessionId,
-          taskId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    },
-    [
-      cardData.boardId,
-      cardData.sessionId,
-      cardData.onUpdateColumns,
-      id,
-      localColumns,
-    ]
-  );
-
-  const handlePlanChange = useCallback(
-    (_taskId: string, plan: string) => {
-      posthog.capture("kanban_review_plan_updated", {
-        boardId: cardData.boardId,
-        planLength: plan.length,
-      });
-    },
-    [cardData.boardId]
-  );
-
-  const handleQuestionsAnswered = useCallback(
-    (_taskId: string, answers: string[]) => {
-      posthog.capture("kanban_review_questions_answered", {
-        boardId: cardData.boardId,
-        answerCount: answers.length,
-      });
-    },
-    [cardData.boardId]
-  );
-
-  const handleReviewModeChange = useCallback(
-    (mode: "manual" | "auto") => {
-      posthog.capture("kanban_review_mode_changed", {
-        boardId: cardData.boardId,
-        mode,
-      });
-      updateBoardReviewMode(cardData.boardId, mode);
-    },
-    [cardData.boardId, updateBoardReviewMode]
-  );
-
   return (
     <>
       <div
@@ -610,7 +402,14 @@ function KanbanCardNodeComponent({
             <GripVerticalIcon className="size-3.5" />
           </div>
 
-          <h2 className="shrink-0 font-semibold text-[0.82rem] text-white/90 tracking-wide">
+          {/* A stable hook for the board's presence in the DOM. Several nodes
+              render this title (canvas card, lane-list chip, recents), and React
+              Flow mounts and lays out asynchronously, so asserting on visible
+              text is a layout race rather than a statement about state. */}
+          <h2
+            className="shrink-0 font-semibold text-[0.82rem] text-white/90 tracking-wide"
+            data-board-title={cardData.title}
+          >
             {cardData.title}
           </h2>
 

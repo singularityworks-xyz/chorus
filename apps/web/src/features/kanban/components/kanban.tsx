@@ -1015,7 +1015,7 @@ function TaskCard({
           >
             {/* biome-ignore lint/a11y/noNoninteractiveElementInteractions: modal content stops propagation */}
             <div
-              className="flex h-[80vh] w-[80vw] min-w-[600px] flex-col rounded-lg border border-white/10 bg-[#0d0d0d] shadow-2xl"
+              className="flex h-[80vh] w-[80vw] min-w-[600px] flex-col rounded-lg border border-white/10 bg-[#0d0d0d] shadow-2xl max-md:h-full max-md:w-full max-md:min-w-0 max-md:rounded-none max-md:border-0"
               onClick={(e) => e.stopPropagation()}
               onKeyDown={(e) => e.stopPropagation()}
               role="dialog"
@@ -1286,78 +1286,119 @@ function KanbanColumnRenderer({
   onPlanChange?: (taskId: string, plan: string) => void;
   onQuestionsAnswered?: (taskId: string, answers: string[]) => void;
 }) {
-  const col = COLUMNS[columnId];
-  const isQueue = columnId === "queue";
-
   return (
     <ResizablePanel
       className="flex min-w-0 flex-col"
       defaultSize={25}
       minSize={15}
     >
-      <div className="flex h-full min-w-0 flex-col p-1.5">
-        <KanbanColumn value={columnId}>
-          <div className="relative flex h-full min-w-0 flex-col gap-2.5 overflow-hidden rounded-sm border border-white/[0.04] bg-white/[0.015] p-3">
-            <div
-              aria-hidden="true"
-              className={cn(
-                "pointer-events-none absolute top-0 right-3 left-3 h-px rounded-full opacity-70",
-                col.accent
-              )}
-            />
-            <ColumnHeader
-              columnId={columnId}
-              onReviewModeChange={onReviewModeChange}
-              reviewMode={reviewMode}
-              tasks={tasks}
-            />
-
-            {isQueue && (
-              <button
-                className={cn(
-                  "flex w-full items-center justify-center gap-2 rounded-xs px-3 py-2.5",
-                  "bg-white font-semibold text-[0.8rem] text-black",
-                  "shadow-[0_0_0_1px_rgba(255,255,255,0.08),0_2px_12px_rgba(255,255,255,0.08)]",
-                  "transition-all duration-150",
-                  "hover:bg-white/93 hover:shadow-[0_0_0_1px_rgba(255,255,255,0.15),0_4px_20px_rgba(255,255,255,0.15)]",
-                  "active:scale-[0.98] active:shadow-[0_0_0_1px_rgba(255,255,255,0.1),0_1px_6px_rgba(255,255,255,0.1)]"
-                )}
-                onClick={() => {
-                  document.getElementById("chorus-prompt-input")?.focus();
-                }}
-                type="button"
-              >
-                <PlusIcon className="size-3.5 shrink-0" />
-                Create Task
-              </button>
-            )}
-
-            <KanbanColumnContent
-              className="nowheel custom-scrollbar flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1 pb-1"
-              value={columnId}
-            >
-              {tasks.length === 0 ? (
-                <ColumnEmptyState
-                  headline={col.emptyHeadline}
-                  hint={col.emptyHint}
-                  icon={col.emptyIcon}
-                />
-              ) : (
-                <TaskList
-                  columnId={columnId}
-                  onApprove={onApprove}
-                  onPlanChange={onPlanChange}
-                  onQuestionsAnswered={onQuestionsAnswered}
-                  onReject={onReject}
-                  reviewMode={reviewMode}
-                  tasks={tasks}
-                />
-              )}
-            </KanbanColumnContent>
-          </div>
-        </KanbanColumn>
-      </div>
+      <KanbanColumnBody
+        columnId={columnId}
+        onApprove={onApprove}
+        onPlanChange={onPlanChange}
+        onQuestionsAnswered={onQuestionsAnswered}
+        onReject={onReject}
+        onReviewModeChange={onReviewModeChange}
+        reviewMode={reviewMode}
+        tasks={tasks}
+      />
     </ResizablePanel>
+  );
+}
+
+/**
+ * One lane's contents, without the resizable-panel wrapper.
+ *
+ * The desktop board puts these side by side in a horizontal panel group; a phone
+ * stacks them vertically at full width. Both render this, so a lane cannot look
+ * or behave one way on a board and another way in a phone layout -- which is
+ * what happened when the phone reused the whole desktop card.
+ */
+export function KanbanColumnBody({
+  columnId,
+  tasks,
+  reviewMode,
+  onReviewModeChange,
+  onApprove,
+  onReject,
+  onPlanChange,
+  onQuestionsAnswered,
+}: {
+  columnId: string;
+  tasks: Task[];
+  reviewMode: "manual" | "auto";
+  onReviewModeChange: (mode: "manual" | "auto") => void;
+  onApprove?: (taskId: string, plan: string, answers: string[]) => void;
+  onReject?: (taskId: string) => void;
+  onPlanChange?: (taskId: string, plan: string) => void;
+  onQuestionsAnswered?: (taskId: string, answers: string[]) => void;
+}) {
+  const col = COLUMNS[columnId];
+  const isQueue = columnId === "queue";
+
+  return (
+    <div className="flex h-full min-w-0 flex-col p-1.5">
+      <KanbanColumn value={columnId}>
+        <div className="relative flex h-full min-w-0 flex-col gap-2.5 overflow-hidden rounded-sm border border-white/[0.04] bg-white/[0.015] p-3">
+          <div
+            aria-hidden="true"
+            className={cn(
+              "pointer-events-none absolute top-0 right-3 left-3 h-px rounded-full opacity-70",
+              col.accent
+            )}
+          />
+          <ColumnHeader
+            columnId={columnId}
+            onReviewModeChange={onReviewModeChange}
+            reviewMode={reviewMode}
+            tasks={tasks}
+          />
+
+          {isQueue && (
+            <button
+              className={cn(
+                "flex w-full items-center justify-center gap-2 rounded-xs px-3 py-2.5",
+                "bg-white font-semibold text-[0.8rem] text-black",
+                "shadow-[0_0_0_1px_rgba(255,255,255,0.08),0_2px_12px_rgba(255,255,255,0.08)]",
+                "transition-all duration-150",
+                "hover:bg-white/93 hover:shadow-[0_0_0_1px_rgba(255,255,255,0.15),0_4px_20px_rgba(255,255,255,0.15)]",
+                "active:scale-[0.98] active:shadow-[0_0_0_1px_rgba(255,255,255,0.1),0_1px_6px_rgba(255,255,255,0.1)]"
+              )}
+              onClick={() => {
+                document.getElementById("chorus-prompt-input")?.focus();
+              }}
+              type="button"
+            >
+              <PlusIcon className="size-3.5 shrink-0" />
+              Create Task
+            </button>
+          )}
+
+          <KanbanColumnContent
+            className="nowheel custom-scrollbar flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1 pb-1"
+            value={columnId}
+          >
+            {tasks.length === 0 ? (
+              <ColumnEmptyState
+                headline={col.emptyHeadline}
+                hint={col.emptyHint}
+                icon={col.emptyIcon}
+              />
+            ) : (
+              <TaskList
+                columnId={columnId}
+                onApprove={onApprove}
+                onPlanChange={onPlanChange}
+                onQuestionsAnswered={onQuestionsAnswered}
+                onReject={onReject}
+                reviewMode={reviewMode}
+                tasks={tasks}
+              />
+            )}
+          </KanbanColumnContent>
+        </div>
+      </KanbanColumn>
+    </div>
   );
 }
 

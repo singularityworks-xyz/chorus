@@ -444,7 +444,7 @@ export function PromptInput() {
   }
 
   return (
-    <div className="fixed right-0 bottom-8 left-0 z-40 flex justify-center px-4">
+    <div className="fixed right-0 bottom-2 left-0 z-40 flex justify-center px-3 pb-[env(safe-area-inset-bottom)] md:bottom-8 md:px-4">
       <div className="w-full max-w-3xl">
         {!preferences.composerHintDismissed && (
           <div className="mb-2 flex items-start justify-between gap-3 rounded-xs border border-white/10 bg-black/45 px-3 py-2 text-[11px] text-white/70 leading-4 shadow-lg backdrop-blur-md">
