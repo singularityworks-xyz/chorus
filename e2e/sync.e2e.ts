@@ -408,5 +408,26 @@ test.describe("client sync", () => {
         .filter({ visible: true })
         .first()
     ).toBeVisible({ timeout: 20_000 });
+
+    // Lanes stack vertically and use the full width. A phone-width horizontal
+    // panel group would leave each lane about 90px wide, which is the whole
+    // reason this view exists.
+    const lanes = page.getByTestId("mobile-lanes").locator("> section");
+    await expect(lanes).toHaveCount(4, { timeout: 20_000 });
+    const widths = await lanes.evaluateAll((nodes) =>
+      nodes.map((node) => Math.round(node.getBoundingClientRect().width))
+    );
+    const heights = await lanes.evaluateAll((nodes) =>
+      nodes.map((node) => Math.round(node.getBoundingClientRect().height))
+    );
+    expect(Math.min(...widths)).toBeGreaterThan(280);
+    // Stacked, not side by side: each lane starts below the previous one.
+    const tops = await lanes.evaluateAll((nodes) =>
+      nodes.map((node) => Math.round(node.getBoundingClientRect().top))
+    );
+    expect(tops.every((top, i) => i === 0 || top >= (tops[i - 1] ?? 0))).toBe(
+      true
+    );
+    expect(Math.max(...heights)).toBeGreaterThan(0);
   });
 });
