@@ -48,6 +48,14 @@ export interface UseChorusSyncResult {
   hydrated: boolean;
   /** Highest contiguously applied sequence. */
   lastSeq: number;
+  /**
+   * Routes an HTTP 401 into the same path as a 4401 close.
+   *
+   * Without this a dead cookie discovered by a command rather than by the socket
+   * leaves the client reconnecting forever against a server that will keep
+   * refusing it.
+   */
+  reportUnauthorized: () => void;
   /** Asks the server for a fresh snapshot on demand. */
   resync: () => void;
   status: ChorusSyncState["status"];
@@ -132,15 +140,27 @@ export function useChorusSync(
           onRestoredRef.current?.(snapshot, seq);
         },
         onEvent: (frame) => {
-          pendingEvents.current.push({ event: frame.event, seq: frame.seq });
-          if (pendingEvents.current.length > MAX_PENDING_EVENTS) {
-            // The client is far behind and a snapshot is cheaper than replaying
-            // an unbounded backlog through the projector.
-            pendingEvents.current = [];
-            sync.requestResync();
-            return;
-          }
+          // Apply first, and let a throw escape: `ChorusSync` advances its cursor
+          // only after this returns, so a failing reducer has to reach it or the
+          // frame is lost silently and gap detection can never report the miss.
           onEventRef.current?.(frame);
+
+          pendingEvents.current.push({ event: frame.event, seq: frame.seq });
+
+          if (pendingEvents.current.length > MAX_PENDING_EVENTS) {
+            // Trim the oldest entries rather than dropping the event or clearing
+            // the buffer. Events in one stream are ordered, so everything trimmed
+            // is covered by any snapshot that arrives afterwards -- and those
+            // entries are filtered out by sequence anyway.
+            //
+            // Previously this cleared the buffer and returned early without
+            // applying the frame, which let the cursor advance past an event the
+            // reducer never saw.
+            pendingEvents.current.splice(
+              0,
+              pendingEvents.current.length - MAX_PENDING_EVENTS
+            );
+          }
         },
         onSnapshot: (snapshot, snapshotSeq) => {
           const buffered = pendingEvents.current;
@@ -201,7 +221,12 @@ export function useChorusSync(
     syncRef.current?.requestResync();
   }, []);
 
+  const reportUnauthorized = useCallback(() => {
+    syncRef.current?.reportUnauthorized();
+  }, []);
+
   return {
+    reportUnauthorized,
     error: state.lastError,
     hydrated: state.snapshot !== null,
     lastSeq: state.lastSeq,

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { resolveSocketUrl } from "./chorus-sync";
 import { decideFrame, eventsAfterSnapshot } from "./protocol";
 
 describe("eventsAfterSnapshot", () => {
@@ -61,5 +62,62 @@ describe("decideFrame", () => {
     // Cannot happen against the hub, whose ranges never overlap, but re-applying
     // the prefix would duplicate state, so the safe reading is a snapshot.
     expect(decideFrame({ fromSeq: 5, seq: 9 }, 6).action).toBe("gap");
+  });
+});
+
+describe("resolveSocketUrl", () => {
+  test("an explicitly empty variable falls back to the origin", () => {
+    // `.env.example` tells operators to leave this unset when serve fronts the
+    // app, and `NEXT_PUBLIC_CHORUS_WS_URL=` is the obvious way to do that.
+    // `new URL("")` throws, and this runs during render.
+    expect(
+      resolveSocketUrl({
+        explicit: "",
+        isSecure: false,
+        origin: "http://app.test",
+      })
+    ).toBe("ws://app.test/ws");
+  });
+
+  test("a whitespace-only variable falls back to the origin", () => {
+    expect(
+      resolveSocketUrl({
+        explicit: "  ",
+        isSecure: false,
+        origin: "http://app.test",
+      })
+    ).toBe("ws://app.test/ws");
+  });
+
+  test("an explicit address keeps its own scheme", () => {
+    // Overriding with the page's scheme turns this into ws://, which a
+    // TLS-only server rejects.
+    expect(
+      resolveSocketUrl({
+        explicit: "https://serve.example",
+        isSecure: false,
+        origin: "http://app.test",
+      })
+    ).toBe("wss://serve.example/ws");
+  });
+
+  test("an explicit ws or wss address is respected", () => {
+    expect(
+      resolveSocketUrl({
+        explicit: "ws://serve.example:9000",
+        isSecure: true,
+        origin: "https://app.test",
+      })
+    ).toBe("ws://serve.example:9000/ws");
+  });
+
+  test("an explicit address discards its path", () => {
+    expect(
+      resolveSocketUrl({
+        explicit: "https://serve.example/some/path",
+        isSecure: false,
+        origin: "http://app.test",
+      })
+    ).toBe("wss://serve.example/ws");
   });
 });

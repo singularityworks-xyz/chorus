@@ -314,6 +314,43 @@ describe("handshake and resume (plan P5 task 1)", () => {
     );
   });
 
+  test("a reconnect resumes from the applied cursor, not the persisted one", () => {
+    const storage = new FakeStorage();
+    const scheduler = new FakeScheduler();
+    const sync = new ChorusSync({
+      cancel: scheduler.cancel,
+      createSocket: (url) => new FakeSocket(url),
+      now: () => 1_700_000_000_000,
+      random: () => 1,
+      schedule: scheduler.schedule,
+      storage,
+      url: "ws://localhost:2000/ws",
+    });
+    const socket = openSocket(sync);
+    socket.emit({ head: 0, type: "ready" });
+    socket.emit({ data: snapshotFixture(), seq: 0, type: "snapshot" });
+
+    // Live events advance the applied cursor but not the persisted one, which is
+    // pinned to the last snapshot.
+    socket.emit(eventFrame(1, 1));
+    socket.emit(eventFrame(2, 2));
+    expect(sync.state.lastSeq).toBe(2);
+    expect(storage.getItem(LAST_SEQ_KEY)).toBe("0");
+
+    // A blip. Re-sending `since: 0` would make the hub coalesce the whole gap
+    // into one frame, and a frame like fromSeq=1/seq=2 against an applied cursor
+    // of 2 is contiguous -- but against anything longer it is a gap, so every
+    // ordinary blip would answer itself with a full snapshot.
+    socket.remoteClose(1006);
+    scheduler.flushOne();
+    FakeSocket.last.open();
+
+    const hello = JSON.parse(FakeSocket.last.sent[0] ?? "{}") as {
+      since: number;
+    };
+    expect(hello.since).toBe(2);
+  });
+
   test("a subscriber that throws resyncs instead of losing the frame", () => {
     const { sync } = makeSync(null, {
       onEvent: () => {

@@ -19,6 +19,9 @@ import { cookies } from "next/headers";
  * into a generic transport error.
  */
 
+/** Statuses the `Response` constructor refuses to pair with a body. */
+const NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
+
 function getChorusServeUrl(): string {
   return process.env.CHORUS_SERVE_URL ?? "http://localhost:2000";
 }
@@ -95,7 +98,13 @@ export async function proxyChorusJson(
     });
     copySetCookies(upstream, responseHeaders);
 
-    return new Response(text, {
+    // A null-body status cannot be constructed with one. Passing even an empty
+    // string throws, which the catch below would then report as a connection
+    // failure -- so an upstream 204 such as logout would come back as a 503 and,
+    // worse, the `Set-Cookie` that clears the session would be lost.
+    const nullBody = NULL_BODY_STATUSES.has(upstream.status);
+
+    return new Response(nullBody ? null : text, {
       headers: responseHeaders,
       status: upstream.status,
     });

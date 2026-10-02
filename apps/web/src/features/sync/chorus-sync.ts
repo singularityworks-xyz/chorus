@@ -7,7 +7,6 @@ import { Backoff } from "./backoff";
 import {
   browserStorage,
   clearPersistedState,
-  readLastSeq,
   readPersistedSnapshot,
   type SequenceStorage,
   writePersistedSnapshot,
@@ -366,13 +365,21 @@ export class ChorusSync {
       return;
     }
 
-    const storage = this.#deps.storage ?? browserStorage();
-    // The cursor is only honoured when the state it refers to was restored too.
-    // Resuming from a cursor with nothing on screen would leave the client
-    // permanently blank, which is worse than paying for a snapshot.
-    const persisted = readLastSeq(storage);
-    const since =
-      persisted !== null && this.#state.snapshot !== null ? persisted : 0;
+    // Resume from the in-memory cursor, which is the highest sequence this
+    // client has actually applied.
+    //
+    // Not from the persisted one. That is pinned to the last snapshot, so on a
+    // reconnect within the same page load it sits far behind the applied state
+    // and the hub coalesces the whole gap back into one frame -- `fromSeq=401,
+    // seq=900` against an applied cursor of 600, say. That is not contiguous, so
+    // gap detection would read every ordinary network blip as a hole and answer
+    // it with a full snapshot. After a restore `#state.lastSeq` already equals
+    // the persisted cursor, so this is correct in both cases.
+    //
+    // Only honoured when the snapshot it refers to is also in memory: resuming
+    // from a cursor with nothing on screen would leave the client permanently
+    // blank, which is worse than paying for a snapshot.
+    const since = this.#state.snapshot === null ? 0 : this.#state.lastSeq;
 
     try {
       socket.send(JSON.stringify({ since, type: "hello" }));
@@ -627,9 +634,21 @@ export function resolveSocketUrl(env: {
   isSecure: boolean;
   origin: string;
 }): string {
-  const base = env.explicit ?? env.origin;
-  const url = new URL(base);
-  url.protocol = env.isSecure ? "wss:" : "ws:";
+  // `.trim()` and the truthiness check matter: `.env.example` tells operators to
+  // leave this unset when serve fronts the app, and `NEXT_PUBLIC_CHORUS_WS_URL=`
+  // is the obvious way to do that. `""` would reach `new URL("")` and throw
+  // during render, taking the whole workspace tree down.
+  const explicit = env.explicit?.trim();
+  const url = new URL(explicit ? explicit : env.origin);
+
+  // An explicitly configured address keeps its own scheme. Overriding it with
+  // the page's would turn `https://serve.example` into `ws://` when opened from
+  // an http dev page, which a TLS-only server rejects.
+  const secure = explicit
+    ? url.protocol === "https:" || url.protocol === "wss:"
+    : env.isSecure;
+
+  url.protocol = secure ? "wss:" : "ws:";
   url.pathname = "/ws";
   url.search = "";
   return url.toString();
