@@ -1,4 +1,3 @@
-import { isAbsolute, join } from "node:path";
 import type {
   QueueBoardPromptInput,
   QueueBoardPromptResponse,
@@ -6,6 +5,7 @@ import type {
 import { queueBoardPromptInputSchema } from "@chorus/contracts";
 import { createLogger } from "@chorus/logger";
 import type { OpenCodeBridge } from "../bridge/opencode/bridge";
+import { resolveInside, SandboxEscapeError } from "../paths/sandbox";
 import type { WorkspaceStore } from "../workspace/store";
 import { BoardSessionRegistry } from "./board-session-registry";
 import type { SessionWatchdog } from "./session-watchdog";
@@ -19,11 +19,26 @@ type SdkPart =
   | { text: string; type: "text" }
   | { filename: string; mime: string; type: "file"; url: string };
 
+/**
+ * Resolves a prompt file-part against the board's directory (spec §6.4).
+ *
+ * The previous version joined relative paths and returned absolute ones
+ * verbatim, so a client could name `/etc/shadow` or `../../../../root/.ssh/id_rsa`
+ * and have the path handed to the engine as a `file://` URL — a read of any
+ * file the serve process could reach, triggered by a queue-a-prompt request.
+ *
+ * `resolveInside` rejects traversal, absolute paths outside the root, NUL bytes,
+ * and prefix-sibling roots (`/data2` against `/data`).
+ */
 function resolveFilePath(rawPath: string, directory: string): string {
-  if (isAbsolute(rawPath)) {
-    return rawPath;
+  try {
+    return resolveInside(directory, rawPath);
+  } catch (error) {
+    if (error instanceof SandboxEscapeError || error instanceof Error) {
+      logger.warn("file-part-rejected", { reason: error.name });
+    }
+    throw error;
   }
-  return join(directory, rawPath);
 }
 
 function convertPartsToSdk(
