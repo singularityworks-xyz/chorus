@@ -284,7 +284,7 @@ describe("optimistic drag (plan P5 task 4)", () => {
     });
   });
 
-  test("an unrelated event for the same board also settles the drag", () => {
+  test("an event with no position does not settle the drag", () => {
     const dragged = workspaceReducer(withBoards([board("board-1")]), {
       boardId: "board-1",
       mutationId: "m1",
@@ -304,8 +304,35 @@ describe("optimistic drag (plan P5 task 4)", () => {
       type: "server/events",
     });
 
-    // Board-scoped correlation rather than by mutation id: the event vocabulary
-    // has no mutationId field, so any event for the board resolves its guess.
+    // Server events are ordered, so an event with no position was emitted before
+    // the server saw the `board.move` and says nothing about it. Settling here
+    // would snap the card back to its old position while `board.position` still
+    // holds the old value, then jump forward again when `board.moved` arrives --
+    // the exact flicker the guess exists to prevent. A mutation that never
+    // arrives is covered by the sweeper instead.
+    expect(state.pendingDrags.size).toBe(1);
+  });
+
+  test("board.moved settles the drag", () => {
+    const dragged = workspaceReducer(withBoards([board("board-1")]), {
+      boardId: "board-1",
+      mutationId: "m1",
+      position: { x: 800, y: 600 },
+      type: "optimistic/drag",
+    });
+
+    const state = workspaceReducer(dragged, {
+      events: [
+        {
+          boardId: "board-1",
+          position: { x: 800, y: 600 },
+          ts: 2,
+          type: "board.moved",
+        },
+      ],
+      type: "server/events",
+    });
+
     expect(state.pendingDrags.size).toBe(0);
   });
 

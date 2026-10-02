@@ -154,9 +154,16 @@ function applyBoardListEvent(
 
   let { boards, pendingDrags, previousWorkspaces } = input;
 
-  // The server is authoritative. Any event for a board with a pending guess
-  // resolves it, whatever the event turns out to say.
-  pendingDrags = withoutPending(pendingDrags, boardId) ?? pendingDrags;
+  // The server is authoritative, but only an event that carries a position can
+  // answer the guess. Server events are ordered, so anything else for this board
+  // was emitted before the server saw the `board.move` and says nothing about
+  // it -- settling on those would snap a dropped card back to its old position
+  // within milliseconds, then jump forward again when `board.moved` lands. That
+  // is the exact flicker the optimistic guess exists to prevent. A dropped
+  // mutation is covered by the five-second sweeper instead.
+  if (event.type === "board.moved" || event.type === "board.removed") {
+    pendingDrags = withoutPending(pendingDrags, boardId) ?? pendingDrags;
+  }
 
   if (event.type === "board.created") {
     // The event carries the whole board, so nothing is reconstructed here — there
