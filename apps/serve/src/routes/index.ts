@@ -1,10 +1,12 @@
 import { queueBoardPromptInputSchema } from "@chorus/contracts";
 import { createLogger } from "@chorus/logger";
 import { Elysia, t } from "elysia";
+import { assertRegisteredRoot } from "../auth/roots";
 import type { OpenCodeBridge } from "../bridge/opencode/bridge";
 import { getDiff, getGitStatus, restore, track } from "../snapshot";
 import { getRevertState } from "../snapshot/session-revert";
 import type { BoardTaskService } from "../tasks/board-task-service";
+import type { WorkspaceStore } from "../workspace/store";
 
 const logger = createLogger(
   {
@@ -13,9 +15,26 @@ const logger = createLogger(
   "ROUTES"
 );
 
+/**
+ * Validates a client-supplied `directory` against the boards the workspace
+ * actually knows about (spec §6.4, plan P4.6).
+ *
+ * These routes hand `directory` to git as a working directory. Before this phase
+ * nothing constrained it, so a caller could point `/snapshots/track` at an
+ * arbitrary path on the host — and on the pre-P4 build these routes were also
+ * unauthenticated.
+ */
+function resolveBoardDirectory(
+  store: WorkspaceStore,
+  directory: string
+): string {
+  return assertRegisteredRoot(directory, store.getSnapshot().boards);
+}
+
 export function createHttpRoutes(
   bridge: OpenCodeBridge,
-  boardTasks: BoardTaskService
+  boardTasks: BoardTaskService,
+  workspaceStore: WorkspaceStore
 ) {
   return new Elysia()
     .get("/health", () => ({
@@ -340,7 +359,9 @@ export function createHttpRoutes(
       "/snapshots/track",
       async ({ body }) => {
         try {
-          const hash = await track(body.directory);
+          const hash = await track(
+            resolveBoardDirectory(workspaceStore, body.directory)
+          );
           return { hash, timestamp: Date.now() };
         } catch (error) {
           logger.error("Failed to track snapshot", error, {
@@ -360,7 +381,10 @@ export function createHttpRoutes(
       "/snapshots/restore",
       async ({ body }) => {
         try {
-          await restore(body.directory, body.hash);
+          await restore(
+            resolveBoardDirectory(workspaceStore, body.directory),
+            body.hash
+          );
           return { success: true, timestamp: Date.now() };
         } catch (error) {
           logger.error("Failed to restore snapshot", error, {
@@ -382,7 +406,10 @@ export function createHttpRoutes(
       "/snapshots/diff",
       async ({ query }) => {
         try {
-          const diff = await getDiff(query.directory, query.fromHash);
+          const diff = await getDiff(
+            resolveBoardDirectory(workspaceStore, query.directory),
+            query.fromHash
+          );
           return { diff, timestamp: Date.now() };
         } catch (error) {
           logger.error("Failed to get snapshot diff", error, {
@@ -421,7 +448,9 @@ export function createHttpRoutes(
       "/git/status",
       async ({ query }) => {
         try {
-          const status = await getGitStatus(query.directory);
+          const status = await getGitStatus(
+            resolveBoardDirectory(workspaceStore, query.directory)
+          );
           return { ...status, timestamp: Date.now() };
         } catch (error) {
           logger.error("Failed to get git status", error, {

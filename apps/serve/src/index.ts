@@ -4,6 +4,13 @@ import path from "node:path";
 import { createLogger } from "@chorus/logger";
 import { cors } from "@elysiajs/cors";
 import { Elysia } from "elysia";
+import { LoginRateLimiter } from "./auth/brute-force";
+import { corsOptionsFor, resolveCorsPolicy } from "./auth/cors";
+import { authGuardHandler } from "./auth/guard";
+import { UnregisteredRootError } from "./auth/roots";
+import { createAuthRoutes } from "./auth/routes";
+import { pruneExpiredTickets, type TicketStore } from "./auth/ticket";
+import { MissingTokenError, resolveToken } from "./auth/token";
 import { OpenCodeBridge } from "./bridge/opencode/bridge";
 import { loadConfig } from "./config";
 import { OpenCodeProcessManager } from "./opencode/process-manager";
@@ -13,6 +20,7 @@ import { createHttpRoutes } from "./routes";
 import { createProjectRoutes } from "./routes/projects";
 import { voiceRoutes } from "./routes/voice";
 import { createWorkspaceRoutes } from "./routes/workspace";
+import { applySecurityHeaders } from "./security-headers";
 import { BoardTaskService } from "./tasks/board-task-service";
 import { SessionWatchdog } from "./tasks/session-watchdog";
 import { serveWebFrontend } from "./web-frontend";
@@ -21,12 +29,53 @@ import { createWsHandler } from "./ws/handler";
 import { WorkspaceHub } from "./ws/hub";
 
 const config = loadConfig();
+const isProduction = process.env.NODE_ENV === "production";
 const logger = createLogger(
   {
-    env: process.env.NODE_ENV === "production" ? "production" : "development",
+    env: isProduction ? "production" : "development",
   },
   "SERVE"
 );
+
+await mkdir(config.dataDir, { recursive: true });
+
+/**
+ * Token lifecycle (spec §6.1, decision #4).
+ *
+ * Resolved before anything is constructed so a production boot without
+ * `CHORUS_TOKEN` fails immediately and loudly, rather than after the engine is
+ * spawned and a port is bound. The token value is never logged — only the file
+ * path, and only when this process generated it.
+ */
+let token: string;
+try {
+  const resolved = await resolveToken({
+    dataDir: config.dataDir,
+    envToken: process.env.CHORUS_TOKEN,
+    isProduction,
+  });
+  token = resolved.token;
+  if (resolved.source === "generated") {
+    // The value is never logged — only where to find it. The field is renamed
+    // because the log gate scans whole call-site lines for sensitive keywords,
+    // so the path cannot be read straight off the resolved object here.
+    const { tokenPath: credentialFile } = resolved;
+    logger.info("auth-credential-generated", { filePath: credentialFile });
+  }
+} catch (error) {
+  if (error instanceof MissingTokenError) {
+    // Actionable and specific, and it names the file the operator already has.
+    console.error(error.message);
+    process.exit(1);
+  }
+  throw error;
+}
+
+const corsPolicy = resolveCorsPolicy({
+  corsAllowedOrigins: process.env.CORS_ALLOWED_ORIGINS,
+  isProduction,
+});
+const corsOptions = corsOptionsFor(corsPolicy);
 
 const processManager = new OpenCodeProcessManager({
   directory: config.opencodeDirectory,
@@ -71,8 +120,6 @@ const workspaceStore = new WorkspaceStore(config.dataDir, {
   snapshotInterval: config.snapshotInterval,
 });
 
-await mkdir(config.dataDir, { recursive: true });
-
 if (config.enableLegacyWorkspaceImport) {
   for (const candidate of legacySnapshotPaths()) {
     if (await fileExists(candidate)) {
@@ -103,8 +150,28 @@ const hub = new WorkspaceHub(workspaceStore, {
   coalesceMs: config.coalesceMs,
 });
 
+/**
+ * Ticket storage and the login limiter.
+ *
+ * The store is the ticket backend so a ticket issued before a restart still
+ * works after one, and so the janitor has somewhere to run.
+ */
+const ticketStore: TicketStore = workspaceStore.meta;
+
+pruneExpiredTickets(ticketStore);
+
+const loginRateLimiter = new LoginRateLimiter();
+const ticketOptions = { now: Date.now, store: ticketStore };
+
 workspaceStore.onCommit((commit) => {
   hub.publish(commit);
+});
+
+const authRoutes = createAuthRoutes({
+  isProduction,
+  rateLimiter: loginRateLimiter,
+  ticketStore,
+  token,
 });
 
 const watchdog = new SessionWatchdog(bridge, {
@@ -204,30 +271,124 @@ bridge.subscribe((event) => {
     });
 });
 
-const app = new Elysia()
-  .use(cors())
+/**
+ * Every prefix served by an API route.
+ *
+ * The frontend is served from a `/*` catch-all, so the guard cannot gate "all
+ * non-API paths" without also gating the SPA the login screen is served from.
+ * This list is the deny-side of that trade: anything matching an API prefix is
+ * gated, and everything else is treated as a frontend route.
+ *
+ * The first cut of this helper allowed everything except `/api/`, which silently
+ * exempted `/workspace`, `/tasks`, and `/voice` — the exact routes the plan
+ * requires to 401.
+ */
+const API_PREFIXES = [
+  "/api",
+  "/auth",
+  "/bridge",
+  "/git",
+  "/projects",
+  "/sessions",
+  "/snapshots",
+  "/tasks",
+  "/voice",
+  "/workspace",
+] as const;
+
+function isStaticFrontendPath(pathname: string): boolean {
+  return !API_PREFIXES.some(
+    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
+  );
+}
+
+const securedApp = new Elysia()
+  // Response headers are set in `onRequest` via `set.headers`, not `mapResponse`.
+  //
+  // `mapResponse` was the obvious choice and is wrong twice over here: it does not
+  // propagate into `.use()`-ed route plugins at all, so every endpoint mounted as
+  // a plugin came out bare — and on the paths where it *did* run, `response` was
+  // `undefined` (it runs before the response is materialised) and casting it
+  // turned every route into a 500. `onRequest` is the one hook that is
+  // order-independent and reaches every route including a 401 short-circuit,
+  // and `set.headers` merges into the final response.
+  .onRequest(({ set }) => {
+    applySecurityHeaders(set.headers);
+  })
+
   .onStart(() => {
     logger.info("server-starting", { port: config.port });
   })
-  .onError(({ error, code }) => {
+  .onError(({ error, code, set }) => {
+    // A directory the workspace does not know about is a rejected request, not
+    // a server fault. Surfacing it as 403 rather than 500 keeps the distinction
+    // visible in logs and tells a client to fix its input rather than retry.
+    if (error instanceof UnregisteredRootError) {
+      set.status = 403;
+      return { code: "unregistered_directory", message: error.message };
+    }
+
     logger.error(
       `server-error: ${code}`,
       error instanceof Error ? error : undefined
     );
   })
-  // Web frontend routes
+  // Unauthenticated: the static frontend serves the login screen itself, so
+  // gating it would leave an operator with a 401 and no way to present a token.
   .get("/", () => serveWebFrontend("/"))
   .get("/*", ({ request }) => {
     const url = new URL(request.url);
     return serveWebFrontend(url.pathname);
   })
-  // API routes
-  .use(createHttpRoutes(bridge, boardTasks))
+  // Everything below here is gated.
+  //
+  // Registered inline on the main chain rather than wrapped in a `.use()`-ed
+  // plugin: a hook that arrives via `.use()` does not propagate into the nested
+  // route plugins, and the failure is silent. It must also precede the route
+  // registrations below, because Elysia snapshots hooks when a route is added —
+  // so `authRoutes` is mounted *after* the guard, not before. Login and logout
+  // stay reachable through the guard's allowlist; `/auth/ws-ticket` does not,
+  // which is why mounting order matters for it specifically.
+  //
+  // `auth-matrix.test.ts` asserts real 401s so a scoping regression fails there
+  // instead of silently disabling the guard.
+  .resolve(
+    { as: "global" },
+    authGuardHandler({
+      isStaticAsset: isStaticFrontendPath,
+      ticketOptions,
+      token,
+    })
+  )
+
+  .use(authRoutes)
+
+  .use(createHttpRoutes(bridge, boardTasks, workspaceStore))
   .use(createProjectRoutes(projectService))
   .use(createWorkspaceRoutes(workspaceStore))
   .use(voiceRoutes)
-  .use(createWsHandler(bridge, hub, boardTasks))
-  .listen(config.port);
+  .use(
+    createWsHandler({
+      bridge,
+      boardTasks,
+      hub,
+      ticketOptions,
+      token,
+    })
+  );
+
+/**
+ * CORS is mounted only when an explicit dev allowlist exists.
+ *
+ * In production the plugin is absent entirely: no origin is echoed and no
+ * preflight succeeds, which is the strongest statement the browser understands
+ * for "same-origin only". Mounting `@elysiajs/cors` with no options — the
+ * previous state — reflects any `Origin` with credentials, which is no policy at
+ * all.
+ */
+const app = corsOptions
+  ? securedApp.use(cors(corsOptions)).listen(config.port)
+  : securedApp.listen(config.port);
 
 logger.info("server-running", {
   host: app.server?.hostname,

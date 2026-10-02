@@ -50,7 +50,12 @@ describe("HTTP routes", () => {
     const bridge = makeMockBridge();
     const boardTasks = makeMockBoardTasks();
     const app = new Elysia().use(
-      createHttpRoutes(bridge as never, boardTasks as never)
+      createHttpRoutes(
+        bridge as never,
+        boardTasks as never,
+        // The store backs the registered-root check on the git/snapshot routes.
+        { getSnapshot: () => ({ boards: [] }) } as never
+      )
     );
     return { app, bridge, boardTasks };
   }

@@ -46,15 +46,32 @@ function makeMockBoardTasks() {
   };
 }
 
+function emptyTicketStore() {
+  const rows = new Map<string, string>();
+  return {
+    deleteMeta: (key: string) => {
+      rows.delete(key);
+    },
+    entriesWithPrefix: (prefix: string) =>
+      [...rows].filter(([key]) => key.startsWith(prefix)),
+    getMeta: (key: string) => rows.get(key) ?? null,
+    setMeta: (key: string, value: string) => {
+      rows.set(key, value);
+    },
+  };
+}
+
 describe("WebSocket handler", () => {
   test("creates WS handler with /ws endpoint", async () => {
     const { dir, hub, store } = makeHub();
     await store.load();
-    const handler = createWsHandler(
-      makeMockBridge() as never,
+    const handler = createWsHandler({
+      boardTasks: makeMockBoardTasks() as never,
+      bridge: makeMockBridge() as never,
       hub,
-      makeMockBoardTasks() as never
-    );
+      ticketOptions: { now: Date.now, store: emptyTicketStore() },
+      token: "test-token",
+    });
 
     expect(handler).toBeDefined();
     hub.close();
@@ -64,11 +81,13 @@ describe("WebSocket handler", () => {
   test("the handler starts with no connected clients", async () => {
     const { dir, hub, store } = makeHub();
     await store.load();
-    createWsHandler(
-      makeMockBridge() as never,
+    createWsHandler({
+      boardTasks: makeMockBoardTasks() as never,
+      bridge: makeMockBridge() as never,
       hub,
-      makeMockBoardTasks() as never
-    );
+      ticketOptions: { now: Date.now, store: emptyTicketStore() },
+      token: "test-token",
+    });
 
     expect(hub.clientCount()).toBe(0);
     hub.close();

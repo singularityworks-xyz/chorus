@@ -1,5 +1,10 @@
-import { queueBoardPromptInputSchema } from "@chorus/contracts";
+import {
+  queueBoardPromptInputSchema,
+  WS_CLOSE_UNAUTHORIZED,
+} from "@chorus/contracts";
 import { Elysia, t } from "elysia";
+import { verifyRequestCredential } from "../auth/guard";
+import type { TicketOptions } from "../auth/ticket";
 import type { OpenCodeBridge } from "../bridge/opencode/bridge";
 import type { BoardTaskService } from "../tasks/board-task-service";
 import type { HubSocket, WorkspaceHub } from "./hub";
@@ -115,11 +120,44 @@ const WS_PAYLOAD_SCHEMAS = {
   }),
 } as const;
 
-export function createWsHandler(
-  bridge: OpenCodeBridge,
-  hub: WorkspaceHub,
-  boardTasks: BoardTaskService
-) {
+export interface WsHandlerOptions {
+  boardTasks: BoardTaskService;
+  bridge: OpenCodeBridge;
+  hub: WorkspaceHub;
+  /** Cookie/ticket verification for the upgrade (spec §6.2). */
+  ticketOptions: TicketOptions;
+  token: string;
+}
+
+export function createWsHandler(options: WsHandlerOptions) {
+  const { bridge, boardTasks, hub, ticketOptions, token } = options;
+
+  /**
+   * Authenticates the upgrade.
+   *
+   * Elysia cannot reject a handshake from `.ws({ upgrade })` — the return value
+   * is discarded — so an unauthenticated socket would be accepted and simply
+   * closed afterwards. That still delivers the documented 4401 signal the
+   * browser needs (a failed handshake exposes no body to JS), and no
+   * application data is ever written to an unauthenticated socket: `open`
+   * returns before `hub.register`, so it is not in the registry and receives no
+   * events, heartbeat, or replay.
+   *
+   * `ws.request` is undefined; the request lives on `ws.data.request`.
+   */
+  // The credential verify is an async HMAC check, and the socket must not be
+  // registered before it resolves.
+  // biome-ignore lint/suspicious/useAwait: awaits the credential verify
+  const authorizeUpgrade = async (
+    ws: unknown
+  ): Promise<{ ok: true } | { ok: false; reason: string }> => {
+    const data = (ws as { data?: { request?: Request } }).data;
+    if (!data?.request) {
+      return { ok: false, reason: "no upgrade request" };
+    }
+
+    return verifyRequestCredential(data.request, { ticketOptions, token });
+  };
   return new Elysia().ws("/ws", {
     // Transport shape only: "an object with a string type, and optionally a
     // payload or a resume cursor".
@@ -137,7 +175,14 @@ export function createWsHandler(
       since: t.Optional(t.Number()),
     }),
 
-    open(ws) {
+    async open(ws) {
+      const auth = await authorizeUpgrade(ws);
+      if (!auth.ok) {
+        console.warn("[ws] upgrade rejected:", auth.reason);
+        ws.close(WS_CLOSE_UNAUTHORIZED, "unauthorized");
+        return;
+      }
+
       hub.register(toHubSocket(ws));
     },
 
