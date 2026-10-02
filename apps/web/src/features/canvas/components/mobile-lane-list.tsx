@@ -69,6 +69,12 @@ export function MobileLaneList() {
                     ? "border-white/40 bg-white/15 text-white"
                     : "border-white/10 text-white/60"
                 }`}
+                // Every board is listed here, unlike the card, which renders only
+                // the selected one. That makes these chips the one place in the
+                // UI where a client's full set of boards is present in the DOM
+                // regardless of selection or canvas layout, which is what lets a
+                // test assert that a client actually received a board.
+                data-board-title={board.title}
                 key={board.boardId}
                 onClick={() => {
                   selectBoard(board.boardId);

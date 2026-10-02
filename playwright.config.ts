@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import { SERVE_PORT, WEB_PORT } from "./e2e/serve-env";
 
 /**
  * Playwright configuration (plan P5, first Playwright config in the repo).
@@ -11,17 +12,11 @@ import { defineConfig, devices } from "@playwright/test";
  * - A WebSocket that dies mid-session reconnects on its own.
  * - A 4401 close stops the reconnect loop rather than looping forever.
  *
- * `webServer` boots serve with a pinned token and a throwaway data dir, and
- * leaves the browser pointing at it. Next.js runs in dev mode so the spec does
- * not depend on a production build having been produced first; the release gate
- * is the unit and integration suites plus this spec, and the Docker image runs
- * the built output.
+ * Serve is booted by `globalSetup` with a pinned token and a throwaway data dir,
+ * so a spec can stop and restart it mid-session. Next.js runs as a production
+ * build rather than `next dev`, because dev-mode hydration does not attach
+ * handlers in this app and a spec that cannot drive the UI is not worth running.
  */
-const SERVE_PORT = Number(process.env.CHORUS_E2E_SERVE_PORT ?? 2199);
-const WEB_PORT = Number(process.env.CHORUS_E2E_WEB_PORT ?? 3199);
-const TOKEN =
-  "e2e00000000000000000000000000000000000000000000000000000000000000";
-
 export default defineConfig({
   forbidOnly: Boolean(process.env.CI),
   // Scoped deliberately. Playwright loads test files with Node's ESM loader, so
@@ -36,6 +31,8 @@ export default defineConfig({
   // The restart and offline cases own a shared serve process, so they must not
   // interleave.
   workers: 1,
+  globalSetup: "./e2e/global-setup.ts",
+  globalTeardown: "./e2e/global-teardown.ts",
   reporter: process.env.CI ? [["list"], ["github"]] : [["list"]],
   retries: process.env.CI ? 1 : 0,
   timeout: 60_000,
@@ -55,14 +52,10 @@ export default defineConfig({
       use: { ...devices["Pixel 7"] },
     },
   ],
+  // Serve is started by `globalSetup` rather than here, because one spec has to
+  // stop and restart it mid-session and `webServer` will not let a test reach
+  // its own process.
   webServer: [
-    {
-      command: `OPENCODE_AUTO_START=false NODE_ENV=production CHORUS_TOKEN=${TOKEN} PORT=${SERVE_PORT} DATA_DIR=${process.env.CHORUS_E2E_DATA_DIR ?? "/tmp/chorus-e2e"} bun run apps/serve/src/index.ts`,
-      reuseExistingServer: !process.env.CI,
-      stdout: "ignore",
-      timeout: 60_000,
-      url: `http://127.0.0.1:${SERVE_PORT}/health`,
-    },
     {
       // The production build, not `next dev`.
       //
@@ -83,5 +76,3 @@ export default defineConfig({
     },
   ],
 });
-
-export { SERVE_PORT, TOKEN, WEB_PORT };

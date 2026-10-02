@@ -11,9 +11,15 @@ import { expect, test } from "@playwright/test";
  * app's own 4401 handling.
  */
 
-const TOKEN =
-  process.env.CHORUS_E2E_TOKEN ??
-  "e2e00000000000000000000000000000000000000000000000000000000000000";
+import {
+  repoRoot,
+  SERVE_DATA_DIR,
+  SERVE_LOG_FILE,
+  SERVE_PID_FILE,
+  SERVE_PORT,
+  TOKEN,
+} from "./serve-env";
+import { start, stop } from "./serve-process";
 
 /**
  * Signs in through the real login screen.
@@ -211,6 +217,132 @@ test.describe("client sync", () => {
 
     // And the board is still there afterwards: reconnecting must not lose state.
     await expectBoardPresent(page, title);
+  });
+
+  test("a restarted server is resumed from, not reloaded from scratch", async ({
+    page,
+  }) => {
+    await signIn(page);
+    await waitForLive(page);
+    const title = uniqueTitle("E2E restart board");
+    await createBoard(page, title);
+    await expectBoardPresent(page, title);
+
+    // A real process death, not `setOffline`.
+    //
+    // Killing the server is the only way to prove the resume path end to end:
+    // `setOffline` exercises the client's half while the server never learns
+    // anything, so a client that quietly reloaded a full snapshot would still
+    // pass. Here the process is gone, and the client has to reconnect to a fresh
+    // one and replay from its cursor.
+    await stop(SERVE_PORT, SERVE_PID_FILE);
+
+    // The client notices. Reconnect attempts fail while the port is closed, so
+    // backoff is doing its job rather than a hot loop.
+    await expect(page.getByTestId("connection-strip")).toBeVisible({
+      timeout: 20_000,
+    });
+
+    await start({
+      dataDir: SERVE_DATA_DIR,
+      logFile: SERVE_LOG_FILE,
+      pidFile: SERVE_PID_FILE,
+      port: SERVE_PORT,
+      repoRoot,
+      token: TOKEN,
+    });
+
+    // Back to live, and the board survived the restart: same data dir, so the
+    // server kept the log the client's cursor points into.
+    await expect(page.getByTestId("connection-strip")).toHaveCount(0, {
+      timeout: 40_000,
+    });
+    await expectBoardPresent(page, title);
+  });
+
+  test("a change made while the client is offline arrives on reconnect", async ({
+    browser,
+    page,
+  }) => {
+    await signIn(page);
+    await waitForLive(page);
+    const first = uniqueTitle("E2E offline first");
+    await createBoard(page, first);
+    await expectBoardPresent(page, first);
+
+    // A second, independently authenticated client: it stands in for another
+    // user or another tab, and it can commit while the first one is cut off.
+    const otherContext = await browser.newContext();
+    const other = await otherContext.newPage();
+    await signIn(other);
+    await waitForLive(other);
+    const second = uniqueTitle("E2E offline second");
+    await createBoard(other, second);
+
+    // The first client must have received it live.
+    await expectBoardPresent(page, second);
+
+    // Now cut the first client off and commit one more change behind its back.
+    await page.context().setOffline(true);
+    await expect
+      .poll(() => readLastSeq(page), { timeout: 20_000 })
+      .not.toBeNull();
+
+    const third = uniqueTitle("E2E offline third");
+    await createBoard(other, third);
+
+    // Offline, so the change cannot have reached this client. Asserted before
+    // the reconnect rather than assumed, because a spec that never proves the
+    // gap existed cannot prove it was filled.
+    await expect(page.locator(`[data-board-title="${third}"]`)).toHaveCount(0, {
+      timeout: 5000,
+    });
+
+    // Coming back online is what triggers the reconnect, and the gap between the
+    // cursor and the server's head has to be filled rather than left as a hole.
+    await page.context().setOffline(false);
+    await page.evaluate(() => window.dispatchEvent(new Event("online")));
+
+    await expectBoardPresent(page, third);
+    await expect(page.getByTestId("connection-strip")).toHaveCount(0, {
+      timeout: 40_000,
+    });
+
+    await otherContext.close();
+  });
+
+  test("two browsers converge on the same workspace", async ({
+    browser,
+    page,
+  }) => {
+    await signIn(page);
+    await waitForLive(page);
+
+    const otherContext = await browser.newContext();
+    const other = await otherContext.newPage();
+    await signIn(other);
+    // Wait for the second client to be genuinely live before committing a board,
+    // or the test races its own handshake and can pass or fail on timing alone.
+    await waitForLive(other);
+
+    // A board committed by one client shows up in the other without a reload,
+    // which is the whole point of having one sequenced event log rather than
+    // per-client snapshots.
+    const fromFirst = uniqueTitle("E2E converge a");
+    await createBoard(page, fromFirst);
+    await expectBoardPresent(other, fromFirst);
+
+    const fromSecond = uniqueTitle("E2E converge b");
+    await createBoard(other, fromSecond);
+    await expectBoardPresent(page, fromSecond);
+
+    // Both clients also hold the boards the other created, so neither is showing
+    // a private cache.
+    await expectBoardPresent(other, fromFirst);
+    await expectBoardPresent(page, fromSecond);
+    await expectBoardPresent(page, fromSecond);
+
+    await otherContext.close();
   });
 
   test("a dead session stops reconnecting and shows the login gate", async ({
