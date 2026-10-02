@@ -112,6 +112,12 @@ jobs:
         run: bun ci
       - name: Serve Smoke
         run: |
+          # Phase 4 made every route except GET /health and the login screen
+          # require a session cookie, so this smoke logs in first. CHORUS_TOKEN is
+          # pinned rather than left to auto-generation so the run is
+          # deterministic and the token file is not written into the runner HOME.
+          export CHORUS_TOKEN="$(openssl rand -hex 32)"
+          export DATA_DIR="$(mktemp -d)"
           OPENCODE_AUTO_START=false PORT=2100 bun run --cwd apps/serve dev &
           SERVER_PID=$!
           for i in $(seq 1 30); do
@@ -121,11 +127,34 @@ jobs:
           done
           trap 'kill $SERVER_PID' EXIT
 
+          # /health is the one route that stays open (spec §6.1).
           curl -sf http://localhost:2100/health | grep -q '"status":"ok"'
+
+          # Everything else is gated, so an unauthenticated call must be
+          # rejected before validation runs — which is why /tasks answers 401
+          # here rather than 422: a 422 would mean the payload schema leaked.
+          GATED=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:2100/workspace)
+          [ "$GATED" = "401" ] || { echo "expected 401 unauthenticated on /workspace, got $GATED"; exit 1; }
+
+          LOGIN=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:2100/auth/login \
+            -H 'content-type: application/json' -d "{\"token\":\"$CHORUS_TOKEN\"}")
+          [ "$LOGIN" = "200" ] || { echo "expected 200 on login, got $LOGIN"; exit 1; }
+
+          COOKIE=$(curl -sf -D - -o /dev/null -X POST http://localhost:2100/auth/login \
+            -H 'content-type: application/json' -d "{\"token\":\"$CHORUS_TOKEN\"}" \
+            | grep -i '^set-cookie:' | sed 's/^[Ss]et-[Cc]ookie: *//' | cut -d';' -f1 | tr -d '\r')
+
+          # Sent as an explicit header: the cookie is Secure, so curl correctly
+          # refuses to attach it over plain HTTP. TLS arrives with Caddy in P8.
+          curl -sf -H "Cookie: $COOKIE" http://localhost:2100/workspace | grep -q '"revision"'
+
           CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:2100/tasks \
-            -H 'content-type: application/json' -d '{}')
+            -H 'content-type: application/json' -H "Cookie: $COOKIE" -d '{}')
           [ "$CODE" = "422" ] || { echo "expected 422 for invalid task payload, got $CODE"; exit 1; }
-          curl -sf http://localhost:2100/workspace | grep -q '"revision"'
+
+          FORGED=$(curl -s -o /dev/null -w '%{http_code}' -H 'Cookie: chorus_session=v1.deadbeef.zz' http://localhost:2100/workspace)
+          [ "$FORGED" = "401" ] || { echo "expected 401 for a forged cookie, got $FORGED"; exit 1; }
+
           echo "integration smoke passed"
 
   security:

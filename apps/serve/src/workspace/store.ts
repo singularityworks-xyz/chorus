@@ -282,6 +282,28 @@ export class WorkspaceStore {
     return this.#db.path;
   }
 
+  /**
+   * The `meta` key/value table.
+   *
+   * Exposed so the auth layer can persist single-use WebSocket tickets (spec
+   * §6.2) without reaching into SQLite itself. The store owns the connection and
+   * stays the only writer; these are the same operations `mut:` idempotency keys
+   * use, so ticket rows and mutation rows share one durability story.
+   */
+  get meta(): {
+    deleteMeta(key: string): void;
+    entriesWithPrefix(prefix: string): [string, string][];
+    getMeta(key: string): string | null;
+    setMeta(key: string, value: string): void;
+  } {
+    return {
+      deleteMeta: (key: string) => this.#db.deleteMeta(key),
+      entriesWithPrefix: (prefix: string) => this.#db.entriesWithPrefix(prefix),
+      getMeta: (key: string) => this.#db.getMeta(key),
+      setMeta: (key: string, value: string) => this.#db.setMeta(key, value),
+    };
+  }
+
   exportTo(destination: string): void {
     this.#db.exportTo(destination);
   }
