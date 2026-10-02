@@ -126,6 +126,28 @@ export class ChorusDatabase {
       .run(key, value);
   }
 
+  deleteMeta(key: string): void {
+    this.#db.query("DELETE FROM meta WHERE key = ?").run(key);
+  }
+
+  /**
+   * Every `key`/`value` pair under a prefix.
+   *
+   * Backs the WS-ticket janitor: `pruneMutationIds` only sweeps `mut:`, so
+   * nothing else clears the `wst:` rows a client leaves behind when it fetches
+   * a ticket and never upgrades.
+   */
+  entriesWithPrefix(prefix: string): [string, string][] {
+    return this.#db
+      .query<{ key: string; value: string }, [string]>(
+        "SELECT key, value FROM meta WHERE key LIKE ? ESCAPE '\\'"
+      )
+      .all(`${prefix.replace(/[\\%_]/g, "\\$&")}%`) as unknown as [
+      string,
+      string,
+    ][];
+  }
+
   /** Highest sequence ever appended. Survives event pruning (meta is the truth). */
   headSeq(): number {
     const raw = this.getMeta(HEAD_SEQ_KEY);
