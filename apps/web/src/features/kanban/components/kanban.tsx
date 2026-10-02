@@ -1015,7 +1015,7 @@ function TaskCard({
           >
             {/* biome-ignore lint/a11y/noNoninteractiveElementInteractions: modal content stops propagation */}
             <div
-              className="flex h-[80vh] w-[80vw] min-w-[600px] flex-col rounded-lg border border-white/10 bg-[#0d0d0d] shadow-2xl"
+              className="flex h-[80vh] w-[80vw] min-w-[600px] flex-col rounded-lg border border-white/10 bg-[#0d0d0d] shadow-2xl max-md:h-full max-md:w-full max-md:min-w-0 max-md:rounded-none max-md:border-0"
               onClick={(e) => e.stopPropagation()}
               onKeyDown={(e) => e.stopPropagation()}
               role="dialog"

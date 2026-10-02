@@ -610,7 +610,14 @@ function KanbanCardNodeComponent({
             <GripVerticalIcon className="size-3.5" />
           </div>
 
-          <h2 className="shrink-0 font-semibold text-[0.82rem] text-white/90 tracking-wide">
+          {/* A stable hook for the board's presence in the DOM. Several nodes
+              render this title (canvas card, lane-list chip, recents), and React
+              Flow mounts and lays out asynchronously, so asserting on visible
+              text is a layout race rather than a statement about state. */}
+          <h2
+            className="shrink-0 font-semibold text-[0.82rem] text-white/90 tracking-wide"
+            data-board-title={cardData.title}
+          >
             {cardData.title}
           </h2>
 
