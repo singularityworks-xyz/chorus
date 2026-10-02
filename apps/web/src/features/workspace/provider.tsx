@@ -124,6 +124,7 @@ export function ChorusWorkspaceProvider({
     error: syncError,
     hydrated,
     lastSeq,
+    reportUnauthorized: reportSyncUnauthorized,
     status,
   } = useChorusSync({
     onAuthExpired: () => {
@@ -182,13 +183,21 @@ export function ChorusWorkspaceProvider({
 
   // ── commands (HTTP) ───────────────────────────────────────────────────────
 
-  const reportUnauthorized = useCallback((response: Response) => {
-    if (response.status === 401) {
+  const reportUnauthorized = useCallback(
+    (response: Response): boolean => {
+      if (response.status !== 401) {
+        return false;
+      }
+
+      // Stop the socket too. A 4401 close already does this, but a 401
+      // discovered by a command would otherwise leave the client reconnecting
+      // against a server that will keep refusing the same dead cookie.
+      reportSyncUnauthorized();
       setAuthExpired(true);
       return true;
-    }
-    return false;
-  }, []);
+    },
+    [reportSyncUnauthorized]
+  );
 
   /**
    * Sends one mutation.
