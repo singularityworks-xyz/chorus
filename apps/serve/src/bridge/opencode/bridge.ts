@@ -119,6 +119,17 @@ export class OpenCodeBridge {
     return this.adapter.sessions.create(input);
   }
 
+  /**
+   * Reads a session back from the engine.
+   *
+   * Used to check that a session we are about to reuse really belongs to the
+   * directory we are about to work in. The engine is the only authority on that;
+   * the store holds a session id and a path but no link between them.
+   */
+  getSession(input: { directory?: string; sessionID: string }) {
+    return this.adapter.sessions.get(input.sessionID, input.directory);
+  }
+
   promptSession(input: SessionPromptInput) {
     return this.adapter.sessions.prompt(input);
   }

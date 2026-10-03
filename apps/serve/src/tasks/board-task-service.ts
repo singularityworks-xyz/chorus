@@ -210,6 +210,65 @@ export class BoardTaskService {
    * On a mismatch the session is forked rather than discarded, so the transcript
    * so far survives: a hard redirect is a continuation, not a restart.
    */
+  /**
+   * The directory a board's agent runs in.
+   *
+   * Prefers the board's own worktree, falling back to the repo's primary
+   * checkout for a board that has one, and finally to the requested path when the
+   * board is unknown to the store.
+   */
+  #workingDirectoryFor(
+    board: WorkspaceBoard | undefined,
+    input: QueueBoardPromptInput
+  ): string {
+    return board?.repo.worktree ?? board?.repo.directory ?? input.directory;
+  }
+
+  /**
+   * The directory a candidate session was opened in, or null when unknown.
+   *
+   * The in-memory registry records the directory at the moment a session was
+   * bound, so it is authoritative and free. After a restart it is empty and the
+   * store holds a session id with no path attached, so the engine is asked
+   * instead — it is the only thing that actually knows. A board's worktree is fixed
+   * at creation, so the common case simply matches; the engine check is what
+   * catches a session id that belonged to a different board's checkout.
+   *
+   * A failed lookup yields null, which reads as "unknown" and therefore reuses.
+   * Forking on a transient engine error would strand a session that was fine.
+   */
+  async #candidateDirectory({
+    candidate,
+    existing,
+    input,
+  }: {
+    candidate: string | undefined;
+    existing: BoardSessionRecord | undefined;
+    input: QueueBoardPromptInput;
+  }): Promise<string | null> {
+    if (!candidate) {
+      return null;
+    }
+
+    if (existing?.directory) {
+      return existing.directory;
+    }
+
+    try {
+      const session = await this.#bridge.getSession({
+        directory: input.directory,
+        sessionID: candidate,
+      });
+      return session.directory ?? null;
+    } catch {
+      logger.warn("queue-prompt:session-directory-unknown", {
+        boardId: input.boardId,
+        sessionId: candidate,
+      });
+      return null;
+    }
+  }
+
   async #resolveSession({
     existing,
     input,
@@ -224,13 +283,21 @@ export class BoardTaskService {
       existing?.sessionId ??
       persistedBoard?.session.sessionId;
 
-    const candidateDirectory =
-      existing?.directory ??
-      persistedBoard?.repo.worktree ??
-      persistedBoard?.repo.directory ??
-      null;
+    const candidateDirectory = await this.#candidateDirectory({
+      candidate,
+      existing,
+      input,
+    });
 
-    if (candidate && !sameDirectory(candidateDirectory, input.directory)) {
+    // Only a *known* mismatch forks. `candidateDirectory === null` means the
+    // directory could not be established at all, and treating that as "different"
+    // would fork a session that was in the right place every time the engine was
+    // briefly unreachable.
+    if (
+      candidate &&
+      candidateDirectory !== null &&
+      !sameDirectory(candidateDirectory, input.directory)
+    ) {
       logger.info("queue-prompt:session-directory-mismatch", {
         boardId: input.boardId,
         candidateDirectory,
@@ -288,13 +355,25 @@ export class BoardTaskService {
   async queuePrompt(
     rawInput: QueueBoardPromptInput
   ): Promise<QueueBoardPromptResponse> {
-    const input = queueBoardPromptInputSchema.parse(rawInput);
-    const existing = this.#registry.get(input.boardId);
-    const persistedBoard = this.#workspaceStore.getBoard(input.boardId);
+    const parsed = queueBoardPromptInputSchema.parse(rawInput);
+    const existing = this.#registry.get(parsed.boardId);
+    const persistedBoard = this.#workspaceStore.getBoard(parsed.boardId);
+
+    // The working directory is the board's, not the caller's (plan P6 task 3).
+    //
+    // `repo.worktree` is the whole point of worktree-per-board: the first board
+    // for a repo keeps the primary checkout, and every additional board gets its
+    // own. Resolving it here rather than trusting `input.directory` means the
+    // agent actually runs in its own worktree, and a client cannot aim a prompt
+    // at an arbitrary path on the host.
+    const directory = this.#workingDirectoryFor(persistedBoard, parsed);
+
+    const input: QueueBoardPromptInput = { ...parsed, directory };
 
     logger.info("queue-prompt:start", {
       boardId: input.boardId,
       directory: input.directory,
+      requestedDirectory: parsed.directory,
       model: input.model
         ? `${input.model.providerID}/${input.model.modelID}`
         : undefined,
