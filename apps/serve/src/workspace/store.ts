@@ -453,12 +453,46 @@ export class WorkspaceStore {
     boardId: string,
     events: WorkspaceEvent[]
   ): Promise<StoreCommit | null> {
+    return this.applyBoardEventsIf(boardId, events, () => true);
+  }
+
+  /**
+   * `applyBoardEvents`, but the decision to commit is made inside the queue.
+   *
+   * A caller that reads board state and then calls `applyBoardEvents` is doing a
+   * check-then-act across the queue boundary, so two concurrent callers can both
+   * see the same "not set yet" and both commit. Passing the condition down moves
+   * the read and the write into the same queue entry, which is the same rule the
+   * rest of the store follows.
+   */
+  async applyBoardEventsIf(
+    boardId: string,
+    events: WorkspaceEvent[],
+    shouldCommit: (board: WorkspaceBoard) => boolean
+  ): Promise<StoreCommit | null> {
     if (events.length === 0) {
       return null;
     }
 
     return this.#enqueue(async () => {
-      if (!this.#boardExists(boardId)) {
+      const board = this.getBoard(boardId);
+      if (!board) {
+        return null;
+      }
+
+      // Board-scoped events have to address the board named here. `#commit` and
+      // the projector both read `event.boardId`, so a mismatch would emit against
+      // a board the caller did not name. Workspace-scoped events (preferences)
+      // carry no board id and are passed through.
+      if (
+        events.some((event) => "boardId" in event && event.boardId !== boardId)
+      ) {
+        throw new Error(
+          `applyBoardEvents received an event for a different board than ${boardId}`
+        );
+      }
+
+      if (!shouldCommit(board)) {
         return null;
       }
 

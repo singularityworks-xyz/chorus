@@ -106,6 +106,19 @@ export class OpenCodeProcessManager {
     return this.#observedVersion;
   }
 
+  /**
+   * Reads the running engine's version without starting one.
+   *
+   * The lockstep assertion needs the adopted engine's version even when
+   * auto-start is off, and starting an engine the operator did not ask for to
+   * find that out would be the wrong trade.
+   */
+  async probeVersion(): Promise<string | null> {
+    const health = await probeHealth(this.#port, this.#hostname, 2000);
+    this.#observedVersion = health?.version ?? null;
+    return this.#observedVersion;
+  }
+
   async start(): Promise<void> {
     const existing = await probeHealth(this.#port, this.#hostname, 1000);
     if (existing) {

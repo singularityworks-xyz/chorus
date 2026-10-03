@@ -100,10 +100,17 @@ if (config.autoStartOpencode) {
 // The binary side is what the engine reports, not what is on PATH: serve adopts
 // an already-running engine when it finds one, and that one may not be the
 // binary we would have spawned.
-if (config.autoStartOpencode) {
-  const observed = processManager.observedVersion;
-  assertEngineLockstep(sdkVersion(), observed);
-}
+// Checked for an adopted engine too, not only one we spawned. An engine reached
+// over `OPENCODE_BASE_URL` is exactly the case where the SDK and binary are most
+// likely to have been upgraded independently, and `assertEngineLockstep` treats a
+// version the engine does not report as a warning rather than a refusal.
+//
+// Probed without spawning when auto-start is off: serve must not start an engine
+// the operator did not ask for, but it still needs to know what is serving.
+const engineVersion = config.autoStartOpencode
+  ? processManager.observedVersion
+  : await processManager.probeVersion();
+assertEngineLockstep(sdkVersion(), engineVersion);
 
 const bridge = new OpenCodeBridge(
   config.opencodeBaseUrl,

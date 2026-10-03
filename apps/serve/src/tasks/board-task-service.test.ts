@@ -60,6 +60,8 @@ async function seedBoard(
   return boardId;
 }
 
+const NO_SUCH_BOARD = /no such board/;
+
 describe("BoardTaskService", () => {
   test("creates a session for the first prompt", async () => {
     const bridge = makeMockBridge();
@@ -506,5 +508,64 @@ describe("BoardTaskService", () => {
       await workspaceStore.close();
       rmSync(dir, { force: true, recursive: true });
     });
+  });
+  test("two prompts queued at once still produce exactly one card", async () => {
+    // A double submit is the ordinary way this happens. The card-existence check
+    // lives inside the store's queue now, so the second caller observes the first
+    // one's commit rather than reading the same empty state and stacking a card.
+    const bridge = makeMockBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-card-race-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, { state: "uninitialized" });
+
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    await Promise.all([
+      service.queuePrompt({
+        boardId,
+        directory: "/tmp/repo",
+        text: "first",
+        reviewMode: "auto",
+      }),
+      service.queuePrompt({
+        boardId,
+        directory: "/tmp/repo",
+        text: "second",
+        reviewMode: "auto",
+      }),
+    ]);
+
+    const board = workspaceStore.getBoard(boardId);
+    expect(board?.columns.queue).toHaveLength(1);
+    expect(board?.session.currentTaskId).toBeDefined();
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+  test("a prompt for an unknown board is refused", async () => {
+    // Previously the working directory fell back to whatever the caller sent, so a
+    // token-holder could skip board creation entirely and point the engine at any
+    // path on the host.
+    const bridge = makeMockBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-unknown-board-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    await expect(
+      service.queuePrompt({
+        boardId: "board-that-does-not-exist",
+        directory: "/etc",
+        text: "read something I should not",
+        reviewMode: "auto",
+      })
+    ).rejects.toThrow(NO_SUCH_BOARD);
+
+    expect(bridge.createSession).not.toHaveBeenCalled();
+    expect(bridge.promptSessionAsync).not.toHaveBeenCalled();
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
   });
 });

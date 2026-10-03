@@ -161,33 +161,32 @@ export class BoardTaskService {
     input: QueueBoardPromptInput,
     sessionId: string
   ): Promise<void> {
-    const board = this.#workspaceStore.getBoard(input.boardId);
-    if (!board) {
-      return;
-    }
-
-    if (board.session.currentTaskId) {
-      return;
-    }
-
     const taskId = `task-${crypto.randomUUID()}`;
     const title = input.text.slice(0, 120);
 
-    const commit = await this.#workspaceStore.applyBoardEvents(input.boardId, [
-      {
-        boardId: input.boardId,
-        column: "queue",
-        task: {
-          id: taskId,
-          label: title,
-          labelVariant: "primary-light",
-          title,
+    // The "does this board already have a live task" decision is made inside the
+    // store's queue, not here. Reading it here and committing after would let two
+    // concurrent prompts for one board both see no current task and both create a
+    // card, which breaks the idempotence this method promises.
+    const commit = await this.#workspaceStore.applyBoardEventsIf(
+      input.boardId,
+      [
+        {
+          boardId: input.boardId,
+          column: "queue",
+          task: {
+            id: taskId,
+            label: title,
+            labelVariant: "primary-light",
+            title,
+          },
+          taskId,
+          ts: Date.now(),
+          type: "card.created",
         },
-        taskId,
-        ts: Date.now(),
-        type: "card.created",
-      },
-    ]);
+      ],
+      (board) => !board.session.currentTaskId
+    );
 
     logger.info("queue-prompt:card-created", {
       boardId: input.boardId,
@@ -217,11 +216,8 @@ export class BoardTaskService {
    * checkout for a board that has one, and finally to the requested path when the
    * board is unknown to the store.
    */
-  #workingDirectoryFor(
-    board: WorkspaceBoard | undefined,
-    input: QueueBoardPromptInput
-  ): string {
-    return board?.repo.worktree ?? board?.repo.directory ?? input.directory;
+  #workingDirectoryFor(board: WorkspaceBoard): string {
+    return board.repo.worktree ?? board.repo.directory;
   }
 
   /**
@@ -363,6 +359,16 @@ export class BoardTaskService {
     const existing = this.#registry.get(parsed.boardId);
     const persistedBoard = this.#workspaceStore.getBoard(parsed.boardId);
 
+    if (!persistedBoard) {
+      // Refused rather than falling back to the caller's directory. A prompt for a
+      // board the store does not know is either a stale client or an attempt to
+      // skip board creation and aim the engine at an arbitrary path; the fallback
+      // made the second one work.
+      throw new Error(
+        `no such board: ${parsed.boardId}. A prompt can only run against a board the server knows.`
+      );
+    }
+
     // The working directory is the board's, not the caller's (plan P6 task 3).
     //
     // `repo.worktree` is the whole point of worktree-per-board: the first board
@@ -370,7 +376,7 @@ export class BoardTaskService {
     // own. Resolving it here rather than trusting `input.directory` means the
     // agent actually runs in its own worktree, and a client cannot aim a prompt
     // at an arbitrary path on the host.
-    const directory = this.#workingDirectoryFor(persistedBoard, parsed);
+    const directory = this.#workingDirectoryFor(persistedBoard);
 
     const input: QueueBoardPromptInput = { ...parsed, directory };
 
