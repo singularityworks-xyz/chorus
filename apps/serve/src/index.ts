@@ -2,6 +2,7 @@ import { access, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createLogger } from "@chorus/logger";
+import { sdkVersion } from "@chorus/oc-adapter";
 import { cors } from "@elysiajs/cors";
 import { Elysia } from "elysia";
 import { LoginRateLimiter } from "./auth/brute-force";
@@ -14,6 +15,7 @@ import { MissingTokenError, resolveToken } from "./auth/token";
 import { OpenCodeBridge } from "./bridge/opencode/bridge";
 import { loadConfig } from "./config";
 import { OpenCodeProcessManager } from "./opencode/process-manager";
+import { assertEngineLockstep } from "./paths/engine-lockstep";
 import { NativeFolderPicker } from "./projects/folder-picker";
 import { ProjectService } from "./projects/service";
 import { WorktreeManager } from "./projects/worktree-manager";
@@ -85,6 +87,22 @@ const processManager = new OpenCodeProcessManager({
 
 if (config.autoStartOpencode) {
   await processManager.start();
+}
+
+// SDK ↔ binary lockstep (pre-implementation decision #5).
+//
+// The adapter re-exports SDK event types, so an SDK that disagrees with the
+// binary it is talking to produces type-level fiction and silently mis-normalized
+// events — the failure mode recorded as known drift between 1.3.15 and 1.18.29.
+// A boot-time mismatch is unrecoverable and must be loud rather than discovered
+// later as missing cards.
+//
+// The binary side is what the engine reports, not what is on PATH: serve adopts
+// an already-running engine when it finds one, and that one may not be the
+// binary we would have spawned.
+if (config.autoStartOpencode) {
+  const observed = processManager.observedVersion;
+  assertEngineLockstep(sdkVersion(), observed);
 }
 
 const bridge = new OpenCodeBridge(

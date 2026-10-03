@@ -1,6 +1,6 @@
 {
   "name": "@chorus/oc-adapter",
-  "version": "0.0.16",
+  "version": "0.0.17",
   "private": true,
   "type": "module",
   "exports": {
@@ -11,6 +11,6 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@opencode-ai/sdk": "^1.3.13"
+    "@opencode-ai/sdk": "1.18.29"
   }
 }

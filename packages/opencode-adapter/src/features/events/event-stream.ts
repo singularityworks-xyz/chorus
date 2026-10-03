@@ -44,6 +44,12 @@ export class EventStream {
     const sub: DirSubscription = { abort };
     this.#dirSubscriptions.set(key, sub);
 
+    // A fresh subscription must not be judged against remembered roles from a
+    // previous one: the engine does not replay `message.updated` for messages
+    // already in flight, so stale-but-present entries are the only thing keeping
+    // that from silently dropping content.
+    resetMessageTracking();
+
     const events = await this.client.event.subscribe({
       directory: options?.directory,
     });
@@ -221,7 +227,27 @@ function extractFileDiff(
   return undefined;
 }
 
+/**
+ * Which messages the engine has said are assistant-authored, per session.
+ *
+ * Part events carry no role, so the normalizer has to remember what
+ * `message.updated` said. Two properties matter and neither was guaranteed:
+ *
+ * It was never cleared. A reconnect re-subscribes to a live stream that will not
+ * replay the `message.updated` for messages already in flight, so every part
+ * event for those messages hit the `isAssistantMessage` miss and returned a bare
+ * `{ type, sessionID }` — all content discarded, no error, and the `default:` arm
+ * of `normalizeEvent` is indistinguishable from it. `resetMessageTracking` is
+ * called when a subscription starts; the miss then loses only the part events
+ * whose parent has genuinely not been seen.
+ *
+ * It also grew without bound, one entry per assistant message for the life of the
+ * process. Capped per session: the oldest entries are dropped, which costs a
+ * little classification accuracy on a very long session rather than a leak.
+ */
 const assistantMessageRoles = new Map<string, Set<string>>();
+
+const MAX_TRACKED_MESSAGES_PER_SESSION = 512;
 
 function isAssistantMessage(sessionID: string, messageID: string): boolean {
   const sessionRoles = assistantMessageRoles.get(sessionID);
@@ -234,7 +260,26 @@ function recordAssistantMessage(sessionID: string, messageID: string) {
     sessionRoles = new Set();
     assistantMessageRoles.set(sessionID, sessionRoles);
   }
+
+  if (sessionRoles.size >= MAX_TRACKED_MESSAGES_PER_SESSION) {
+    const oldest = sessionRoles.values().next();
+    if (!oldest.done) {
+      sessionRoles.delete(oldest.value);
+    }
+  }
+
   sessionRoles.add(messageID);
+}
+
+/**
+ * Forgets remembered assistant messages.
+ *
+ * Called when a stream subscription starts so a reconnect is not judged against
+ * bookkeeping from before it. Exported for the adapter's tests, which otherwise
+ * leak state between cases.
+ */
+export function resetMessageTracking(): void {
+  assistantMessageRoles.clear();
 }
 
 function normalizeMessagePartUpdated(

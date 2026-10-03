@@ -1,12 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2";
-import { normalizeEvent } from "./event-stream";
+import { normalizeEvent, resetMessageTracking } from "./event-stream";
 
 // Real opencode streams deliver message.updated (role=assistant) before any
 // of that message's part events; the normalizer relies on it to classify
 // parts. Every part-event test therefore records the parent message first.
 function assistantMessageUpdated(sessionID: string, messageID: string) {
   return {
+    id: `evt-${messageID}`,
     type: "message.updated",
     properties: {
       sessionID,
@@ -16,8 +17,13 @@ function assistantMessageUpdated(sessionID: string, messageID: string) {
 }
 
 describe("normalizeEvent", () => {
+  beforeEach(() => {
+    resetMessageTracking();
+  });
+
   test("normalizes text part as writing activity", () => {
     const raw = {
+      id: "evt-0",
       type: "message.part.updated",
       properties: {
         sessionID: "sess-1",
@@ -44,6 +50,7 @@ describe("normalizeEvent", () => {
 
   test("normalizes tool part with running state as thinking", () => {
     const raw = {
+      id: "evt-1",
       type: "message.part.updated",
       properties: {
         sessionID: "sess-1",
@@ -74,6 +81,7 @@ describe("normalizeEvent", () => {
 
   test("normalizes tool part with completed state as writing", () => {
     const raw = {
+      id: "evt-2",
       type: "message.part.updated",
       properties: {
         sessionID: "sess-1",
@@ -107,6 +115,7 @@ describe("normalizeEvent", () => {
 
   test("normalizes reasoning part as thinking", () => {
     const raw = {
+      id: "evt-3",
       type: "message.part.updated",
       properties: {
         sessionID: "sess-1",
@@ -131,6 +140,7 @@ describe("normalizeEvent", () => {
 
   test("normalizes session.status busy as thinking", () => {
     const raw = {
+      id: "evt-4",
       type: "session.status",
       properties: {
         sessionID: "sess-1",
@@ -146,6 +156,7 @@ describe("normalizeEvent", () => {
 
   test("normalizes session.status idle as idle", () => {
     const raw = {
+      id: "evt-5",
       type: "session.status",
       properties: {
         sessionID: "sess-1",
@@ -160,6 +171,7 @@ describe("normalizeEvent", () => {
 
   test("normalizes session.status retry as thinking", () => {
     const raw = {
+      id: "evt-6",
       type: "session.status",
       properties: {
         sessionID: "sess-1",
@@ -174,6 +186,7 @@ describe("normalizeEvent", () => {
 
   test("normalizes session.idle as idle", () => {
     const raw = {
+      id: "evt-7",
       type: "session.idle",
       properties: {
         sessionID: "sess-1",
@@ -188,6 +201,7 @@ describe("normalizeEvent", () => {
 
   test("normalizes permission.asked as waiting_for_approval", () => {
     const raw = {
+      id: "evt-8",
       type: "permission.asked",
       properties: {
         id: "perm-1",
@@ -208,6 +222,7 @@ describe("normalizeEvent", () => {
 
   test("normalizes session.error as error", () => {
     const raw = {
+      id: "evt-9",
       type: "session.error",
       properties: {
         sessionID: "sess-1",
@@ -227,6 +242,7 @@ describe("normalizeEvent", () => {
 
   test("normalizes message.updated with error as error", () => {
     const raw = {
+      id: "evt-10",
       type: "message.updated",
       properties: {
         sessionID: "sess-1",
@@ -264,6 +280,7 @@ describe("normalizeEvent", () => {
 
   test("returns base event for unknown types", () => {
     const raw = {
+      id: "evt-11",
       type: "project.updated",
       properties: {
         id: "proj-1",
@@ -277,5 +294,111 @@ describe("normalizeEvent", () => {
 
     expect(result.type).toBe("project.updated");
     expect(result.timestamp).toBeDefined();
+  });
+
+  // SDK 1.18 requires an `id` on every event; the fixtures above all carry one.
+  test("normalizes message.part.delta as a delta with a part id", () => {
+    resetMessageTracking();
+    const sessionID = "sess-delta";
+    normalizeEvent({
+      id: "evt-m",
+      properties: { info: { id: "msg-1", role: "assistant" }, sessionID },
+      type: "message.updated",
+    } as OpencodeEvent);
+
+    const raw = {
+      id: "evt-d",
+      properties: {
+        delta: "Hel",
+        field: "text",
+        messageID: "msg-1",
+        partID: "part-1",
+        sessionID,
+      },
+      type: "message.part.delta",
+    } as OpencodeEvent;
+
+    const normalized = normalizeEvent(raw);
+
+    expect(normalized.delta).toBe("Hel");
+    expect(normalized.partID).toBe("part-1");
+    expect(normalized.messageID).toBe("msg-1");
+    expect(normalized.sessionID).toBe(sessionID);
+  });
+
+  test("normalizes question.asked as waiting_for_question", () => {
+    const raw = {
+      id: "evt-q",
+      properties: {
+        id: "q-1",
+        questions: [{ header: "Which?", options: [] }],
+        sessionID: "sess-q",
+      },
+      type: "question.asked",
+    } as unknown as OpencodeEvent;
+
+    expect(normalizeEvent(raw).activity).toBe("waiting_for_question");
+  });
+
+  test("an unrecorded parent message drops part content instead of guessing", () => {
+    // The engine did not tell us this message is assistant-authored, so the
+    // normalizer refuses rather than attributing text it cannot place.
+    const raw = {
+      id: "evt-orphan",
+      properties: {
+        delta: "guess",
+        field: "text",
+        messageID: "msg-never-seen",
+        partID: "part-1",
+        sessionID: "sess-orphan",
+      },
+      type: "message.part.delta",
+    } as OpencodeEvent;
+
+    const normalized = normalizeEvent(raw);
+
+    expect(normalized.delta).toBeUndefined();
+    expect(normalized.text).toBeUndefined();
+    expect(normalized.sessionID).toBe("sess-orphan");
+  });
+
+  test("resetMessageTracking makes a reconnect stop trusting stale bookkeeping", () => {
+    const sessionID = "sess-reconnect";
+    const parent = {
+      id: "evt-p",
+      properties: { info: { id: "msg-1", role: "assistant" }, sessionID },
+      type: "message.updated",
+    } as OpencodeEvent;
+
+    normalizeEvent(parent);
+    const before = normalizeEvent({
+      id: "evt-1",
+      properties: {
+        delta: "kept",
+        field: "text",
+        messageID: "msg-1",
+        partID: "part-1",
+        sessionID,
+      },
+      type: "message.part.delta",
+    } as OpencodeEvent);
+    expect(before.delta).toBe("kept");
+
+    // A reconnect: the engine will not replay the parent, so the remembered role
+    // is exactly the thing that would otherwise mask the gap.
+    resetMessageTracking();
+
+    const after = normalizeEvent({
+      id: "evt-2",
+      properties: {
+        delta: "dropped",
+        field: "text",
+        messageID: "msg-1",
+        partID: "part-1",
+        sessionID,
+      },
+      type: "message.part.delta",
+    } as OpencodeEvent);
+    expect(after.delta).toBeUndefined();
   });
 });

@@ -105,17 +105,22 @@ export class ProviderManager {
     const models = providers.all
       .flatMap((provider) =>
         Object.values(provider.models).map((model) => ({
-          attachment: model.attachment,
+          // SDK 1.18 moved these four from flat model fields into a nested
+          // `capabilities` object, and renamed `tool_call` to `toolcall` while
+          // doing it. They stay booleans with the same meaning, so
+          // `OpencodeModelSummary` is unchanged and nothing downstream — the
+          // model picker reads all four — has to know the engine reshaped them.
+          attachment: model.capabilities.attachment,
           connected: connected.has(provider.id),
           modelID: model.id,
           name: model.name,
           providerID: provider.id,
           providerName: provider.name,
-          reasoning: model.reasoning,
+          reasoning: model.capabilities.reasoning,
           releaseDate: model.release_date,
           status: model.status,
-          temperature: model.temperature,
-          toolCall: model.tool_call,
+          temperature: model.capabilities.temperature,
+          toolCall: model.capabilities.toolcall,
         }))
       )
       .sort((left, right) => {
