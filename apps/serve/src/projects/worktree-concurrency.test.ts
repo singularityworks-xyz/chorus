@@ -40,7 +40,7 @@ async function createBoard(
   store: WorkspaceStore,
   directory: string,
   title: string
-) {
+): Promise<string> {
   const commit = await store.applyMutation({
     baseRevision: null,
     clientId: "concurrency-test",
@@ -50,10 +50,12 @@ async function createBoard(
     },
     type: "board.create",
   });
-  if (!commit) {
-    throw new Error("board.create returned null");
+  // Narrowed here so `string | null` does not reach every call site.
+  const boardId = commit?.boardId;
+  if (!boardId) {
+    throw new Error("board.create produced no board");
   }
-  return commit.boardId;
+  return boardId;
 }
 
 /** Every path git currently has registered for this repository. */

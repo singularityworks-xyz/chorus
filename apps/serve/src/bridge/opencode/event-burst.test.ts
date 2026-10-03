@@ -4,7 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { NormalizedAgentEvent } from "@chorus/oc-adapter";
 import { normalizeEvent, resetMessageTracking } from "@chorus/oc-adapter";
-import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2";
+
+/**
+ * The raw event shape the normalizer accepts.
+ *
+ * Taken from the normalizer's own signature rather than importing the SDK: serve
+ * has no dependency on `@opencode-ai/sdk` by design, and the adapter is the only
+ * boundary allowed to know the external shape.
+ */
+type OpencodeEvent = Parameters<typeof normalizeEvent>[0];
+
 import { WorkspaceStore } from "../../workspace/store";
 
 /**
