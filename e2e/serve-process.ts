@@ -21,6 +21,8 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 export interface ServeProcessOptions {
   dataDir: string;
+  /** Extra env for the child; used to point serve at the shared engine. */
+  env?: Record<string, string>;
   logFile: string;
   pidFile: string;
   port: number;
@@ -53,6 +55,8 @@ export async function start(options: ServeProcessOptions): Promise<number> {
       NODE_ENV: "production",
       OPENCODE_AUTO_START: "false",
       PORT: String(options.port),
+      // Spread last so a caller can point serve at an engine it did not spawn.
+      ...options.env,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -138,4 +142,41 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+/**
+ * Starts the opencode engine and resolves once it reports healthy.
+ *
+ * Not managed by Playwright's `webServer`: spawning `opencode serve` from there
+ * proved unreliable — the child would intermittently die while the readiness wait
+ * ran to its full timeout, with nothing in the output to say why. Starting it
+ * here means the wait, the retries and the log all belong to us.
+ *
+ * `/global/health` is the readiness target because `opencode serve` answers 200
+ * with an HTML shell for any unknown path.
+ */
+export async function startEngine(options: {
+  cwd: string;
+  logFile: string;
+  pidFile: string;
+  port: number;
+}): Promise<number> {
+  const child = spawn(
+    "opencode",
+    ["serve", "--port", String(options.port), "--hostname", "127.0.0.1"],
+    {
+      cwd: options.cwd,
+      env: { ...process.env },
+      stdio: ["ignore", "pipe", "pipe"],
+    }
+  );
+
+  const log = spawn("tee", ["-a", options.logFile], { stdio: "pipe" });
+  child.stdout?.pipe(log.stdin);
+  child.stderr?.pipe(log.stdin);
+  child.unref();
+  recordPid(options.pidFile, child.pid ?? -1);
+
+  await waitForHealth(options.port, 120_000);
+  return child.pid ?? -1;
 }

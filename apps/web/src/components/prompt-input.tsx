@@ -539,7 +539,14 @@ export function PromptInput() {
                   ))}
                 </div>
               )}
+              {/*
+                Named, because a placeholder is not an accessible name and this
+                is the only control a user has to start work with. The agent e2e
+                spec drives it by role, and an unnamed textarea is not
+                addressable by one.
+              */}
               <Textarea
+                aria-label="Prompt Chorus"
                 className="scrollbar-hide max-h-40 min-h-8 w-full resize-none overflow-y-auto rounded-none border-0 bg-transparent p-0 font-medium text-[15px] text-white/90 shadow-none placeholder:text-white/40 focus-visible:ring-0 focus-visible:ring-offset-0 dark:bg-transparent"
                 id="chorus-prompt-input"
                 onChange={handleInput}
