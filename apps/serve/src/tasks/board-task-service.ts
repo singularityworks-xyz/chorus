@@ -1,13 +1,18 @@
+import { resolve } from "node:path";
 import type {
   QueueBoardPromptInput,
   QueueBoardPromptResponse,
+  WorkspaceBoard,
 } from "@chorus/contracts";
 import { queueBoardPromptInputSchema } from "@chorus/contracts";
 import { createLogger } from "@chorus/logger";
 import type { OpenCodeBridge } from "../bridge/opencode/bridge";
 import { resolveInside, SandboxEscapeError } from "../paths/sandbox";
 import type { WorkspaceStore } from "../workspace/store";
-import { BoardSessionRegistry } from "./board-session-registry";
+import {
+  type BoardSessionRecord,
+  BoardSessionRegistry,
+} from "./board-session-registry";
 import type { SessionWatchdog } from "./session-watchdog";
 
 const logger = createLogger(
@@ -84,6 +89,30 @@ function convertPartsToSdk(
       return [];
     }
   );
+}
+
+/**
+ * Exact path comparison, the way session scope is defined.
+ *
+ * Not a prefix test: `/repos/app` and `/repos/app-2` are different trees, and a
+ * session opened in one must never be reused in the other. Trailing separators
+ * and `.` segments are normalized so a client sending `/repos/app/` does not
+ * fork needlessly.
+ */
+function sameDirectory(
+  left: string | null | undefined,
+  right: string | null | undefined
+): boolean {
+  if (!(left && right)) {
+    return false;
+  }
+  return normalize(left) === normalize(right);
+}
+
+const TRAILING_SEPARATOR = /\/$/;
+
+function normalize(path: string): string {
+  return resolve(path).replace(TRAILING_SEPARATOR, "");
 }
 
 export class BoardTaskService {
@@ -168,6 +197,94 @@ export class BoardTaskService {
     });
   }
 
+  /**
+   * Picks the session a prompt runs in, or forks a new one.
+   *
+   * A session belongs to the directory it was opened in (plan P6 task 3). None of
+   * the three candidate sources compared directories, so any of them could hand
+   * back a session scoped to a different tree and the agent would silently work
+   * in the wrong checkout — which worktree-per-board makes routine, since one
+   * repo now has a primary path plus N worktree paths. The registry already stored
+   * `directory` and nothing read it.
+   *
+   * On a mismatch the session is forked rather than discarded, so the transcript
+   * so far survives: a hard redirect is a continuation, not a restart.
+   */
+  async #resolveSession({
+    existing,
+    input,
+    persistedBoard,
+  }: {
+    existing: BoardSessionRecord | undefined;
+    input: QueueBoardPromptInput;
+    persistedBoard: WorkspaceBoard | undefined;
+  }): Promise<{ createdSession: boolean; sessionId: string }> {
+    const candidate =
+      input.sessionId ??
+      existing?.sessionId ??
+      persistedBoard?.session.sessionId;
+
+    const candidateDirectory =
+      existing?.directory ??
+      persistedBoard?.repo.worktree ??
+      persistedBoard?.repo.directory ??
+      null;
+
+    if (candidate && !sameDirectory(candidateDirectory, input.directory)) {
+      logger.info("queue-prompt:session-directory-mismatch", {
+        boardId: input.boardId,
+        candidateDirectory,
+        directory: input.directory,
+        sessionId: candidate,
+      });
+
+      const forked = await this.#bridge.forkSession({
+        directory: input.directory,
+        sessionID: candidate,
+      });
+      logger.info("queue-prompt:session-forked", {
+        boardId: input.boardId,
+        directory: input.directory,
+        from: candidate,
+        sessionId: forked.id,
+      });
+      return { createdSession: true, sessionId: forked.id };
+    }
+
+    if (candidate) {
+      let source = "persisted";
+      if (input.sessionId) {
+        source = "input";
+      } else if (existing) {
+        source = "registry";
+      }
+
+      logger.info("queue-prompt:reusing-session", {
+        boardId: input.boardId,
+        sessionId: candidate,
+        source,
+      });
+      return { createdSession: false, sessionId: candidate };
+    }
+
+    logger.info("queue-prompt:creating-session", {
+      boardId: input.boardId,
+      directory: input.directory,
+    });
+
+    const session = await this.#bridge.createSession({
+      title: input.text.slice(0, 80),
+      directory: input.directory,
+    });
+
+    logger.info("queue-prompt:session-created", {
+      boardId: input.boardId,
+      sessionId: session.id,
+    });
+
+    return { createdSession: true, sessionId: session.id };
+  }
+
   async queuePrompt(
     rawInput: QueueBoardPromptInput
   ): Promise<QueueBoardPromptResponse> {
@@ -187,44 +304,11 @@ export class BoardTaskService {
 
     await this.#bridge.subscribeDirectory(input.directory);
 
-    let sessionId =
-      input.sessionId ??
-      existing?.sessionId ??
-      persistedBoard?.session.sessionId;
-    let createdSession = false;
-
-    if (sessionId) {
-      let source = "persisted";
-      if (input.sessionId) {
-        source = "input";
-      } else if (existing) {
-        source = "registry";
-      }
-
-      logger.info("queue-prompt:reusing-session", {
-        sessionId,
-        boardId: input.boardId,
-        source,
-      });
-    } else {
-      logger.info("queue-prompt:creating-session", {
-        boardId: input.boardId,
-        directory: input.directory,
-      });
-
-      const session = await this.#bridge.createSession({
-        title: input.text.slice(0, 80),
-        directory: input.directory,
-      });
-
-      sessionId = session.id;
-      createdSession = true;
-
-      logger.info("queue-prompt:session-created", {
-        sessionId,
-        boardId: input.boardId,
-      });
-    }
+    const { createdSession, sessionId } = await this.#resolveSession({
+      existing,
+      input,
+      persistedBoard,
+    });
 
     this.#registry.set({
       boardId: input.boardId,

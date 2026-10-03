@@ -9,6 +9,7 @@ import { BoardTaskService } from "./board-task-service";
 function makeMockBridge() {
   return {
     createSession: mock(async () => ({ id: "sess-123" })),
+    forkSession: mock(async () => ({ id: "sess-forked" })),
     promptSession: mock(async () => undefined),
     promptSessionAsync: mock(async () => undefined),
     subscribeDirectory: mock(async () => undefined),
@@ -238,5 +239,161 @@ describe("BoardTaskService", () => {
 
     await workspaceStore.close();
     rmSync(dir, { force: true, recursive: true });
+  });
+  describe("session reuse is scoped to a directory (plan P6 task 3)", () => {
+    /**
+     * A session belongs to the tree it was opened in. Reusing one across trees
+     * would have the agent silently editing the wrong checkout -- routine once
+     * one repo has a primary path and N worktree paths.
+     */
+    test("same directory reuses the session", async () => {
+      const bridge = makeMockBridge();
+      const dir = mkdtempSync(join(tmpdir(), "chorus-reuse-same-"));
+      const workspaceStore = new WorkspaceStore(dir);
+      await workspaceStore.load();
+      const boardId = await seedBoard(workspaceStore, {
+        sessionId: "sess-123",
+        state: "active",
+      });
+      const service = new BoardTaskService(bridge as never, workspaceStore);
+
+      const result = await service.queuePrompt({
+        boardId,
+        directory: "/tmp/repo",
+        text: "keep going",
+        reviewMode: "auto",
+      });
+
+      expect(result.sessionId).toBe("sess-123");
+      expect(result.createdSession).toBe(false);
+      expect(bridge.forkSession).not.toHaveBeenCalled();
+
+      await workspaceStore.close();
+      rmSync(dir, { force: true, recursive: true });
+    });
+
+    test("a worktree directory forks rather than reusing", async () => {
+      const bridge = makeMockBridge();
+      const dir = mkdtempSync(join(tmpdir(), "chorus-reuse-wt-"));
+      const workspaceStore = new WorkspaceStore(dir);
+      await workspaceStore.load();
+      const boardId = await seedBoard(workspaceStore, {
+        sessionId: "sess-123",
+        state: "active",
+      });
+      const service = new BoardTaskService(bridge as never, workspaceStore);
+
+      // Registry remembers /tmp/repo; the prompt now names a worktree under it.
+      await service.queuePrompt({
+        boardId,
+        directory: "/tmp/repo",
+        text: "first",
+        reviewMode: "auto",
+      });
+
+      const worktree = "/tmp/repo/.chorus-worktrees/board-2";
+      const result = await service.queuePrompt({
+        boardId,
+        directory: worktree,
+        text: "second",
+        reviewMode: "auto",
+      });
+
+      expect(bridge.forkSession).toHaveBeenCalledWith({
+        directory: worktree,
+        sessionID: "sess-123",
+      });
+      expect(result.sessionId).toBe("sess-forked");
+      expect(result.createdSession).toBe(true);
+
+      await workspaceStore.close();
+      rmSync(dir, { force: true, recursive: true });
+    });
+
+    test("an unrelated directory forks", async () => {
+      const bridge = makeMockBridge();
+      const dir = mkdtempSync(join(tmpdir(), "chorus-reuse-other-"));
+      const workspaceStore = new WorkspaceStore(dir);
+      await workspaceStore.load();
+      const boardId = await seedBoard(workspaceStore, {
+        sessionId: "sess-123",
+        state: "active",
+      });
+      const service = new BoardTaskService(bridge as never, workspaceStore);
+
+      const result = await service.queuePrompt({
+        boardId,
+        directory: "/somewhere/else",
+        text: "unrelated",
+        reviewMode: "auto",
+      });
+
+      expect(bridge.forkSession).toHaveBeenCalledWith({
+        directory: "/somewhere/else",
+        sessionID: "sess-123",
+      });
+      expect(result.sessionId).toBe("sess-forked");
+
+      await workspaceStore.close();
+      rmSync(dir, { force: true, recursive: true });
+    });
+
+    test("a prefix sibling is a different directory, not a match", async () => {
+      const bridge = makeMockBridge();
+      const dir = mkdtempSync(join(tmpdir(), "chorus-reuse-sibling-"));
+      const workspaceStore = new WorkspaceStore(dir);
+      await workspaceStore.load();
+      const boardId = await seedBoard(workspaceStore, {
+        sessionId: "sess-123",
+        state: "active",
+      });
+      const service = new BoardTaskService(bridge as never, workspaceStore);
+
+      await service.queuePrompt({
+        boardId,
+        directory: "/tmp/repo",
+        text: "first",
+        reviewMode: "auto",
+      });
+      await service.queuePrompt({
+        boardId,
+        directory: "/tmp/repo-2",
+        text: "sibling",
+        reviewMode: "auto",
+      });
+
+      expect(bridge.forkSession).toHaveBeenCalledWith({
+        directory: "/tmp/repo-2",
+        sessionID: "sess-123",
+      });
+
+      await workspaceStore.close();
+      rmSync(dir, { force: true, recursive: true });
+    });
+
+    test("a trailing separator is not a different directory", async () => {
+      const bridge = makeMockBridge();
+      const dir = mkdtempSync(join(tmpdir(), "chorus-reuse-slash-"));
+      const workspaceStore = new WorkspaceStore(dir);
+      await workspaceStore.load();
+      const boardId = await seedBoard(workspaceStore, {
+        sessionId: "sess-123",
+        state: "active",
+      });
+      const service = new BoardTaskService(bridge as never, workspaceStore);
+
+      const result = await service.queuePrompt({
+        boardId,
+        directory: "/tmp/repo/",
+        text: "same tree, different spelling",
+        reviewMode: "auto",
+      });
+
+      expect(bridge.forkSession).not.toHaveBeenCalled();
+      expect(result.sessionId).toBe("sess-123");
+
+      await workspaceStore.close();
+      rmSync(dir, { force: true, recursive: true });
+    });
   });
 });
