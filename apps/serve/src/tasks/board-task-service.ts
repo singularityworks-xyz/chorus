@@ -13,6 +13,7 @@ import {
   type BoardSessionRecord,
   BoardSessionRegistry,
 } from "./board-session-registry";
+import { boardDirectory } from "./session-directory";
 import type { SessionWatchdog } from "./session-watchdog";
 
 const logger = createLogger(
@@ -115,6 +116,23 @@ function normalize(path: string): string {
   return resolve(path).replace(TRAILING_SEPARATOR, "");
 }
 
+/**
+ * Whether the board's current task is still somewhere it can receive activity.
+ *
+ * A card in `done` is finished, so it is not a reason to skip creating a card for
+ * new work.
+ */
+function hasLiveTask(board: WorkspaceBoard): boolean {
+  const currentTaskId = board.session.currentTaskId;
+  if (!currentTaskId) {
+    return false;
+  }
+
+  return Object.entries(board.columns).some(([column, cards]) =>
+    column === "done" ? false : cards.some((card) => card.id === currentTaskId)
+  );
+}
+
 export class BoardTaskService {
   readonly #bridge: OpenCodeBridge;
   readonly #registry: BoardSessionRegistry;
@@ -185,7 +203,7 @@ export class BoardTaskService {
           type: "card.created",
         },
       ],
-      (board) => !board.session.currentTaskId
+      (board) => !hasLiveTask(board)
     );
 
     logger.info("queue-prompt:card-created", {
@@ -209,17 +227,6 @@ export class BoardTaskService {
    * On a mismatch the session is forked rather than discarded, so the transcript
    * so far survives: a hard redirect is a continuation, not a restart.
    */
-  /**
-   * The directory a board's agent runs in.
-   *
-   * Prefers the board's own worktree, falling back to the repo's primary
-   * checkout for a board that has one, and finally to the requested path when the
-   * board is unknown to the store.
-   */
-  #workingDirectoryFor(board: WorkspaceBoard): string {
-    return board.repo.worktree ?? board.repo.directory;
-  }
-
   /**
    * The directory a candidate session was opened in, or null when unknown.
    *
@@ -246,7 +253,13 @@ export class BoardTaskService {
       return null;
     }
 
-    if (existing?.directory) {
+    // Only when the candidate *is* the registry's session.
+    //
+    // The registry records where this board's own session was opened, which says
+    // nothing about a session id the client supplied. Taking the shortcut for a
+    // client-supplied id would validate the board's directory instead of the
+    // candidate's, and then reuse and persist someone else's session.
+    if (existing?.directory && candidate === existing.sessionId) {
       return existing.directory;
     }
 
@@ -376,7 +389,9 @@ export class BoardTaskService {
     // own. Resolving it here rather than trusting `input.directory` means the
     // agent actually runs in its own worktree, and a client cannot aim a prompt
     // at an arbitrary path on the host.
-    const directory = this.#workingDirectoryFor(persistedBoard);
+    // One resolver with the follow-up command paths, so a board's checkout is
+    // computed the same way everywhere (session-directory.ts).
+    const directory = boardDirectory(persistedBoard);
 
     const input: QueueBoardPromptInput = { ...parsed, directory };
 

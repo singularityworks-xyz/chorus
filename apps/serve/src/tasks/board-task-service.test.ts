@@ -568,4 +568,52 @@ describe("BoardTaskService", () => {
     await workspaceStore.close();
     rmSync(dir, { force: true, recursive: true });
   });
+  test("a prompt after a timed-out card creates a new one", async () => {
+    // The failure this guards: `session.timeout` moves the card to `done` but used
+    // to leave `currentTaskId` pointing at it, so the next prompt skipped card
+    // creation and every new agent event attached to a finished card. A timeout is
+    // the common way in, because no later `session.idle` arrives to release it.
+    const bridge = makeMockBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-after-timeout-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      sessionId: "sess-1",
+      state: "active",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    await service.queuePrompt({
+      boardId,
+      directory: "/tmp/repo",
+      text: "first run",
+      reviewMode: "auto",
+    });
+    const firstTaskId = workspaceStore.getBoard(boardId)?.session.currentTaskId;
+
+    // The run dies without an idle.
+    await workspaceStore.applyAgentEvent({
+      activity: "error",
+      error: "session timed out",
+      sessionID: "sess-1",
+      timestamp: Date.now(),
+      type: "session.timeout",
+    });
+
+    await service.queuePrompt({
+      boardId,
+      directory: "/tmp/repo",
+      text: "second run",
+      reviewMode: "auto",
+    });
+
+    const board = workspaceStore.getBoard(boardId);
+    const queued = board?.columns.queue?.[0];
+    expect(queued).toBeDefined();
+    expect(queued?.id).not.toBe(firstTaskId);
+    expect(board?.session.currentTaskId).toBe(queued?.id);
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
 });

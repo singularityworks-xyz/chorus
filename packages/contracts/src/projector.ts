@@ -622,7 +622,20 @@ function applySessionEvent(
         columns: taskId
           ? moveCard(board.columns, taskId, "done")
           : board.columns,
-        session: { ...board.session, errorMessage: event.error },
+        // `currentTaskId` is released here exactly as `session.error` releases it.
+        // Leaving it set made the next prompt on this board attach its agent events
+        // to a card already sitting in `done`, so the new work never appeared — and a
+        // timeout is the common way in, since no later `session.idle` arrives to
+        // release it.
+        //
+        // `state` deliberately stays as it was: a timeout ends the *card*, not the
+        // session, so the session can still be reused. Only the card pointer is
+        // released.
+        session: {
+          ...board.session,
+          currentTaskId: undefined,
+          errorMessage: event.error,
+        },
       };
     }
 
