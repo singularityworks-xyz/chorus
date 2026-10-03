@@ -298,9 +298,20 @@ export class OpenCodeProcessManager {
           error instanceof Error ? error : undefined,
           { reason }
         );
-        // Retry through the backoff. Without this a process that starts but never
-        // answers health leaves the engine with no restart and no liveness timer
-        // for the rest of the run.
+
+        // Only when the child is still alive but never became healthy.
+        //
+        // A child that exited during startup already reached `onExit`, which
+        // schedules its own restart. Retrying here as well cleared that timer and
+        // incremented the attempt counter a second time, so one crash cost two
+        // attempts and the budget of five bought only two or three real restarts.
+        if (this.#proc === null) {
+          return;
+        }
+
+        // A process that is up but never answers health leaves the engine with no
+        // restart and no liveness timer for the rest of the run, so this path has
+        // to re-arm.
         this.#scheduleRestart(reason);
       });
   }

@@ -29,13 +29,13 @@ export class EventStream {
 
     const key = options?.directory ?? "__default__";
 
-    const existing = this.#dirSubscriptions.get(key);
-    if (existing) {
-      return {
-        stop: () => {
-          this.#release(key, existing);
-        },
-      };
+    if (this.#dirSubscriptions.has(key)) {
+      // A duplicate handle shares the owner's pump. Stopping it must not release
+      // the slot, which would orphan that pump: the next subscriber would open a
+      // second stream for the same key and both would deliver every event, and
+      // the store does not deduplicate agent events. The owner's handle is the
+      // one that stops the stream.
+      return { stop: () => undefined };
     }
 
     const abort = new AbortController();

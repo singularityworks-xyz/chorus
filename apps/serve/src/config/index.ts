@@ -36,6 +36,40 @@ export function loadConfig(): ServerConfig {
     );
   }
 
+  /**
+   * A TCP port, or the fallback.
+   *
+   * Range-checked, not merely positive: `OPENCODE_PORT=70000` passed as a
+   * positive integer and then failed at spawn time, which reports as a crashed
+   * engine rather than a bad setting.
+   */
+  const tcpPort = (
+    raw: string | undefined,
+    fallback: number,
+    name: string
+  ): number => {
+    if (raw === undefined || raw === "") {
+      return fallback;
+    }
+
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0 || parsed >= 65_536) {
+      throw new Error(
+        `Invalid ${name} "${raw}": must be a number between 1 and 65535`
+      );
+    }
+
+    return parsed;
+  };
+
+  // Parsed once. Reading it twice risked the two sites drifting apart, which is
+  // the exact failure this change exists to prevent.
+  const opencodePort = tcpPort(
+    process.env.OPENCODE_PORT,
+    4096,
+    "OPENCODE_PORT"
+  );
+
   const positive = (
     raw: string | undefined,
     fallback: number,
@@ -58,10 +92,10 @@ export function loadConfig(): ServerConfig {
     // hardcoded 4096 and this defaulted to `http://localhost:4096`
     // independently, so overriding one silently desynchronised the port we spawn
     // on from the URL every client request went to.
-    opencodePort: positive(process.env.OPENCODE_PORT, 4096, "OPENCODE_PORT"),
+    opencodePort,
     opencodeBaseUrl:
       process.env.OPENCODE_BASE_URL ??
-      `http://localhost:${String(positive(process.env.OPENCODE_PORT, 4096, "OPENCODE_PORT"))}`,
+      `http://localhost:${String(opencodePort)}`,
     opencodeDirectory: process.env.OPENCODE_DIRECTORY ?? process.cwd(),
     autoStartOpencode: process.env.OPENCODE_AUTO_START !== "false",
     // ~/.chorus keeps parity with where the pre-Phase-2 store wrote, so an

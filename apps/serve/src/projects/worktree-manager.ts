@@ -73,8 +73,14 @@ export class WorktreeManager {
     boardId: string,
     branch?: string
   ): Promise<string> {
-    const path = this.worktreePath(repoDirectory, boardId);
-    const repoRoot = resolve(repoDirectory);
+    // Canonical root, so paths we build line up with the ones git reports.
+    //
+    // `git worktree list --porcelain` returns realpaths, while `resolve` is
+    // lexical. On a symlinked root — macOS `/var` → `/private/var`, or a
+    // symlinked projects folder — the two disagree, so the registered check
+    // misses a worktree that exists and `add` then fails on a path already in use.
+    const repoRoot = await canonical(repoDirectory);
+    const path = this.worktreePath(repoRoot, boardId);
 
     assertRealRepo(repoRoot);
 
@@ -107,7 +113,7 @@ export class WorktreeManager {
   }
 
   async removeWorktree(repoDirectory: string, boardId: string): Promise<void> {
-    const repoRoot = resolve(repoDirectory);
+    const repoRoot = await canonical(repoDirectory);
     const path = this.worktreePath(repoRoot, boardId);
 
     await assertContained(repoRoot, path);
@@ -128,7 +134,10 @@ export class WorktreeManager {
     repoDirectory: string,
     liveBoardIds: ReadonlySet<string>
   ): Promise<string[]> {
-    const repoRoot = resolve(repoDirectory);
+    // Canonical for the same reason as `ensureWorktree`: the entries come from
+    // git as realpaths, so a lexical container never matches and no orphan is
+    // ever pruned on a symlinked root.
+    const repoRoot = await canonical(repoDirectory);
     const container = resolveInside(repoRoot, WORKTREE_CONTAINER);
 
     if (!existsSync(container)) {
@@ -214,6 +223,16 @@ export class WorktreeManager {
  * container could otherwise point a worktree at `/etc`. The worktree may not
  * exist yet when this runs for a freshly added one, hence the resolve fallback.
  */
+/**
+ * A path with symlinks resolved, falling back to the lexical form.
+ *
+ * The fallback covers a path that does not exist yet, which is the normal case for
+ * a worktree about to be created.
+ */
+async function canonical(path: string): Promise<string> {
+  return await realpath(path).catch(() => resolve(path));
+}
+
 async function assertContained(root: string, candidate: string): Promise<void> {
   const realRoot = await realpath(root).catch(() => resolve(root));
   const realCandidate = await realpath(candidate).catch(() =>
