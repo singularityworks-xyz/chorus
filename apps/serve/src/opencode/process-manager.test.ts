@@ -71,11 +71,13 @@ describe("opencode engine address", () => {
      * nothing in any log.
      */
     test("an adopted engine is never probed into a restart", async () => {
-      const port = 45_997;
+      // Port 0 lets the OS assign one. A fixed port collides when bun runs test
+      // files in parallel, which shows up as an unrelated EADDRINUSE.
       const server = Bun.serve({
         fetch: () => Response.json({ healthy: true, version: "1.18.29" }),
-        port,
+        port: 0,
       });
+      const port = server.port;
 
       try {
         const manager = new OpenCodeProcessManager({
@@ -93,13 +95,13 @@ describe("opencode engine address", () => {
     });
 
     test("an unresponsive engine is reported rather than assumed healthy", async () => {
-      const port = 45_998;
       // A responder that is up but reports itself unhealthy — the shape of a
       // wedged engine, as distinct from nothing listening.
       const server = Bun.serve({
         fetch: () => Response.json({ healthy: false }),
-        port,
+        port: 0,
       });
+      const port = server.port;
 
       try {
         const manager = new OpenCodeProcessManager({

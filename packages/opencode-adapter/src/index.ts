@@ -36,6 +36,17 @@ export type {
   NormalizedActivity,
   NormalizedAgentEvent,
 } from "./features/events/event-stream";
+/**
+ * The normalizer and its reset, exported so a server-side replay test can drive
+ * the boundary without standing up an engine. Reaching into the package's
+ * internals from another app would break the boundary this module exists to
+ * hold.
+ */
+// biome-ignore lint/performance/noBarrelFile: package entry point from package.json `exports` — serve imports `@chorus/oc-adapter` as one specifier by design.
+export {
+  normalizeEvent,
+  resetMessageTracking,
+} from "./features/events/event-stream";
 export type {
   PermissionHandlerInput,
   PermissionReply,
