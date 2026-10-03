@@ -79,6 +79,7 @@ const corsOptions = corsOptionsFor(corsPolicy);
 
 const processManager = new OpenCodeProcessManager({
   directory: config.opencodeDirectory,
+  port: config.opencodePort,
 });
 
 if (config.autoStartOpencode) {
@@ -454,7 +455,9 @@ async function gracefulShutdown(signal: string): Promise<void> {
 }
 
 function forceKillOpencode(): void {
-  processManager.forceKill();
+  // Deliberately not awaited: this is the last-resort path the shutdown timeout
+  // timer calls, and the process is about to exit regardless.
+  processManager.forceKill().catch(() => undefined);
 }
 
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));

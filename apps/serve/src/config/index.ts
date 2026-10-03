@@ -18,6 +18,7 @@ export interface ServerConfig {
   hostname: string;
   opencodeBaseUrl: string;
   opencodeDirectory: string;
+  opencodePort: number;
   port: number;
   /** Terminal-run step detail older than this is compacted (spec §5). */
   retentionDays: number;
@@ -53,7 +54,14 @@ export function loadConfig(): ServerConfig {
   return {
     port,
     hostname: process.env.HOSTNAME ?? "localhost",
-    opencodeBaseUrl: process.env.OPENCODE_BASE_URL ?? "http://localhost:4096",
+    // One source of truth for the engine address. Previously the process manager
+    // hardcoded 4096 and this defaulted to `http://localhost:4096`
+    // independently, so overriding one silently desynchronised the port we spawn
+    // on from the URL every client request went to.
+    opencodePort: positive(process.env.OPENCODE_PORT, 4096, "OPENCODE_PORT"),
+    opencodeBaseUrl:
+      process.env.OPENCODE_BASE_URL ??
+      `http://localhost:${String(positive(process.env.OPENCODE_PORT, 4096, "OPENCODE_PORT"))}`,
     opencodeDirectory: process.env.OPENCODE_DIRECTORY ?? process.cwd(),
     autoStartOpencode: process.env.OPENCODE_AUTO_START !== "false",
     // ~/.chorus keeps parity with where the pre-Phase-2 store wrote, so an
