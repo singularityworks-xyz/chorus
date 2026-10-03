@@ -142,10 +142,44 @@ interface PersistedBlob {
  *    `#project`, so a state reconstructed from the log is identical to one built
  *    live — which is only true because the shared projector is pure.
  */
+/**
+ * What the store needs from worktree provisioning (plan P6 task 2).
+ *
+ * Declared structurally rather than imported from `projects/worktree-manager` so
+ * the store keeps no git dependency and no coupling to the module that happens to
+ * implement it. `WorktreeManager` satisfies it as-is.
+ */
+export interface WorktreeProvisioner {
+  /** Creates (or adopts) the worktree for `boardId` and resolves to its path. */
+  ensureWorktree(
+    repoDirectory: string,
+    boardId: string,
+    branch?: string
+  ): Promise<string>;
+  /**
+   * Whether a *new* board for this repo needs its own checkout.
+   *
+   * Called with the boards that already exist, so the first board for a repo is
+   * never given a worktree.
+   */
+  needsWorktree(
+    boards: ReadonlyArray<{ repo: { directory: string } }>,
+    repoDirectory: string
+  ): boolean;
+}
+
 export class WorkspaceStore {
   readonly #db: ChorusDatabase;
   readonly #options: Required<RetentionOptions>;
   readonly #queue: { promise: Promise<void> } = { promise: Promise.resolve() };
+  /**
+   * Optional worktree provisioning for `board.create` (plan P6 task 2).
+   *
+   * Injected rather than constructed here so the store keeps no git dependency,
+   * and so tests can supply a stub. When absent, board creation behaves exactly
+   * as before: no worktree, and every board shares the repo's primary checkout.
+   */
+  readonly #worktreeProvisioner: WorktreeProvisioner | undefined;
 
   /** Subscribers notified once per commit, after memory is swapped. */
   readonly #commitListeners = new Set<(commit: StoreCommit) => void>();
@@ -161,7 +195,13 @@ export class WorkspaceStore {
   /** Events appended since the last snapshot, for the N-event snapshot trigger. */
   #eventsSinceSnapshot = 0;
 
-  constructor(dataDir: string, options: RetentionOptions = {}) {
+  constructor(
+    dataDir: string,
+    options: RetentionOptions & {
+      worktreeProvisioner?: WorktreeProvisioner;
+    } = {}
+  ) {
+    this.#worktreeProvisioner = options.worktreeProvisioner;
     this.#db = new ChorusDatabase(dataDir);
     this.#options = {
       dbSizeCapMb: options.dbSizeCapMb ?? 512,
@@ -326,7 +366,11 @@ export class WorkspaceStore {
       }
 
       const now = Date.now();
-      const produced = this.#mutationToEvents(mutation, now);
+
+      // `#mutationToEvents` is awaited so `board.create` can provision a worktree
+      // here, inside the serial queue, rather than as a side effect after the
+      // mutation returns (plan risk #6).
+      const produced = await this.#mutationToEvents(mutation, now);
 
       if (!produced) {
         return null;
@@ -573,20 +617,59 @@ export class WorkspaceStore {
    * id and layout position — so the event carries the whole constructed board
    * and replay stays a pure projection rather than re-running a generator.
    */
-  #mutationToEvents(
+  /**
+   * Gives a new board its own worktree when the repo is already spoken for.
+   *
+   * Runs inside the serial queue so the create is serialized against every other
+   * mutation, and inside the board-create path so a failure aborts the whole
+   * mutation rather than producing a second event and tripping the
+   * 1-mutation-to-1-event assertion in `applyMutation`.
+   */
+  async #provisionWorktree(board: WorkspaceBoard): Promise<string | null> {
+    const provisioner = this.#worktreeProvisioner;
+    if (!provisioner) {
+      return null;
+    }
+
+    if (
+      !provisioner.needsWorktree(this.#snapshot.boards, board.repo.directory)
+    ) {
+      // First board for this repo: spec §2 rule 1 says it uses the primary
+      // checkout, so there is nothing to provision.
+      return null;
+    }
+
+    return await provisioner.ensureWorktree(
+      board.repo.directory,
+      board.boardId
+    );
+  }
+
+  async #mutationToEvents(
     mutation: WorkspaceMutation,
     now: number
-  ): { boardId: string | null; events: WorkspaceEvent[] } | null {
+  ): Promise<{ boardId: string | null; events: WorkspaceEvent[] } | null> {
     switch (mutation.type) {
       case "board.create": {
         const board = createBoardFromSeed(
           mutation.payload.seed,
           this.#snapshot.boards.length
         );
+
+        const worktree = await this.#provisionWorktree(board);
+        const created: WorkspaceBoard = worktree
+          ? { ...board, repo: { ...board.repo, worktree } }
+          : board;
+
         return {
-          boardId: board.boardId,
+          boardId: created.boardId,
           events: [
-            { type: "board.created", boardId: board.boardId, board, ts: now },
+            {
+              type: "board.created",
+              boardId: created.boardId,
+              board: created,
+              ts: now,
+            },
           ],
         };
       }

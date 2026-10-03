@@ -16,6 +16,7 @@ import { loadConfig } from "./config";
 import { OpenCodeProcessManager } from "./opencode/process-manager";
 import { NativeFolderPicker } from "./projects/folder-picker";
 import { ProjectService } from "./projects/service";
+import { WorktreeManager } from "./projects/worktree-manager";
 import { createHttpRoutes } from "./routes";
 import { createProjectRoutes } from "./routes/projects";
 import { voiceRoutes } from "./routes/voice";
@@ -138,6 +139,41 @@ logger.info("workspace-ready", {
   database: workspaceStore.databasePath,
   headSeq: workspaceStore.headSeq(),
 });
+
+/**
+ * Drops worktrees no live board claims (plan P6 task 1).
+ *
+ * Runs after the store has loaded and before anything accepts a connection, so a
+ * crashed serve does not leave its checkouts registered in the repo: `git
+ * worktree list` would grow without bound across restarts, and a new board could
+ * collide with a stale directory. Only entries under `.chorus-worktrees` whose
+ * name is not a live board id are removed.
+ */
+if (config.autoStartOpencode) {
+  const worktrees = new WorktreeManager();
+  const boards = workspaceStore.getSnapshot().boards;
+  const liveBoardIds = new Set(boards.map((board) => board.boardId));
+  const repositories = new Set(boards.map((board) => board.repo.directory));
+
+  for (const directory of repositories) {
+    try {
+      const removed = await worktrees.pruneOrphans(directory, liveBoardIds);
+      if (removed.length > 0) {
+        logger.info("worktree-orphans-pruned", {
+          count: removed.length,
+          repository: directory,
+        });
+      }
+    } catch (error) {
+      // A repository that cannot be inspected (moved, deleted, not a git repo)
+      // must not stop serve from booting.
+      logger.warn("worktree-prune-failed", {
+        error: error instanceof Error ? error.message : String(error),
+        repository: directory,
+      });
+    }
+  }
+}
 
 /**
  * The one downstream emit path (spec §3).
