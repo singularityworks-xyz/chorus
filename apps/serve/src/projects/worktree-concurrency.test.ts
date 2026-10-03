@@ -135,37 +135,51 @@ describe("parallel worktree writes", () => {
     rmSync(repo, { force: true, recursive: true });
   });
 
-  test("worktrees across three repositories stay independent", async () => {
-    // §8 budgets are stated against several repos; the isolation guarantee has to
-    // hold there too, not just within one.
+  test("eight concurrent boards across three repositories stay isolated", async () => {
+    // The phase's done-when: "8 simulated concurrent runs across ≥3 repos". Only
+    // the provisioning and isolation half is simulated here — real model inference
+    // needs a configured provider and is not something the unit suite may assume.
+    // What *is* real is git: eight boards racing through the serial queue, each
+    // getting its own checkout, with no index lock.
     const repos = [
-      makeRepo("chorus-multi-a-"),
-      makeRepo("chorus-multi-b-"),
-      makeRepo("chorus-multi-c-"),
+      makeRepo("chorus-eight-a-"),
+      makeRepo("chorus-eight-b-"),
+      makeRepo("chorus-eight-c-"),
     ];
     const store = new WorkspaceStore(
-      mkdtempSync(join(tmpdir(), "chorus-multi-db-")),
+      mkdtempSync(join(tmpdir(), "chorus-eight-db-")),
       { worktreeProvisioner: new WorktreeManager() }
     );
     await store.load();
 
+    // 3 + 3 + 2 = 8, spread across three repositories.
+    const layout = [3, 3, 2];
+
     try {
       const boardIds = await Promise.all(
-        repos.flatMap((repo, i) => [
-          createBoard(store, repo, `${i}-primary`),
-          createBoard(store, repo, `${i}-secondary`),
-        ])
+        repos.flatMap((repo, repoIndex) =>
+          Array.from({ length: layout[repoIndex] ?? 0 }, (_, boardIndex) =>
+            createBoard(store, repo, `repo-${repoIndex}-board-${boardIndex}`)
+          )
+        )
       );
 
       const boards = boardIds.map((id) => store.getBoard(id) as WorkspaceBoard);
+      expect(boards).toHaveLength(8);
 
-      // Each repository got one primary and one worktree, six paths in total.
-      expect(new Set(boards.map((b) => b.repo.worktree)).size).toBe(6);
-      for (const repo of repos) {
-        expect(worktreeList(repo)).toHaveLength(2);
+      // Eight distinct working directories: each repo's primary checkout plus its
+      // extra boards' worktrees.
+      const paths = boards.map((board) => board.repo.worktree);
+      expect(new Set(paths).size).toBe(8);
+
+      for (const [index, repo] of repos.entries()) {
+        const expected = layout[index] ?? 0;
+        // One primary plus one worktree per additional board.
+        expect(worktreeList(repo)).toHaveLength(expected);
         expect(
-          worktreeList(repo).some((path) => path.includes(WORKTREE_CONTAINER))
-        ).toBe(true);
+          worktreeList(repo).filter((path) => path.includes(WORKTREE_CONTAINER))
+        ).toHaveLength(expected - 1);
+        expect(existsSync(join(repo, ".git", "index.lock"))).toBe(false);
       }
 
       await store.close();
