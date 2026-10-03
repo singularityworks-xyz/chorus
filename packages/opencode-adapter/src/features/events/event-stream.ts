@@ -42,6 +42,9 @@ export class EventStream {
 
     const abort = new AbortController();
     const sub: DirSubscription = { abort };
+
+    // Claim the slot before awaiting, so two concurrent subscribers cannot both
+    // open a stream for the same directory.
     this.#dirSubscriptions.set(key, sub);
 
     // A fresh subscription must not be judged against remembered roles from a
@@ -50,17 +53,28 @@ export class EventStream {
     // that from silently dropping content.
     resetMessageTracking();
 
-    const events = await this.client.event.subscribe({
-      directory: options?.directory,
-    });
+    let initial: Awaited<ReturnType<OpencodeClient["event"]["subscribe"]>>;
+    try {
+      initial = await this.client.event.subscribe({
+        directory: options?.directory,
+      });
+    } catch (error) {
+      // Release the claim. Leaving it behind meant every later attempt took the
+      // "already subscribed" branch and returned a handle wired to nothing — a
+      // dead subscription that looked perfectly healthy to its caller.
+      this.#dirSubscriptions.delete(key);
+      throw error;
+    }
 
-    this.#consume(
-      events.stream as AsyncIterable<OCEvent>,
+    // Reconnection runs detached so `subscribe` still resolves once the stream
+    // is attached; awaiting the loop here would hang the caller forever.
+    this.#pump(
+      key,
+      initial.stream as AsyncIterable<OCEvent>,
       onEvent,
-      abort
-    ).catch(() => {
-      // stream errors are handled internally by the subscription
-    });
+      abort,
+      options?.directory
+    );
 
     return {
       stop: () => {
@@ -71,6 +85,123 @@ export class EventStream {
         }
       },
     };
+  }
+
+  /**
+   * Keeps an event stream open for as long as the subscription is wanted.
+   *
+   * The engine's event stream is the only way agent activity reaches us, and it
+   * ends for reasons unrelated to any run: a proxy timeout, an engine restart, a
+   * dropped socket. `#consume` used to log that and give up, after which the
+   * board silently stopped updating while the agent kept working. Retried with
+   * capped, jittered backoff until stopped or aborted.
+   */
+  async #pump(
+    key: string,
+    firstStream: AsyncIterable<OCEvent>,
+    onEvent: EventCallback,
+    abort: AbortController,
+    directory: string | undefined
+  ): Promise<void> {
+    let stream: AsyncIterable<OCEvent> | null = firstStream;
+    let failures = 0;
+
+    for (;;) {
+      if (!this.#running || abort.signal.aborted || stream === null) {
+        return;
+      }
+
+      failures = await this.#pumpOnce({
+        abort,
+        failures,
+        onEvent,
+        stream,
+      });
+
+      if (!this.#running || abort.signal.aborted || stream === null) {
+        return;
+      }
+
+      // A stream that ended without throwing is still a disconnect, so a clean
+      // end advances the attempt counter just as a failure does.
+      const attempt = failures + 1;
+      if (attempt > MAX_STREAM_RECONNECTS) {
+        console.error(
+          "[oc-adapter] abandoning the event stream after repeated failures:",
+          key
+        );
+        this.#dirSubscriptions.delete(key);
+        return;
+      }
+
+      await this.#backoff(attempt, abort);
+      stream = await this.#reopen(directory, abort);
+    }
+  }
+
+  /** Drains one stream. Returns the updated failure count. */
+  async #pumpOnce({
+    abort,
+    failures,
+    onEvent,
+    stream,
+  }: {
+    abort: AbortController;
+    failures: number;
+    onEvent: EventCallback;
+    stream: AsyncIterable<OCEvent>;
+  }): Promise<number> {
+    try {
+      await this.#consume(stream, onEvent, abort);
+      return 0;
+    } catch (error) {
+      if (!this.#running || abort.signal.aborted) {
+        return failures;
+      }
+      console.error("[oc-adapter] event stream error:", error);
+      return failures + 1;
+    }
+  }
+
+  /** Reopens the stream, or returns null when the subscription should end. */
+  async #reopen(
+    directory: string | undefined,
+    abort: AbortController
+  ): Promise<AsyncIterable<OCEvent> | null> {
+    try {
+      const reopened = await this.client.event.subscribe({ directory });
+      return reopened.stream as AsyncIterable<OCEvent>;
+    } catch (error) {
+      if (!this.#running || abort.signal.aborted) {
+        return null;
+      }
+      console.error("[oc-adapter] event resubscribe failed:", error);
+      // `null` ends the loop rather than spinning on a server that refuses.
+      return null;
+    }
+  }
+
+  /** Sleeps, resolving early if the subscription is stopped while waiting. */
+  async #backoff(attempt: number, abort: AbortController): Promise<void> {
+    const ceiling = Math.min(
+      STREAM_RECONNECT_BASE_MS * 2 ** (attempt - 1),
+      STREAM_RECONNECT_MAX_MS
+    );
+    const delayMs = Math.round(ceiling * Math.random());
+
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, delayMs);
+      // Not unref'd deliberately: a pending reconnect is real work. `stop()`
+      // aborts, which clears it.
+      abort.signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true }
+      );
+    });
   }
 
   async #consume(
@@ -100,6 +231,13 @@ export class EventStream {
     this.#dirSubscriptions.clear();
   }
 }
+
+/** Backoff bounds for re-opening a dropped event stream. */
+const STREAM_RECONNECT_BASE_MS = 250;
+const STREAM_RECONNECT_MAX_MS = 10_000;
+
+/** Consecutive failed reopens before a stream is abandoned. */
+const MAX_STREAM_RECONNECTS = 10;
 
 export type NormalizedActivity =
   | "writing"
