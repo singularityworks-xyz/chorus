@@ -70,13 +70,14 @@ export class OpenCodeProcessManager {
   /** Consecutive failed health probes before the engine is treated as gone. */
   #missedProbes = 0;
   /**
-   * Pids we have deliberately replaced.
+   * Incremented on every spawn, so an exit handler can tell whether it is still
+   * the current child.
    *
-   * Their exit handlers would otherwise act on current state: clearing the live
-   * child's handle and scheduling a restart of a process that is already the
-   * replacement.
+   * A pid set needed cleaning up and leaked if a kill ever failed silently; a
+   * counter cannot. A superseded child's exit is ignored: it must not clear the
+   * live child's handle or schedule a restart of its own.
    */
-  readonly #superseded = new Set<number | undefined>();
+  #generation = 0;
 
   constructor(options: {
     port?: number;
@@ -245,17 +246,37 @@ export class OpenCodeProcessManager {
    * handler cannot each start a process.
    */
   #recycle(reason: string): void {
-    this.#stopLivenessChecks();
+    this.#restart(reason);
+  }
 
+  /**
+   * Kills and forgets the current child.
+   *
+   * Necessary when a process is alive but wedged; harmless when it has already
+   * exited. Bumping the generation first is what makes the killed child's own
+   * exit handler a no-op.
+   */
+  #supersedeCurrent(): void {
     const previous = this.#proc;
+    this.#generation += 1;
     this.#proc = null;
 
     if (previous) {
-      // Necessary when the process is alive but wedged; harmless when it already
-      // exited.
       previous.kill("SIGKILL");
-      this.#superseded.add(previous.pid);
     }
+  }
+
+  /**
+   * Starts a replacement and supervises it.
+   *
+   * The single path that spawns a restart, so the exit handler, the liveness probe
+   * and a failed readiness check cannot each start one. It always supersedes the
+   * current child first, or a replacement spawned without killing the old one
+   * leaves the old process holding the port while the new one fails to bind.
+   */
+  #restart(reason: string): void {
+    this.#stopLivenessChecks();
+    this.#supersedeCurrent();
 
     if (this.#stopping || !this.#owned) {
       return;
@@ -265,17 +286,21 @@ export class OpenCodeProcessManager {
     this.#awaitReady()
       .then(() => {
         if (!this.#stopping) {
+          // A restart that came up healthy earns back the budget, so a long
+          // session with occasional crashes is not capped for its whole life.
+          this.#restartAttempts = 0;
           this.#startLivenessChecks();
         }
       })
       .catch((error: unknown) => {
         logger.error(
-          "opencode-recycle-failed",
+          "opencode-restart-not-ready",
           error instanceof Error ? error : undefined,
           { reason }
         );
-        // Re-arm so a failed restart is retried rather than leaving the engine
-        // unmonitored for the rest of the process's life.
+        // Retry through the backoff. Without this a process that starts but never
+        // answers health leaves the engine with no restart and no liveness timer
+        // for the rest of the run.
         this.#scheduleRestart(reason);
       });
   }
@@ -299,6 +324,7 @@ export class OpenCodeProcessManager {
     );
 
     this.#proc = proc;
+    this.#generation += 1;
 
     this.#consumeStream(
       proc.stdout as ReadableStream<Uint8Array>,
@@ -309,11 +335,11 @@ export class OpenCodeProcessManager {
       "opencode-stderr"
     );
 
-    const pid = proc.pid;
+    const generation = this.#generation;
 
     const onExit = (detail: string, error?: unknown): void => {
-      if (this.#superseded.delete(pid)) {
-        // A process we already replaced. Its exit must not clear the live child's
+      if (generation !== this.#generation) {
+        // A child we already replaced. Its exit must not clear the live child's
         // handle or schedule a restart of its own.
         return;
       }
@@ -355,6 +381,14 @@ export class OpenCodeProcessManager {
       return;
     }
 
+    // One pending restart at a time. An exit handler and a failed recycle can
+    // both reach here, and a second timer would orphan the first while both
+    // spawned a process.
+    if (this.#restartTimer) {
+      clearTimeout(this.#restartTimer);
+      this.#restartTimer = null;
+    }
+
     if (this.#restartAttempts >= MAX_RESTARTS) {
       logger.error("opencode-restart-exhausted", {
         attempts: this.#restartAttempts,
@@ -373,25 +407,7 @@ export class OpenCodeProcessManager {
 
     this.#restartTimer = setTimeout(() => {
       this.#restartTimer = null;
-      if (this.#stopping) {
-        return;
-      }
-      this.#spawn();
-      this.#awaitReady()
-        .then(() => {
-          if (!this.#stopping) {
-            // A restart that came up healthy earns back the budget, so a long
-            // session with occasional crashes is not capped at five for its life.
-            this.#restartAttempts = 0;
-            this.#startLivenessChecks();
-          }
-        })
-        .catch((error: unknown) => {
-          logger.error(
-            "opencode-restart-not-ready",
-            error instanceof Error ? error : undefined
-          );
-        });
+      this.#restart(reason);
     }, delayMs);
 
     // Never hold the process open purely to restart a child.

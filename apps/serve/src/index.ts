@@ -185,8 +185,12 @@ logger.info("workspace-ready", {
  * worktree list` would grow without bound across restarts, and a new board could
  * collide with a stale directory. Only entries under `.chorus-worktrees` whose
  * name is not a live board id are removed.
+ *
+ * Not conditional on spawning an engine. Pruning is local git state, and gating it
+ * on auto-start meant a serve pointed at a remote engine never cleaned up, so
+ * stale worktrees accumulated and a new board could collide with one.
  */
-if (config.autoStartOpencode) {
+{
   const boards = workspaceStore.getSnapshot().boards;
   const liveBoardIds = new Set(boards.map((board) => board.boardId));
   const repositories = new Set(boards.map((board) => board.repo.directory));
