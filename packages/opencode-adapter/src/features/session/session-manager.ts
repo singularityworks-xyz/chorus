@@ -191,7 +191,7 @@ export class SessionManager {
 
   async promptAsync(input: SessionPromptAsyncInput) {
     const parts = input.parts ?? [{ type: "text" as const, text: input.text }];
-    await this.client.session.promptAsync({
+    const result = await this.client.session.promptAsync({
       sessionID: input.sessionID,
       directory: input.directory,
       workspace: input.workspace,
@@ -201,6 +201,15 @@ export class SessionManager {
       system: input.system,
       variant: input.variant,
     });
+
+    // The generated client resolves `{ error }` rather than throwing, so ignoring
+    // the result means a prompt that never reached the engine still reports
+    // `accepted: true` back through the queue response.
+    if (result.error !== undefined) {
+      throw new Error(
+        `OpenCode session.promptAsync failed: ${describeError(result.error)}`
+      );
+    }
   }
 
   async command(input: SessionCommandInput) {

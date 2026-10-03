@@ -69,6 +69,14 @@ export class OpenCodeProcessManager {
   #livenessTimer: ReturnType<typeof setInterval> | null = null;
   /** Consecutive failed health probes before the engine is treated as gone. */
   #missedProbes = 0;
+  /**
+   * Pids we have deliberately replaced.
+   *
+   * Their exit handlers would otherwise act on current state: clearing the live
+   * child's handle and scheduling a restart of a process that is already the
+   * replacement.
+   */
+  readonly #superseded = new Set<number | undefined>();
 
   constructor(options: {
     port?: number;
@@ -162,21 +170,10 @@ export class OpenCodeProcessManager {
         });
         this.#missedProbes = 0;
 
-        // Detach first so the exit we are about to cause does not also schedule a
-        // second restart.
-        this.#stopLivenessChecks();
-        this.#proc = null;
-        this.#spawn();
-        this.#awaitReady()
-          .then(() => {
-            this.#startLivenessChecks();
-          })
-          .catch((error: unknown) => {
-            logger.error(
-              "opencode-liveness-restart-failed",
-              error instanceof Error ? error : undefined
-            );
-          });
+        // Kill it first. The wedged process still holds the port, so spawning a
+        // replacement without stopping it does not restart anything — the new
+        // child fails to bind and exits, leaving one orphan and one corpse.
+        this.#recycle("unresponsive");
       });
     }, LIVENESS_INTERVAL_MS);
 
@@ -227,6 +224,49 @@ export class OpenCodeProcessManager {
     );
   }
 
+  /**
+   * Replaces a running engine: kill, wait, respawn, re-arm.
+   *
+   * The only path that restarts a process we own, whether it exited on its own or
+   * stopped answering. Keeping it single means the liveness timer and the exit
+   * handler cannot each start a process.
+   */
+  #recycle(reason: string): void {
+    this.#stopLivenessChecks();
+
+    const previous = this.#proc;
+    this.#proc = null;
+
+    if (previous) {
+      // Necessary when the process is alive but wedged; harmless when it already
+      // exited.
+      previous.kill("SIGKILL");
+      this.#superseded.add(previous.pid);
+    }
+
+    if (this.#stopping || !this.#owned) {
+      return;
+    }
+
+    this.#spawn();
+    this.#awaitReady()
+      .then(() => {
+        if (!this.#stopping) {
+          this.#startLivenessChecks();
+        }
+      })
+      .catch((error: unknown) => {
+        logger.error(
+          "opencode-recycle-failed",
+          error instanceof Error ? error : undefined,
+          { reason }
+        );
+        // Re-arm so a failed restart is retried rather than leaving the engine
+        // unmonitored for the rest of the process's life.
+        this.#scheduleRestart(reason);
+      });
+  }
+
   #spawn(): void {
     const proc = Bun.spawn(
       [
@@ -256,20 +296,36 @@ export class OpenCodeProcessManager {
       "opencode-stderr"
     );
 
-    proc.exited
-      .then((code) => {
+    const pid = proc.pid;
+
+    const onExit = (detail: string, error?: unknown): void => {
+      if (this.#superseded.delete(pid)) {
+        // A process we already replaced. Its exit must not clear the live child's
+        // handle or schedule a restart of its own.
+        return;
+      }
+
+      if (this.#proc === proc) {
         this.#proc = null;
-        logger.info("opencode-exited", { code });
-        this.#scheduleRestart(`exit ${String(code)}`);
-      })
-      .catch((error: unknown) => {
-        this.#proc = null;
+      }
+
+      if (error === undefined) {
+        logger.info("opencode-exited", { code: detail });
+      } else {
         logger.error(
           "opencode-error",
           error instanceof Error ? error : undefined
         );
-        this.#scheduleRestart("error");
-      });
+      }
+
+      if (!this.#stopping && this.#owned) {
+        this.#scheduleRestart(detail);
+      }
+    };
+
+    proc.exited
+      .then((code) => onExit(String(code)))
+      .catch((error: unknown) => onExit("error", error));
   }
 
   /**
@@ -308,12 +364,21 @@ export class OpenCodeProcessManager {
         return;
       }
       this.#spawn();
-      this.#awaitReady().catch((error: unknown) => {
-        logger.error(
-          "opencode-restart-not-ready",
-          error instanceof Error ? error : undefined
-        );
-      });
+      this.#awaitReady()
+        .then(() => {
+          if (!this.#stopping) {
+            // A restart that came up healthy earns back the budget, so a long
+            // session with occasional crashes is not capped at five for its life.
+            this.#restartAttempts = 0;
+            this.#startLivenessChecks();
+          }
+        })
+        .catch((error: unknown) => {
+          logger.error(
+            "opencode-restart-not-ready",
+            error instanceof Error ? error : undefined
+          );
+        });
     }, delayMs);
 
     // Never hold the process open purely to restart a child.

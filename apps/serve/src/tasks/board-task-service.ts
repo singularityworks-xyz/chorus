@@ -255,8 +255,12 @@ export class BoardTaskService {
     }
 
     try {
+      // Queried *without* the target directory. Passing it would scope the lookup
+      // to the very checkout we are trying to validate, so a session that actually
+      // belongs elsewhere comes back not-found, the catch yields "unknown", and
+      // the wrong-checkout session is reused — failing open in exactly the
+      // post-restart case this check exists for.
       const session = await this.#bridge.getSession({
-        directory: input.directory,
         sessionID: candidate,
       });
       return session.directory ?? null;

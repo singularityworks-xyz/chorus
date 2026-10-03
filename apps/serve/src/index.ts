@@ -134,10 +134,22 @@ function legacySnapshotPaths(): string[] {
   ];
 }
 
+/**
+ * One manager for the process, injected here and reused for the boot prune.
+ *
+ * It has to be constructed and passed in: the store takes the provisioner by
+ * injection, so a store built without one never creates a worktree at all and
+ * every board silently shares the repo's primary checkout. Leaving this out is
+ * how worktree-per-board shipped inert the first time — the tests that cover it
+ * all build their own store, so none of them noticed.
+ */
+const worktrees = new WorktreeManager();
+
 const workspaceStore = new WorkspaceStore(config.dataDir, {
   dbSizeCapMb: config.dbSizeCapMb,
   retentionDays: config.retentionDays,
   snapshotInterval: config.snapshotInterval,
+  worktreeProvisioner: worktrees,
 });
 
 if (config.enableLegacyWorkspaceImport) {
@@ -168,7 +180,6 @@ logger.info("workspace-ready", {
  * name is not a live board id are removed.
  */
 if (config.autoStartOpencode) {
-  const worktrees = new WorktreeManager();
   const boards = workspaceStore.getSnapshot().boards;
   const liveBoardIds = new Set(boards.map((board) => board.boardId));
   const repositories = new Set(boards.map((board) => board.repo.directory));
