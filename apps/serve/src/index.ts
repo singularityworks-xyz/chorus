@@ -239,7 +239,13 @@ bridge.subscribe((event) => {
     ...(event.text && { textPreview: event.text.slice(0, 80) }),
   });
 
-  if (!(event.sessionID && event.activity)) {
+  // A streamed delta carries no `activity` -- `normalizeMessagePartDelta` sets
+  // `delta`, `messageID` and `partID` only -- so gating on `activity` alone
+  // discarded every token of streamed model output before it could become a
+  // `step.delta_appended`. Accept a delta as sufficient to reach the store; it
+  // converts to a step event there, and the step projector is what decides
+  // whether it has anywhere to land.
+  if (!(event.sessionID && (event.activity || event.delta))) {
     return;
   }
 
