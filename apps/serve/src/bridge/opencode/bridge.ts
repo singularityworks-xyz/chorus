@@ -218,7 +218,7 @@ export class OpenCodeBridge {
           error instanceof Error ? error : undefined,
           {
             sessionID,
-            directory: this.#defaultDirectory,
+            directory: target,
             errorMessage,
             errorStack,
           }

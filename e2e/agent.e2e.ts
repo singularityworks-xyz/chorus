@@ -168,6 +168,11 @@ test.describe("agent lifecycle", () => {
     const board = `E2E agent run ${crypto.randomUUID().slice(0, 8)}`;
     await createBoard(page, board);
 
+    // Required, not incidental: `handleSubmit` returns early unless a board is
+    // selected, so without this the prompt is typed and silently never sent —
+    // which would look exactly like an agent that did not start.
+    await selectBoard(page, board);
+
     await submitPrompt(
       page,
       "Write the word CHORUS into proof.txt and then stop."

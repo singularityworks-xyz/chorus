@@ -60,6 +60,9 @@ export interface StoreCommit {
   lastSeq: number;
 }
 
+/** Beyond this many distinct boards/sessions, the drop-warning map resets. */
+const MAX_DROPPED_WARNING_KEYS = 256;
+
 const BOARD_X_OFFSET = 180;
 const BOARD_Y_OFFSET = 120;
 const BOARD_X_START = 120;
@@ -166,6 +169,8 @@ export interface WorktreeProvisioner {
     boards: ReadonlyArray<{ repo: { directory: string } }>,
     repoDirectory: string
   ): boolean;
+  /** Optional: removes a board's worktree when the board is removed. */
+  removeWorktree?(repoDirectory: string, boardId: string): Promise<void>;
 }
 
 export class WorkspaceStore {
@@ -438,11 +443,7 @@ export class WorkspaceStore {
         // the board simply stayed empty. Distinguish the two reasons so the next
         // occurrence names itself.
         if (converted.length > 0) {
-          logger.warn("agent-event-dropped-no-current-task", {
-            agentEventType: agentEvent.type,
-            boardId: board.boardId,
-            sessionID: agentEvent.sessionID,
-          });
+          this.#warnDroppedOnce(board.boardId, agentEvent);
         }
         return null;
       }
@@ -450,6 +451,43 @@ export class WorkspaceStore {
       return this.#commit(events, board.boardId, null);
     });
   }
+
+  /**
+   * Warns once per board and session about dropped agent events.
+   *
+   * A streamed delta carries no task id and arrives per token, so warning on every
+   * one turned a single mis-bound session into thousands of identical lines and
+   * buried everything else in the log. One line per (board, session) names the
+   * condition; the count is kept so the scale is still visible.
+   */
+  #warnDroppedOnce(boardId: string, agentEvent: NormalizedAgentEvent): void {
+    if (this.#droppedWarnings.size > MAX_DROPPED_WARNING_KEYS) {
+      this.#droppedWarnings.clear();
+    }
+
+    const key = `${boardId}:${agentEvent.sessionID ?? "unknown"}`;
+    const seen = this.#droppedWarnings.get(key) ?? 0;
+    this.#droppedWarnings.set(key, seen + 1);
+
+    if (seen > 0) {
+      return;
+    }
+
+    logger.warn("agent-event-dropped-no-current-task", {
+      agentEventType: agentEvent.type,
+      boardId,
+      note: "repeats for this board and session are counted, not logged",
+      sessionID: agentEvent.sessionID,
+    });
+  }
+
+  /**
+   * Boards that have already reported a dropped agent event.
+   *
+   * Bounded, because the purpose is to stop a runaway stream from flooding the
+   * log and an unbounded map would replace one leak with another.
+   */
+  readonly #droppedWarnings = new Map<string, number>();
 
   /**
    * Commits already-built board events for one board.
@@ -676,6 +714,32 @@ export class WorkspaceStore {
    * mutation rather than producing a second event and tripping the
    * 1-mutation-to-1-event assertion in `applyMutation`.
    */
+  /**
+   * Removes a board's worktree, if it had one of its own.
+   *
+   * A board on the repo's primary checkout has `worktree === directory`, and
+   * removing that would delete the user's actual repository.
+   */
+  async #removeWorktree(board: WorkspaceBoard): Promise<void> {
+    const provisioner = this.#worktreeProvisioner;
+    if (!provisioner?.removeWorktree) {
+      return;
+    }
+
+    if (board.repo.worktree === board.repo.directory) {
+      return;
+    }
+
+    try {
+      await provisioner.removeWorktree(board.repo.directory, board.boardId);
+    } catch (error) {
+      logger.warn("worktree-remove-failed", {
+        boardId: board.boardId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   async #provisionWorktree(board: WorkspaceBoard): Promise<string | null> {
     const provisioner = this.#worktreeProvisioner;
     if (!provisioner) {
@@ -725,10 +789,21 @@ export class WorkspaceStore {
         };
       }
 
-      case "board.remove":
-        if (!this.#boardExists(mutation.payload.boardId)) {
+      case "board.remove": {
+        const removed = this.getBoard(mutation.payload.boardId);
+        if (!removed) {
           return null;
         }
+
+        // The worktree goes with the board, inside the queue and with the board's
+        // own checkout in hand. Leaving it behind meant a closed board's checkout
+        // lingered until the next boot's prune, and a new board on that repo could
+        // collide with it.
+        //
+        // Best-effort: a failure is logged and the removal still proceeds, since
+        // the board is gone either way and the boot prune catches what is left.
+        await this.#removeWorktree(removed);
+
         return {
           boardId: mutation.payload.boardId,
           events: [
@@ -739,6 +814,7 @@ export class WorkspaceStore {
             },
           ],
         };
+      }
 
       case "board.select":
         return {

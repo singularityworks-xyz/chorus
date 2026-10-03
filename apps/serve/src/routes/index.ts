@@ -226,8 +226,21 @@ export function createHttpRoutes(
       .get(
         "/tasks/:sessionID/questions",
         async ({ params }) => {
-          const questions = await bridge.listQuestions(params.sessionID);
-          return { questions, timestamp: Date.now() };
+          // The board's directory, then narrowed to this session.
+          //
+          // This passed the session id where a directory belongs, so the engine
+          // was asked to list questions for a path called "sess-…" and returned
+          // nothing. The engine lists per directory, so scoping by session is our
+          // job.
+          const questions = await bridge.listQuestions(
+            directoryFor(params.sessionID)
+          );
+          return {
+            questions: questions.filter(
+              (question) => question.sessionID === params.sessionID
+            ),
+            timestamp: Date.now(),
+          };
         },
         {
           params: t.Object({

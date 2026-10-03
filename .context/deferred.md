@@ -77,6 +77,25 @@ default.
 
 ---
 
+## D6 — Removing a board does not abort its engine session
+
+**Found:** second Phase 6 review. **Status:** partially closed.
+
+`board.remove` now removes the board's worktree (inside the serial queue, and
+never the primary checkout). It does not abort the running engine session, because
+the store has no bridge and adding one would give the persistence layer a
+transport dependency.
+
+So removing a board mid-run leaves the agent working in a checkout that no longer
+exists. Follow-up commands for that session are refused with
+`UnknownSessionError` rather than misdirected, which is the safe half.
+
+**What closes it:** an abort on the removal path, driven from the layer that owns
+the bridge (a commit listener in `index.ts` that reacts to `board.removed`), rather
+than by injecting the bridge into the store.
+
+---
+
 ## D5 — Web push, Docker, and observability
 
 Phases 7–9 of `.context/implementation-plan.md` are untouched. Listed here only so

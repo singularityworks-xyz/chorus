@@ -40,7 +40,10 @@ function worktreeList(repo: string): string[] {
     .map((line) => resolve(line.slice("worktree ".length)));
 }
 
-async function seedBoard(store: WorkspaceStore, directory: string) {
+async function seedBoard(
+  store: WorkspaceStore,
+  directory: string
+): Promise<string> {
   const commit = await store.applyMutation({
     baseRevision: null,
     clientId: "worktree-test",
@@ -53,10 +56,12 @@ async function seedBoard(store: WorkspaceStore, directory: string) {
     },
     type: "board.create",
   });
-  if (!commit) {
-    throw new Error("board.create returned null");
+  // Narrowed once here so callers do not juggle a nullable id.
+  const boardId = commit?.boardId;
+  if (!boardId) {
+    throw new Error("board.create produced no board");
   }
-  return commit.boardId;
+  return boardId;
 }
 
 describe("WorktreeManager", () => {
@@ -115,6 +120,44 @@ describe("WorktreeManager", () => {
     expect(listed).toContain(repo);
     expect(listed).toContain(join(repo, WORKTREE_CONTAINER, second ?? ""));
     expect(first).toBeDefined();
+
+    await store.close();
+    rmSync(repo, { force: true, recursive: true });
+  });
+
+  test("removing a board removes its worktree but never the primary checkout", async () => {
+    const repo = makeRepo("chorus-wt-remove-");
+    const manager = new WorktreeManager();
+    const store = new WorkspaceStore(
+      mkdtempSync(join(tmpdir(), "chorus-wt-db-")),
+      { worktreeProvisioner: manager }
+    );
+    await store.load();
+
+    // The first board keeps the primary checkout; the second gets a worktree,
+    // which is the one removal has to clean up.
+    await seedBoard(store, repo);
+    const second = await seedBoard(store, repo);
+    const secondPath = store.getBoard(second)?.repo.worktree;
+    if (!secondPath) {
+      throw new Error("second board has no worktree");
+    }
+    expect(existsSync(secondPath)).toBe(true);
+
+    await store.applyMutation({
+      baseRevision: null,
+      clientId: "worktree-test",
+      mutationId: `remove-${crypto.randomUUID()}`,
+      payload: { boardId: second },
+      type: "board.remove",
+    });
+
+    // The worktree is gone with the board, rather than lingering until the next
+    // boot's prune.
+    expect(worktreeList(repo)).not.toContain(resolve(secondPath));
+    // The repo itself survives — a board on the primary must never remove it.
+    expect(existsSync(join(repo, "README.md"))).toBe(true);
+    expect(worktreeList(repo)).toContain(resolve(repo));
 
     await store.close();
     rmSync(repo, { force: true, recursive: true });

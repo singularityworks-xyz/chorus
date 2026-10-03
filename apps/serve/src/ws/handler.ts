@@ -291,15 +291,6 @@ async function handleCommand(
   const directoryFor = (sessionID: string): string =>
     resolveSessionDirectory(workspaceStore, sessionID);
 
-  /** Best-effort variant, for frames whose session id predates the board model. */
-  const tryDirectoryFor = (sessionID: string): string | undefined => {
-    try {
-      return directoryFor(sessionID);
-    } catch {
-      return undefined;
-    }
-  };
-
   const msg = message as WsMessage;
 
   const validate = <T extends keyof typeof WS_PAYLOAD_SCHEMAS>(
@@ -516,10 +507,12 @@ async function handleCommand(
 
       try {
         await bridge.promptSession({
-          // This frame carries a session id from a namespace older than the task
-          // routes, so resolution is attempted and a miss falls back rather than
-          // rejecting a legacy client.
-          directory: tryDirectoryFor(payload.sessionId),
+          // Resolved, not best-effort. Falling back to the bridge's default
+          // directory for a session the store cannot place would put this frame
+          // back where the worktree bug was: the agent prompted in serve's own
+          // checkout instead of the board's. A client that cannot name a board is
+          // told so.
+          directory: directoryFor(payload.sessionId),
           sessionID: payload.sessionId,
           text: `[Mobile prompt] ${payload.text}`,
         });
