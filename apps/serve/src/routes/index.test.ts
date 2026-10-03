@@ -52,6 +52,7 @@ describe("HTTP routes", () => {
   function makeApp() {
     const bridge = makeMockBridge();
     const boardTasks = makeMockBoardTasks();
+    const updateBoardSession = mock(async () => undefined);
     const app = new Elysia().use(
       createHttpRoutes(
         bridge as never,
@@ -68,10 +69,11 @@ describe("HTTP routes", () => {
                 }
               : undefined,
           getSnapshot: () => ({ boards: [] }),
+          updateBoardSession,
         } as never
       )
     );
-    return { app, bridge, boardTasks };
+    return { app, bridge, boardTasks, updateBoardSession };
   }
 
   describe("GET /health", () => {
@@ -379,7 +381,7 @@ describe("HTTP routes", () => {
     });
 
     test("hard redirect forks the session", async () => {
-      const { app, bridge } = makeApp();
+      const { app, bridge, updateBoardSession } = makeApp();
 
       const res = await app.handle(
         new Request("http://localhost/tasks/sess-1/redirect", {
@@ -408,6 +410,13 @@ describe("HTTP routes", () => {
         directory: BOARD_WORKTREE,
         sessionID: "sess-forked",
         text: "start fresh",
+      });
+
+      // The fork becomes the board's session, or every later command for it fails
+      // as unknown and its agent events have no board.
+      expect(updateBoardSession).toHaveBeenCalledWith("board-1", {
+        sessionId: "sess-forked",
+        state: "active",
       });
     });
 

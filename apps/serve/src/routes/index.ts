@@ -7,6 +7,7 @@ import { getDiff, getGitStatus, restore, track } from "../snapshot";
 import { getRevertState } from "../snapshot/session-revert";
 import type { BoardTaskService } from "../tasks/board-task-service";
 import {
+  attachForkedSession,
   resolveSessionDirectory,
   UnknownSessionError,
 } from "../tasks/session-directory";
@@ -326,6 +327,18 @@ export function createHttpRoutes(
             sessionID: params.sessionID,
             directory,
           });
+
+          // Bind the fork to the board before prompting it.
+          //
+          // Follow-up commands resolve their directory from the board that owns
+          // the session, so an unbound fork makes every later command for the new
+          // session fail as unknown — and agent events for it have no board to
+          // attach to. The fork *is* the board's session now.
+          await attachForkedSession(
+            workspaceStore,
+            params.sessionID,
+            forked.id
+          );
 
           await bridge.promptSession({
             directory,

@@ -7,7 +7,10 @@ import { verifyRequestCredential } from "../auth/guard";
 import type { TicketOptions } from "../auth/ticket";
 import type { OpenCodeBridge } from "../bridge/opencode/bridge";
 import type { BoardTaskService } from "../tasks/board-task-service";
-import { resolveSessionDirectory } from "../tasks/session-directory";
+import {
+  attachForkedSession,
+  resolveSessionDirectory,
+} from "../tasks/session-directory";
 import type { WorkspaceStore } from "../workspace/store";
 import type { HubSocket, WorkspaceHub } from "./hub";
 import type { WsMessage } from "./types";
@@ -408,6 +411,10 @@ async function handleCommand(
         sessionID: payload.sessionID,
         directory,
       });
+
+      // Bound before the prompt, so later commands for the fork resolve and its
+      // agent events have a board. An unbound fork is a session nothing owns.
+      await attachForkedSession(workspaceStore, payload.sessionID, forked.id);
 
       await bridge.promptSession({
         directory,

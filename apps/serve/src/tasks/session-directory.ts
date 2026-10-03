@@ -49,3 +49,32 @@ export function resolveSessionDirectory(
 export function boardDirectory(board: WorkspaceBoard): string {
   return board.repo.worktree ?? board.repo.directory;
 }
+
+/**
+ * Rebinds a board to a session forked from its current one.
+ *
+ * A fork replaces the board's session, but nothing recorded that. Follow-up
+ * commands look the board up by session id, so an unbound fork made every later
+ * command for the new session fail as unknown, and its agent events had no board
+ * to attach to. The fork is the board's session from here on.
+ *
+ * Best-effort: a failure is not fatal to the redirect that triggered it, and the
+ * alternative — refusing the fork — would be worse than a session the next
+ * command cannot resolve.
+ */
+export async function attachForkedSession(
+  store: WorkspaceStore,
+  previousSessionID: string,
+  forkedSessionID: string
+): Promise<boolean> {
+  const board = store.getBoardBySessionId(previousSessionID);
+  if (!board) {
+    return false;
+  }
+
+  await store.updateBoardSession(board.boardId, {
+    sessionId: forkedSessionID,
+    state: "active",
+  });
+  return true;
+}
