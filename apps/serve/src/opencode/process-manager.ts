@@ -66,6 +66,9 @@ export class OpenCodeProcessManager {
   #owned = false;
   #stopping = false;
   #restartTimer: ReturnType<typeof setTimeout> | null = null;
+  #livenessTimer: ReturnType<typeof setInterval> | null = null;
+  /** Consecutive failed health probes before the engine is treated as gone. */
+  #missedProbes = 0;
 
   constructor(options: {
     port?: number;
@@ -118,6 +121,73 @@ export class OpenCodeProcessManager {
     this.#owned = true;
     this.#spawn();
     await this.#awaitReady();
+    this.#startLivenessChecks();
+  }
+
+  /**
+   * Polls the engine periodically and restarts it if it stops answering.
+   *
+   * The exit handler only catches an engine that dies loudly. An engine that
+   * wedges — alive as a process, no longer answering — leaves serve spawning
+   * sessions against a socket that will never reply, with nothing in any log to
+   * distinguish it from a slow model.
+   *
+   * Only for an engine we spawned: one serve adopted is somebody else's to
+   * restart, and killing it because a probe timed out would be wrong.
+   */
+  #startLivenessChecks(): void {
+    this.#stopLivenessChecks();
+
+    this.#livenessTimer = setInterval(() => {
+      if (this.#stopping || !this.#owned) {
+        return;
+      }
+
+      probeHealth(this.#port, this.#hostname, 2000).then((health) => {
+        if (health?.healthy) {
+          this.#missedProbes = 0;
+          return;
+        }
+
+        this.#missedProbes += 1;
+
+        // A single missed probe is usually a busy moment, not a dead engine.
+        if (this.#missedProbes < MAX_MISSED_PROBES) {
+          return;
+        }
+
+        logger.warn("opencode-unresponsive", {
+          missedProbes: this.#missedProbes,
+          port: this.#port,
+        });
+        this.#missedProbes = 0;
+
+        // Detach first so the exit we are about to cause does not also schedule a
+        // second restart.
+        this.#stopLivenessChecks();
+        this.#proc = null;
+        this.#spawn();
+        this.#awaitReady()
+          .then(() => {
+            this.#startLivenessChecks();
+          })
+          .catch((error: unknown) => {
+            logger.error(
+              "opencode-liveness-restart-failed",
+              error instanceof Error ? error : undefined
+            );
+          });
+      });
+    }, LIVENESS_INTERVAL_MS);
+
+    this.#livenessTimer.unref?.();
+  }
+
+  #stopLivenessChecks(): void {
+    if (this.#livenessTimer) {
+      clearInterval(this.#livenessTimer);
+      this.#livenessTimer = null;
+    }
   }
 
   /**
@@ -275,6 +345,7 @@ export class OpenCodeProcessManager {
 
   async stop(): Promise<void> {
     this.#stopping = true;
+    this.#stopLivenessChecks();
     if (this.#restartTimer) {
       clearTimeout(this.#restartTimer);
       this.#restartTimer = null;
@@ -293,6 +364,7 @@ export class OpenCodeProcessManager {
 
   async forceKill(): Promise<void> {
     this.#stopping = true;
+    this.#stopLivenessChecks();
     if (this.#restartTimer) {
       clearTimeout(this.#restartTimer);
       this.#restartTimer = null;
@@ -311,3 +383,9 @@ export class OpenCodeProcessManager {
 }
 
 const MAX_RESTARTS = 5;
+
+/** How often the engine is probed once it is up. */
+const LIVENESS_INTERVAL_MS = 15_000;
+
+/** Consecutive failed probes tolerated before declaring the engine gone. */
+const MAX_MISSED_PROBES = 3;
