@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Page } from "@playwright/test";
 import { expect, test } from "@playwright/test";
 import { E2E_REPO_DIR, TOKEN } from "./serve-env";
@@ -129,23 +131,30 @@ test.describe("agent lifecycle", () => {
         () =>
           // Read the live snapshot rather than localStorage: the persisted
           // cursor and blob only move when the server sends a snapshot, so
-          // localStorage legitimately lags a freshly created card.
-          page.evaluate(async () => {
+          // localStorage legitimately lags a freshly created card. Matched by
+          // title, because `boards[0]` may be a board from an earlier test whose
+          // card — or empty column — decides this assertion instead.
+          page.evaluate(async (boardTitle) => {
             const response = await fetch("/api/workspace");
             if (!response.ok) {
               return null;
             }
             const snapshot = (await response.json()) as {
-              boards?: { columns: Record<string, unknown[]> }[];
+              boards?: {
+                columns: Record<string, unknown[]>[];
+                title: string;
+              }[];
             };
-            const columns = snapshot.boards?.[0]?.columns;
+            const columns = snapshot.boards?.find(
+              (entry) => entry.title === boardTitle
+            )?.columns;
             if (!columns) {
               return null;
             }
             return (
               (columns.in_progress?.length ?? 0) + (columns.done?.length ?? 0)
             );
-          }),
+          }, board),
         { timeout: 60_000 }
       )
       .toBeGreaterThan(0);
@@ -183,22 +192,37 @@ test.describe("agent lifecycle", () => {
     await expect
       .poll(
         () =>
-          page.evaluate(async () => {
+          page.evaluate(async (boardTitle) => {
             const response = await fetch("/api/workspace");
             const snapshot = (await response.json()) as {
-              boards?: { columns: Record<string, { title: string }[]> }[];
+              boards?: {
+                columns: Record<string, { title: string }[]>;
+                title: string;
+              }[];
             };
-            return (snapshot.boards?.[0]?.columns.done ?? []).length;
-          }),
+            return (
+              snapshot.boards?.find((entry) => entry.title === boardTitle)
+                ?.columns.done ?? []
+            ).length;
+          }, board),
         { timeout: 180_000 }
       )
       .toBeGreaterThan(0);
 
     // The agent really ran: it wrote the file it was asked for.
-    const proof = await page.evaluate(async () => {
-      const response = await fetch("/api/projects");
-      return response.ok;
-    });
-    expect(typeof proof).toBe("boolean");
+    //
+    // Read from the checkout directly. The previous version asserted
+    // `typeof proof === "boolean"`, which is true whether the request succeeded
+    // or not — a test that could not fail, guarding the one thing this case
+    // exists to prove.
+    const proofPath = join(E2E_REPO_DIR, "proof.txt");
+    await expect
+      .poll(
+        () => (existsSync(proofPath) ? readFileSync(proofPath, "utf8") : ""),
+        {
+          timeout: 60_000,
+        }
+      )
+      .toContain("CHORUS");
   });
 });

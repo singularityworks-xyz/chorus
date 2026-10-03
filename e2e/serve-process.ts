@@ -95,30 +95,40 @@ export async function stop(port: number, pidFile: string): Promise<void> {
 }
 
 /**
- * Resolves when `/health` answers 200.
+ * Resolves when the process on this port is genuinely the one we want.
  *
- * Polls rather than waiting on the child's exit, because a serve that boots and
- * immediately fails has no output the parent can interpret more clearly than
- * "the port never opened".
+ * `kind` decides the endpoint, because the two differ in a way that matters:
+ * serve answers `/health` with JSON, while `opencode serve` returns 200 with an
+ * HTML shell for *any* unknown path. Probing the engine on `/health` therefore
+ * accepted an HTML fallback as readiness, so the engine was declared up before it
+ * could serve anything. `/global/health` is the engine's one real endpoint.
+ *
+ * Polls rather than waiting on the child's exit, because a process that boots and
+ * immediately fails has no output the parent can read more clearly than "the port
+ * never opened".
  */
-async function waitForHealth(port: number, timeoutMs: number): Promise<void> {
+async function waitForHealth(
+  port: number,
+  timeoutMs: number,
+  kind: "serve" | "engine" = "serve"
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    if (await healthOnce(port)) {
+    if (await healthOnce(port, kind)) {
       return;
     }
     await delay(200);
   }
 
-  throw new Error(`serve did not become healthy on port ${String(port)}`);
+  throw new Error(`${kind} did not become healthy on port ${String(port)}`);
 }
 
 async function waitForPortFree(port: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    if (!(await healthOnce(port))) {
+    if (!(await healthOnce(port, "serve"))) {
       return;
     }
     await delay(200);
@@ -127,12 +137,33 @@ async function waitForPortFree(port: number, timeoutMs: number): Promise<void> {
   throw new Error(`serve is still listening on port ${String(port)}`);
 }
 
-async function healthOnce(port: number): Promise<boolean> {
+async function healthOnce(
+  port: number,
+  kind: "serve" | "engine"
+): Promise<boolean> {
+  const path = kind === "engine" ? "/global/health" : "/health";
+
   try {
-    const response = await fetch(`http://127.0.0.1:${String(port)}/health`, {
+    const response = await fetch(`http://127.0.0.1:${String(port)}${path}`, {
       signal: AbortSignal.timeout(1000),
     });
-    return response.ok;
+
+    if (!response.ok) {
+      return false;
+    }
+
+    if (kind === "engine") {
+      // The engine's health endpoint is the only path that is not the HTML
+      // fallback, so the body is what distinguishes a live engine from a squatter.
+      const body: unknown = await response.json();
+      return (
+        typeof body === "object" &&
+        body !== null &&
+        (body as { healthy?: unknown }).healthy === true
+      );
+    }
+
+    return true;
   } catch {
     return false;
   }
@@ -177,6 +208,6 @@ export async function startEngine(options: {
   child.unref();
   recordPid(options.pidFile, child.pid ?? -1);
 
-  await waitForHealth(options.port, 120_000);
+  await waitForHealth(options.port, 120_000, "engine");
   return child.pid ?? -1;
 }

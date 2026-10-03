@@ -13,6 +13,11 @@ import { stop } from "./serve-process";
  * every resume assertion starts passing for the wrong reason.
  */
 export default async function globalTeardown(): Promise<void> {
-  await stop(SERVE_PORT, SERVE_PID_FILE);
-  await stop(OPENCODE_PORT, ENGINE_PID_FILE);
+  try {
+    await stop(SERVE_PORT, SERVE_PID_FILE);
+  } finally {
+    // In `finally`: a serve shutdown that times out would otherwise leave the
+    // engine running for the next run to inherit, along with its warm state.
+    await stop(OPENCODE_PORT, ENGINE_PID_FILE);
+  }
 }
