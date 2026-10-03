@@ -112,6 +112,62 @@ export class BoardTaskService {
     return this.#workspaceStore.getSnapshot();
   }
 
+  /**
+   * Makes sure the board has a card for this prompt, and that it is the board's
+   * current task.
+   *
+   * This is the step that was missing, and nothing else could stand in for it.
+   * A queued prompt is an explicit human command, so spec§2 rule 3 puts the
+   * transition on the server. `board.session.currentTaskId` is what
+   * `WorkspaceStore.applyAgentEvent` uses as the task id for every agent event
+   * it converts, and it drops any task-scoped event whose id is empty — so with
+   * no card, a running agent produced activity that was filtered away and
+   * discarded without a log line. `card.created` is also the only projector
+   * branch that sets `currentTaskId`.
+   *
+   * Idempotent: a board that already has a live current task reuses it rather
+   * than stacking a second card for the same run.
+   */
+  async #ensureQueuedCard(
+    input: QueueBoardPromptInput,
+    sessionId: string
+  ): Promise<void> {
+    const board = this.#workspaceStore.getBoard(input.boardId);
+    if (!board) {
+      return;
+    }
+
+    if (board.session.currentTaskId) {
+      return;
+    }
+
+    const taskId = `task-${crypto.randomUUID()}`;
+    const title = input.text.slice(0, 120);
+
+    const commit = await this.#workspaceStore.applyBoardEvents(input.boardId, [
+      {
+        boardId: input.boardId,
+        column: "queue",
+        task: {
+          id: taskId,
+          label: title,
+          labelVariant: "primary-light",
+          title,
+        },
+        taskId,
+        ts: Date.now(),
+        type: "card.created",
+      },
+    ]);
+
+    logger.info("queue-prompt:card-created", {
+      boardId: input.boardId,
+      committed: commit !== null,
+      sessionId,
+      taskId,
+    });
+  }
+
   async queuePrompt(
     rawInput: QueueBoardPromptInput
   ): Promise<QueueBoardPromptResponse> {
@@ -182,6 +238,8 @@ export class BoardTaskService {
       sessionId,
       state: "active",
     });
+
+    await this.#ensureQueuedCard(input, sessionId);
 
     const sdkParts = input.parts
       ? convertPartsToSdk(input.parts, input.directory)

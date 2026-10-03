@@ -153,4 +153,90 @@ describe("BoardTaskService", () => {
 
     rmSync(dir, { force: true, recursive: true });
   });
+  test("queueing a prompt creates the card that agent events attach to", async () => {
+    const bridge = makeMockBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-board-task-card-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, { state: "uninitialized" });
+
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+    await service.queuePrompt({
+      boardId,
+      directory: "/tmp/repo",
+      text: "build the feature",
+      reviewMode: "auto",
+    });
+
+    const board = workspaceStore.getBoard(boardId);
+    const card = board?.columns.queue?.[0];
+
+    expect(card).toBeDefined();
+    expect(card?.title).toBe("build the feature");
+    // The load-bearing part: without this the store has no task id to attach
+    // agent events to, and every task-scoped event is dropped.
+    expect(board?.session.currentTaskId).toBe(card?.id);
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("a second prompt on a live board reuses the card instead of stacking one", async () => {
+    const bridge = makeMockBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-board-task-card2-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, { state: "uninitialized" });
+
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+    await service.queuePrompt({
+      boardId,
+      directory: "/tmp/repo",
+      text: "first prompt",
+      reviewMode: "auto",
+    });
+    const firstTaskId = workspaceStore.getBoard(boardId)?.session.currentTaskId;
+
+    await service.queuePrompt({
+      boardId,
+      directory: "/tmp/repo",
+      text: "second prompt",
+      reviewMode: "auto",
+    });
+
+    const board = workspaceStore.getBoard(boardId);
+    expect(board?.columns.queue).toHaveLength(1);
+    expect(board?.session.currentTaskId).toBe(firstTaskId);
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("a card is created even when the session was reused", async () => {
+    const bridge = makeMockBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-board-task-card3-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      sessionId: "sess-123",
+      state: "uninitialized",
+    });
+
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+    const result = await service.queuePrompt({
+      boardId,
+      directory: "/tmp/repo",
+      text: "continue the work",
+      reviewMode: "auto",
+    });
+
+    expect(result.createdSession).toBe(false);
+    expect(workspaceStore.getBoard(boardId)?.columns.queue).toHaveLength(1);
+    expect(
+      workspaceStore.getBoard(boardId)?.session.currentTaskId
+    ).toBeDefined();
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
 });

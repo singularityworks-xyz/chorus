@@ -362,16 +362,63 @@ export class WorkspaceStore {
         return null;
       }
 
-      const events = toWorkspaceEvents(agentEvent, {
+      const currentTaskId = board.session.currentTaskId ?? "";
+      const converted = toWorkspaceEvents(agentEvent, {
         boardId: board.boardId,
-        taskId: board.session.currentTaskId ?? "",
-      }).filter((event) => !("taskId" in event) || event.taskId !== "");
+        taskId: currentTaskId,
+      });
+      const events = converted.filter(
+        (event) => !("taskId" in event) || event.taskId !== ""
+      );
 
       if (events.length === 0) {
+        // Silence here is what made a missing card invisible: a running agent
+        // produced activity, every event was dropped for want of a task id, and
+        // the board simply stayed empty. Distinguish the two reasons so the next
+        // occurrence names itself.
+        if (converted.length > 0) {
+          logger.warn("agent-event-dropped-no-current-task", {
+            agentEventType: agentEvent.type,
+            boardId: board.boardId,
+            sessionID: agentEvent.sessionID,
+          });
+        }
         return null;
       }
 
       return this.#commit(events, board.boardId, null);
+    });
+  }
+
+  /**
+   * Commits already-built board events for one board.
+   *
+   * `applyMutation` is for client mutations and `applyAgentEvent` for normalized
+   * stream events, which is a different shape. Neither can express "the server
+   * decided a card now exists" — the event log needs that when a prompt is
+   * queued, because `board.session.currentTaskId` is the only thing that lets
+   * `applyAgentEvent` attach a task to subsequent agent events, and
+   * `card.created` is the only projector branch that sets it
+   * (`packages/contracts/src/projector.ts`).
+   *
+   * Enqueued and committed through `#commit` like every other write, so the
+   * store stays the single emit path and the hub still learns about this from
+   * `onCommit` rather than from a second broadcast.
+   */
+  async applyBoardEvents(
+    boardId: string,
+    events: WorkspaceEvent[]
+  ): Promise<StoreCommit | null> {
+    if (events.length === 0) {
+      return null;
+    }
+
+    return this.#enqueue(async () => {
+      if (!this.#boardExists(boardId)) {
+        return null;
+      }
+
+      return this.#commit(events, boardId, null);
     });
   }
 
