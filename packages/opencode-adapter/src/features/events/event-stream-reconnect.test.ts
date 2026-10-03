@@ -15,10 +15,21 @@ import { EventStream } from "./event-stream";
 
 const SUBSCRIBE_REFUSED = /subscribe refused/;
 
+type Outcome = "fail" | "end" | "hold";
+
+/**
+ * A client whose stream lifetime is chosen per subscribe.
+ *
+ * `"hold"` models a live, quiet subscription: `next()` never settles, so the pump
+ * stays inside `#consume` until aborted. `"end"` ends immediately, exercising the
+ * reconnect path. Getting this wrong is what made an earlier version of these
+ * tests flaky — an always-ending stream sent the reconnect loop round on every
+ * attempt and inflated the subscribe count the assertions key on.
+ */
 function fakeClient() {
   let subscribeCalls = 0;
-  /** One outcome per subscribe attempt; defaults to a clean open. */
-  const outcomes: ("open" | "fail")[] = [];
+  /** One outcome per subscribe attempt; defaults to `"hold"`. */
+  const outcomes: Outcome[] = [];
 
   return {
     client: {
@@ -26,23 +37,40 @@ function fakeClient() {
         subscribe: () => {
           subscribeCalls += 1;
 
-          if (outcomes.shift() === "fail") {
+          const outcome = outcomes.shift() ?? "hold";
+          if (outcome === "fail") {
             return Promise.reject(new Error("subscribe refused"));
           }
 
           const delivered: unknown[] = [];
+          const cleanup: (() => void)[] = [];
 
           const stream = {
             [Symbol.asyncIterator]() {
               return this;
             },
-            next: () =>
-              Promise.resolve(
-                delivered.length > 0
-                  ? { done: false, value: delivered.shift() }
-                  : { done: true, value: undefined }
-              ),
-            return: () => Promise.resolve({ done: true, value: undefined }),
+            next: (): Promise<IteratorResult<unknown>> => {
+              if (delivered.length > 0) {
+                return Promise.resolve({
+                  done: false,
+                  value: delivered.shift(),
+                });
+              }
+              if (outcome === "end") {
+                return Promise.resolve({ done: true, value: undefined });
+              }
+              // Held open until `return()` is called, which the pump does on
+              // abort or when it gives up.
+              return new Promise((resolve) => {
+                cleanup.push(() => resolve({ done: true, value: undefined }));
+              });
+            },
+            return: () => {
+              for (const fn of cleanup.splice(0)) {
+                fn();
+              }
+              return Promise.resolve({ done: true, value: undefined });
+            },
             push(value: unknown) {
               delivered.push(value);
             },
@@ -75,7 +103,7 @@ describe("EventStream reconnection", () => {
 
   test("a failed first subscribe releases the slot instead of leaving a dead claim", async () => {
     const fake = fakeClient();
-    fake.outcomes.push("fail", "open");
+    fake.outcomes.push("fail", "hold");
     const stream = new EventStream(fake.client as never);
 
     await expect(
@@ -94,7 +122,7 @@ describe("EventStream reconnection", () => {
   test("a clean end-of-stream is re-opened rather than treated as finished", async () => {
     const fake = fakeClient();
     // Every attempt opens and then ends immediately, so the loop keeps trying.
-    fake.outcomes.push("open", "open", "open");
+    fake.outcomes.push("end", "end", "end");
     const stream = new EventStream(fake.client as never);
 
     await stream.subscribe(() => undefined, { directory: "/repo" });
@@ -110,7 +138,7 @@ describe("EventStream reconnection", () => {
 
   test("stop prevents further reconnection", async () => {
     const fake = fakeClient();
-    fake.outcomes.push("open", "open", "open", "open");
+    fake.outcomes.push("hold", "hold", "hold", "hold");
     const stream = new EventStream(fake.client as never);
 
     await stream.subscribe(() => undefined, { directory: "/repo" });
@@ -120,5 +148,56 @@ describe("EventStream reconnection", () => {
     await new Promise((resolve) => setTimeout(resolve, 250));
 
     expect(fake.subscribeCalls).toBe(callsBeforeStop);
+  });
+  test("a superseded pump does not release its successor's slot", async () => {
+    // Sequence that broke: stop a directory, subscribe again before the old pump
+    // reached its next checkpoint, and the old pump's release deletes the *new*
+    // slot. The next subscriber then opens a third stream, so two pumps run for one
+    // key and the global running flag can be flipped off while one is live.
+    const fake = fakeClient();
+    const stream = new EventStream(fake.client as never);
+
+    const first = await stream.subscribe(() => undefined, {
+      directory: "/repo",
+    });
+    expect(fake.subscribeCalls).toBe(1);
+
+    first.stop();
+
+    // Re-subscribed before the aborted pump has had a chance to unwind.
+    const second = await stream.subscribe(() => undefined, {
+      directory: "/repo",
+    });
+    expect(fake.subscribeCalls).toBe(2);
+
+    // Let the aborted pump finish releasing.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // The successor's claim must have survived, so this resolves to it rather than
+    // opening a third stream.
+    await stream.subscribe(() => undefined, { directory: "/repo" });
+    expect(fake.subscribeCalls).toBe(2);
+
+    second.stop();
+    stream.stop();
+  });
+
+  test("several directories are tracked independently", async () => {
+    const fake = fakeClient();
+    const stream = new EventStream(fake.client as never);
+
+    const a = await stream.subscribe(() => undefined, { directory: "/a" });
+    const b = await stream.subscribe(() => undefined, { directory: "/b" });
+    expect(fake.subscribeCalls).toBe(2);
+
+    // Stopping one must not disturb the other.
+    a.stop();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    await stream.subscribe(() => undefined, { directory: "/b" });
+    expect(fake.subscribeCalls).toBe(2);
+
+    b.stop();
+    stream.stop();
   });
 });

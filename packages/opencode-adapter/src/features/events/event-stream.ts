@@ -29,13 +29,11 @@ export class EventStream {
 
     const key = options?.directory ?? "__default__";
 
-    if (this.#dirSubscriptions.has(key)) {
+    const existing = this.#dirSubscriptions.get(key);
+    if (existing) {
       return {
         stop: () => {
-          this.#dirSubscriptions.delete(key);
-          if (this.#dirSubscriptions.size === 0) {
-            this.#running = false;
-          }
+          this.#release(key, existing);
         },
       };
     }
@@ -65,13 +63,14 @@ export class EventStream {
       // Release the claim. Leaving it behind meant every later attempt took the
       // "already subscribed" branch and returned a handle wired to nothing — a
       // dead subscription that looked perfectly healthy to its caller.
-      this.#dirSubscriptions.delete(key);
+      this.#release(key, sub);
       throw error;
     }
 
     // Reconnection runs detached so `subscribe` still resolves once the stream
     // is attached; awaiting the loop here would hang the caller forever.
     this.#pump(
+      sub,
       key,
       initial.stream as AsyncIterable<OCEvent>,
       onEvent,
@@ -81,11 +80,8 @@ export class EventStream {
 
     return {
       stop: () => {
-        this.#dirSubscriptions.delete(key);
         abort.abort();
-        if (this.#dirSubscriptions.size === 0) {
-          this.#running = false;
-        }
+        this.#release(key, sub);
       },
     };
   }
@@ -104,6 +100,7 @@ export class EventStream {
    * is abandoned after `MAX_STREAM_RECONNECTS`.
    */
   async #pump(
+    sub: DirSubscription,
     key: string,
     firstStream: AsyncIterable<OCEvent>,
     onEvent: EventCallback,
@@ -120,14 +117,14 @@ export class EventStream {
         delivered = await this.#consume(stream, onEvent, abort);
       } catch (error) {
         if (!this.#running || abort.signal.aborted) {
-          this.#release(key);
+          this.#release(key, sub);
           return;
         }
         console.error("[oc-adapter] event stream error:", error);
       }
 
       if (!this.#running || abort.signal.aborted) {
-        this.#release(key);
+        this.#release(key, sub);
         return;
       }
 
@@ -140,14 +137,14 @@ export class EventStream {
           "[oc-adapter] abandoning the event stream after repeated failures:",
           key
         );
-        this.#release(key);
+        this.#release(key, sub);
         return;
       }
 
       await this.#backoff(Math.max(attempts, 1), abort);
 
       if (!this.#running || abort.signal.aborted) {
-        this.#release(key);
+        this.#release(key, sub);
         return;
       }
 
@@ -156,7 +153,7 @@ export class EventStream {
 
     // `#reopen` returned null: the engine will not give us a stream, so the slot
     // must be released or every later subscriber gets a handle to a dead pump.
-    this.#release(key);
+    this.#release(key, sub);
   }
 
   /**
@@ -219,7 +216,18 @@ export class EventStream {
    * the next `subscribe` for that directory takes the "already subscribed" branch
    * and hands its caller a handle wired to a pump that no longer exists.
    */
-  #release(key: string): void {
+  #release(key: string, sub: DirSubscription): void {
+    // Only if this subscription still owns the slot.
+    //
+    // Deleting by key alone let a superseded pump wipe its successor's claim: stop
+    // one directory, subscribe again before the old pump reached its next
+    // checkpoint, and the old pump's release deletes the *new* slot. The next
+    // subscriber then opens a third stream, so two pumps run for one key and the
+    // global `#running` flag can be flipped off while one is still live.
+    if (this.#dirSubscriptions.get(key) !== sub) {
+      return;
+    }
+
     this.#dirSubscriptions.delete(key);
     if (this.#dirSubscriptions.size === 0) {
       this.#running = false;
@@ -277,17 +285,35 @@ function raceAbort<T>(
     return Promise.resolve(ABORTED);
   }
 
-  return new Promise<T | typeof ABORTED>((resolve) => {
-    const onAbort = (): void => resolve(ABORTED);
+  return new Promise<T | typeof ABORTED>((resolve, reject) => {
+    // First settlement wins, and only one is ever made.
+    //
+    // The earlier version resolved with `Promise.reject(error)` when the read
+    // failed after an abort had already settled the race. Settling an already-
+    // settled promise is a no-op, so the rejected thenable it created was never
+    // observed and surfaced as an unhandled rejection.
+    let settled = false;
+    const settle = (apply: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      apply();
+    };
+
+    const onAbort = (): void => settle(() => resolve(ABORTED));
     signal.addEventListener("abort", onAbort, { once: true });
+
     pending.then(
       (value) => {
         signal.removeEventListener("abort", onAbort);
-        resolve(value);
+        settle(() => resolve(value));
       },
       (error: unknown) => {
         signal.removeEventListener("abort", onAbort);
-        resolve(Promise.reject(error));
+        // Attaching this handler is also what keeps a late rejection from the
+        // underlying iterator from becoming unhandled when the race was aborted.
+        settle(() => reject(error));
       }
     );
   });
@@ -475,9 +501,11 @@ function recordAssistantMessage(sessionID: string, messageID: string) {
 /**
  * Forgets remembered assistant messages.
  *
- * Called when a stream subscription starts so a reconnect is not judged against
- * bookkeeping from before it. Exported for the adapter's tests, which otherwise
- * leak state between cases.
+ * Deliberately NOT called when a subscription starts: the map is global because
+ * `normalize` has no directory context, and the engine does not replay
+ * `message.updated` for a message already in flight, so clearing on subscribe would
+ * discard the only record classifying another board's streamed content. Used by
+ * tests, which would otherwise leak state between cases.
  */
 export function resetMessageTracking(): void {
   assistantMessageRoles.clear();
