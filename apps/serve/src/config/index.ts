@@ -18,6 +18,7 @@ export interface ServerConfig {
   hostname: string;
   opencodeBaseUrl: string;
   opencodeDirectory: string;
+  opencodePort: number;
   port: number;
   /** Terminal-run step detail older than this is compacted (spec §5). */
   retentionDays: number;
@@ -34,6 +35,40 @@ export function loadConfig(): ServerConfig {
       `Invalid PORT "${rawPort}": must be a number between 1 and 65535`
     );
   }
+
+  /**
+   * A TCP port, or the fallback.
+   *
+   * Range-checked, not merely positive: `OPENCODE_PORT=70000` passed as a
+   * positive integer and then failed at spawn time, which reports as a crashed
+   * engine rather than a bad setting.
+   */
+  const tcpPort = (
+    raw: string | undefined,
+    fallback: number,
+    name: string
+  ): number => {
+    if (raw === undefined || raw === "") {
+      return fallback;
+    }
+
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0 || parsed >= 65_536) {
+      throw new Error(
+        `Invalid ${name} "${raw}": must be a number between 1 and 65535`
+      );
+    }
+
+    return parsed;
+  };
+
+  // Parsed once. Reading it twice risked the two sites drifting apart, which is
+  // the exact failure this change exists to prevent.
+  const opencodePort = tcpPort(
+    process.env.OPENCODE_PORT,
+    4096,
+    "OPENCODE_PORT"
+  );
 
   const positive = (
     raw: string | undefined,
@@ -53,7 +88,14 @@ export function loadConfig(): ServerConfig {
   return {
     port,
     hostname: process.env.HOSTNAME ?? "localhost",
-    opencodeBaseUrl: process.env.OPENCODE_BASE_URL ?? "http://localhost:4096",
+    // One source of truth for the engine address. Previously the process manager
+    // hardcoded 4096 and this defaulted to `http://localhost:4096`
+    // independently, so overriding one silently desynchronised the port we spawn
+    // on from the URL every client request went to.
+    opencodePort,
+    opencodeBaseUrl:
+      process.env.OPENCODE_BASE_URL ??
+      `http://localhost:${String(opencodePort)}`,
     opencodeDirectory: process.env.OPENCODE_DIRECTORY ?? process.cwd(),
     autoStartOpencode: process.env.OPENCODE_AUTO_START !== "false",
     // ~/.chorus keeps parity with where the pre-Phase-2 store wrote, so an

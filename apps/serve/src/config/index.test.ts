@@ -100,6 +100,7 @@ describe("loadConfig", () => {
       port: 5000,
       hostname: "127.0.0.1",
       opencodeBaseUrl: "http://opencode:4096",
+      opencodePort: 4096,
       opencodeDirectory: "/workspace",
       autoStartOpencode: true,
       coalesceMs: 75,

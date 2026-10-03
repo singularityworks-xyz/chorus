@@ -60,6 +60,9 @@ export interface StoreCommit {
   lastSeq: number;
 }
 
+/** Beyond this many distinct boards/sessions, the drop-warning map resets. */
+const MAX_DROPPED_WARNING_KEYS = 256;
+
 const BOARD_X_OFFSET = 180;
 const BOARD_Y_OFFSET = 120;
 const BOARD_X_START = 120;
@@ -142,10 +145,46 @@ interface PersistedBlob {
  *    `#project`, so a state reconstructed from the log is identical to one built
  *    live — which is only true because the shared projector is pure.
  */
+/**
+ * What the store needs from worktree provisioning (plan P6 task 2).
+ *
+ * Declared structurally rather than imported from `projects/worktree-manager` so
+ * the store keeps no git dependency and no coupling to the module that happens to
+ * implement it. `WorktreeManager` satisfies it as-is.
+ */
+export interface WorktreeProvisioner {
+  /** Creates (or adopts) the worktree for `boardId` and resolves to its path. */
+  ensureWorktree(
+    repoDirectory: string,
+    boardId: string,
+    branch?: string
+  ): Promise<string>;
+  /**
+   * Whether a *new* board for this repo needs its own checkout.
+   *
+   * Called with the boards that already exist, so the first board for a repo is
+   * never given a worktree.
+   */
+  needsWorktree(
+    boards: ReadonlyArray<{ repo: { directory: string } }>,
+    repoDirectory: string
+  ): boolean;
+  /** Optional: removes a board's worktree when the board is removed. */
+  removeWorktree?(repoDirectory: string, boardId: string): Promise<void>;
+}
+
 export class WorkspaceStore {
   readonly #db: ChorusDatabase;
   readonly #options: Required<RetentionOptions>;
   readonly #queue: { promise: Promise<void> } = { promise: Promise.resolve() };
+  /**
+   * Optional worktree provisioning for `board.create` (plan P6 task 2).
+   *
+   * Injected rather than constructed here so the store keeps no git dependency,
+   * and so tests can supply a stub. When absent, board creation behaves exactly
+   * as before: no worktree, and every board shares the repo's primary checkout.
+   */
+  readonly #worktreeProvisioner: WorktreeProvisioner | undefined;
 
   /** Subscribers notified once per commit, after memory is swapped. */
   readonly #commitListeners = new Set<(commit: StoreCommit) => void>();
@@ -161,7 +200,13 @@ export class WorkspaceStore {
   /** Events appended since the last snapshot, for the N-event snapshot trigger. */
   #eventsSinceSnapshot = 0;
 
-  constructor(dataDir: string, options: RetentionOptions = {}) {
+  constructor(
+    dataDir: string,
+    options: RetentionOptions & {
+      worktreeProvisioner?: WorktreeProvisioner;
+    } = {}
+  ) {
+    this.#worktreeProvisioner = options.worktreeProvisioner;
     this.#db = new ChorusDatabase(dataDir);
     this.#options = {
       dbSizeCapMb: options.dbSizeCapMb ?? 512,
@@ -239,6 +284,23 @@ export class WorkspaceStore {
 
   getBoard(boardId: string): WorkspaceBoard | undefined {
     return this.#snapshot.boards.find((board) => board.boardId === boardId);
+  }
+
+  /**
+   * The board a session belongs to, by the session id the engine issued.
+   *
+   * Reverse of the lookup `applyAgentEvent` does. Used to resolve the working
+   * directory for follow-up commands — an approval reply, an abort, a redirect —
+   * which otherwise fall back to the directory serve was started in rather than
+   * the board's own checkout.
+   */
+  getBoardBySessionId(sessionId: string): WorkspaceBoard | undefined {
+    if (!sessionId) {
+      return undefined;
+    }
+    return this.#snapshot.boards.find(
+      (board) => board.session.sessionId === sessionId
+    );
   }
 
   headSeq(): number {
@@ -326,7 +388,11 @@ export class WorkspaceStore {
       }
 
       const now = Date.now();
-      const produced = this.#mutationToEvents(mutation, now);
+
+      // `#mutationToEvents` is awaited so `board.create` can provision a worktree
+      // here, inside the serial queue, rather than as a side effect after the
+      // mutation returns (plan risk #6).
+      const produced = await this.#mutationToEvents(mutation, now);
 
       if (!produced) {
         return null;
@@ -362,16 +428,130 @@ export class WorkspaceStore {
         return null;
       }
 
-      const events = toWorkspaceEvents(agentEvent, {
+      const currentTaskId = board.session.currentTaskId ?? "";
+      const converted = toWorkspaceEvents(agentEvent, {
         boardId: board.boardId,
-        taskId: board.session.currentTaskId ?? "",
-      }).filter((event) => !("taskId" in event) || event.taskId !== "");
+        taskId: currentTaskId,
+      });
+      const events = converted.filter(
+        (event) => !("taskId" in event) || event.taskId !== ""
+      );
 
       if (events.length === 0) {
+        // Silence here is what made a missing card invisible: a running agent
+        // produced activity, every event was dropped for want of a task id, and
+        // the board simply stayed empty. Distinguish the two reasons so the next
+        // occurrence names itself.
+        if (converted.length > 0) {
+          this.#warnDroppedOnce(board.boardId, agentEvent);
+        }
         return null;
       }
 
       return this.#commit(events, board.boardId, null);
+    });
+  }
+
+  /**
+   * Warns once per board and session about dropped agent events.
+   *
+   * A streamed delta carries no task id and arrives per token, so warning on every
+   * one turned a single mis-bound session into thousands of identical lines and
+   * buried everything else in the log. One line per (board, session) names the
+   * condition; the count is kept so the scale is still visible.
+   */
+  #warnDroppedOnce(boardId: string, agentEvent: NormalizedAgentEvent): void {
+    if (this.#droppedWarnings.size > MAX_DROPPED_WARNING_KEYS) {
+      this.#droppedWarnings.clear();
+    }
+
+    const key = `${boardId}:${agentEvent.sessionID ?? "unknown"}`;
+    const seen = this.#droppedWarnings.get(key) ?? 0;
+    this.#droppedWarnings.set(key, seen + 1);
+
+    if (seen > 0) {
+      return;
+    }
+
+    logger.warn("agent-event-dropped-no-current-task", {
+      agentEventType: agentEvent.type,
+      boardId,
+      note: "repeats for this board and session are counted, not logged",
+      sessionID: agentEvent.sessionID,
+    });
+  }
+
+  /**
+   * Boards that have already reported a dropped agent event.
+   *
+   * Bounded, because the purpose is to stop a runaway stream from flooding the
+   * log and an unbounded map would replace one leak with another.
+   */
+  readonly #droppedWarnings = new Map<string, number>();
+
+  /**
+   * Commits already-built board events for one board.
+   *
+   * `applyMutation` is for client mutations and `applyAgentEvent` for normalized
+   * stream events, which is a different shape. Neither can express "the server
+   * decided a card now exists" — the event log needs that when a prompt is
+   * queued, because `board.session.currentTaskId` is the only thing that lets
+   * `applyAgentEvent` attach a task to subsequent agent events, and
+   * `card.created` is the only projector branch that sets it
+   * (`packages/contracts/src/projector.ts`).
+   *
+   * Enqueued and committed through `#commit` like every other write, so the
+   * store stays the single emit path and the hub still learns about this from
+   * `onCommit` rather than from a second broadcast.
+   */
+  async applyBoardEvents(
+    boardId: string,
+    events: WorkspaceEvent[]
+  ): Promise<StoreCommit | null> {
+    return this.applyBoardEventsIf(boardId, events, () => true);
+  }
+
+  /**
+   * `applyBoardEvents`, but the decision to commit is made inside the queue.
+   *
+   * A caller that reads board state and then calls `applyBoardEvents` is doing a
+   * check-then-act across the queue boundary, so two concurrent callers can both
+   * see the same "not set yet" and both commit. Passing the condition down moves
+   * the read and the write into the same queue entry, which is the same rule the
+   * rest of the store follows.
+   */
+  async applyBoardEventsIf(
+    boardId: string,
+    events: WorkspaceEvent[],
+    shouldCommit: (board: WorkspaceBoard) => boolean
+  ): Promise<StoreCommit | null> {
+    if (events.length === 0) {
+      return null;
+    }
+
+    return this.#enqueue(async () => {
+      const board = this.getBoard(boardId);
+      if (!board) {
+        return null;
+      }
+
+      // Board-scoped events have to address the board named here. `#commit` and
+      // the projector both read `event.boardId`, so a mismatch would emit against
+      // a board the caller did not name. Workspace-scoped events (preferences)
+      // carry no board id and are passed through.
+      if (
+        events.some((event) => "boardId" in event && event.boardId !== boardId)
+      ) {
+        throw new Error(
+          `applyBoardEvents received an event for a different board than ${boardId}`
+        );
+      }
+
+      if (!shouldCommit(board)) {
+        return null;
+      }
+
+      return this.#commit(events, boardId, null);
     });
   }
 
@@ -526,28 +706,104 @@ export class WorkspaceStore {
    * id and layout position — so the event carries the whole constructed board
    * and replay stays a pure projection rather than re-running a generator.
    */
-  #mutationToEvents(
+  /**
+   * Gives a new board its own worktree when the repo is already spoken for.
+   *
+   * Runs inside the serial queue so the create is serialized against every other
+   * mutation, and inside the board-create path so a failure aborts the whole
+   * mutation rather than producing a second event and tripping the
+   * 1-mutation-to-1-event assertion in `applyMutation`.
+   */
+  /**
+   * Removes a board's worktree, if it had one of its own.
+   *
+   * A board on the repo's primary checkout has `worktree === directory`, and
+   * removing that would delete the user's actual repository.
+   */
+  async #removeWorktree(board: WorkspaceBoard): Promise<void> {
+    const provisioner = this.#worktreeProvisioner;
+    if (!provisioner?.removeWorktree) {
+      return;
+    }
+
+    if (board.repo.worktree === board.repo.directory) {
+      return;
+    }
+
+    try {
+      await provisioner.removeWorktree(board.repo.directory, board.boardId);
+    } catch (error) {
+      logger.warn("worktree-remove-failed", {
+        boardId: board.boardId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  async #provisionWorktree(board: WorkspaceBoard): Promise<string | null> {
+    const provisioner = this.#worktreeProvisioner;
+    if (!provisioner) {
+      return null;
+    }
+
+    if (
+      !provisioner.needsWorktree(this.#snapshot.boards, board.repo.directory)
+    ) {
+      // First board for this repo: spec §2 rule 1 says it uses the primary
+      // checkout, so there is nothing to provision.
+      return null;
+    }
+
+    return await provisioner.ensureWorktree(
+      board.repo.directory,
+      board.boardId
+    );
+  }
+
+  async #mutationToEvents(
     mutation: WorkspaceMutation,
     now: number
-  ): { boardId: string | null; events: WorkspaceEvent[] } | null {
+  ): Promise<{ boardId: string | null; events: WorkspaceEvent[] } | null> {
     switch (mutation.type) {
       case "board.create": {
         const board = createBoardFromSeed(
           mutation.payload.seed,
           this.#snapshot.boards.length
         );
+
+        const worktree = await this.#provisionWorktree(board);
+        const created: WorkspaceBoard = worktree
+          ? { ...board, repo: { ...board.repo, worktree } }
+          : board;
+
         return {
-          boardId: board.boardId,
+          boardId: created.boardId,
           events: [
-            { type: "board.created", boardId: board.boardId, board, ts: now },
+            {
+              type: "board.created",
+              boardId: created.boardId,
+              board: created,
+              ts: now,
+            },
           ],
         };
       }
 
-      case "board.remove":
-        if (!this.#boardExists(mutation.payload.boardId)) {
+      case "board.remove": {
+        const removed = this.getBoard(mutation.payload.boardId);
+        if (!removed) {
           return null;
         }
+
+        // The worktree goes with the board, inside the queue and with the board's
+        // own checkout in hand. Leaving it behind meant a closed board's checkout
+        // lingered until the next boot's prune, and a new board on that repo could
+        // collide with it.
+        //
+        // Best-effort: a failure is logged and the removal still proceeds, since
+        // the board is gone either way and the boot prune catches what is left.
+        await this.#removeWorktree(removed);
+
         return {
           boardId: mutation.payload.boardId,
           events: [
@@ -558,6 +814,7 @@ export class WorkspaceStore {
             },
           ],
         };
+      }
 
       case "board.select":
         return {

@@ -8,11 +8,52 @@ import type {
   TextPartInput,
 } from "@opencode-ai/sdk/v2";
 
-function unwrap<T>(data: T | undefined, operation: string): T {
-  if (data === undefined) {
-    throw new Error(`OpenCode ${operation} returned no data`);
+/**
+ * Unwraps a generated-client response, keeping the failure legible.
+ *
+ * The client does not throw on a failed request — it resolves with
+ * `{ error: { code, path, ... } }` and `data` undefined. Throwing "returned no
+ * data" for that case is actively harmful: a connection refused to the engine was
+ * reported as a missing payload, which reads like a version or parsing problem
+ * and sent the investigation at the wrong layer entirely. Name the real error.
+ */
+function unwrap<T>(
+  result: { data?: T; error?: unknown },
+  operation: string
+): T {
+  if (result.data !== undefined) {
+    return result.data;
   }
-  return data;
+
+  if (result.error !== undefined) {
+    throw new Error(
+      `OpenCode ${operation} failed: ${describeError(result.error)}`
+    );
+  }
+
+  throw new Error(`OpenCode ${operation} returned no data and no error`);
+}
+
+/** The human-readable part of a client error, when it carries one. */
+function errorDetail(record: Record<string, unknown>): string {
+  if (typeof record.message === "string") {
+    return `: ${record.message}`;
+  }
+  if (typeof record.data === "string") {
+    return `: ${record.data}`;
+  }
+  return "";
+}
+
+function describeError(error: unknown): string {
+  if (typeof error === "object" && error !== null) {
+    const record = error as Record<string, unknown>;
+    const code = typeof record.code === "string" ? record.code : "Error";
+    const path = typeof record.path === "string" ? ` (${record.path})` : "";
+    return `${code}${path}${errorDetail(record)}`;
+  }
+
+  return String(error);
 }
 
 export interface SessionCreateInput {
@@ -95,7 +136,7 @@ export class SessionManager {
       directory: input.directory,
       workspaceID: input.workspaceID,
     });
-    return unwrap(result.data, "session.create");
+    return unwrap(result, "session.create");
   }
 
   async get(sessionID: string, directory?: string): Promise<Session> {
@@ -103,7 +144,7 @@ export class SessionManager {
       sessionID,
       directory,
     });
-    return unwrap(result.data, "session.get");
+    return unwrap(result, "session.get");
   }
 
   async list(options?: {
@@ -118,17 +159,17 @@ export class SessionManager {
       search: options?.search,
       limit: options?.limit,
     });
-    return unwrap(result.data, "session.list");
+    return unwrap(result, "session.list");
   }
 
   async delete(sessionID: string, directory?: string): Promise<boolean> {
     const result = await this.client.session.delete({ sessionID, directory });
-    return unwrap(result.data, "session.delete");
+    return unwrap(result, "session.delete");
   }
 
   async abort(sessionID: string, directory?: string): Promise<boolean> {
     const result = await this.client.session.abort({ sessionID, directory });
-    return unwrap(result.data, "session.abort");
+    return unwrap(result, "session.abort");
   }
 
   async prompt(input: SessionPromptInput) {
@@ -145,12 +186,12 @@ export class SessionManager {
       noReply: input.noReply,
       variant: input.variant,
     });
-    return unwrap(result.data, "session.prompt");
+    return unwrap(result, "session.prompt");
   }
 
   async promptAsync(input: SessionPromptAsyncInput) {
     const parts = input.parts ?? [{ type: "text" as const, text: input.text }];
-    await this.client.session.promptAsync({
+    const result = await this.client.session.promptAsync({
       sessionID: input.sessionID,
       directory: input.directory,
       workspace: input.workspace,
@@ -160,6 +201,15 @@ export class SessionManager {
       system: input.system,
       variant: input.variant,
     });
+
+    // The generated client resolves `{ error }` rather than throwing, so ignoring
+    // the result means a prompt that never reached the engine still reports
+    // `accepted: true` back through the queue response.
+    if (result.error !== undefined) {
+      throw new Error(
+        `OpenCode session.promptAsync failed: ${describeError(result.error)}`
+      );
+    }
   }
 
   async command(input: SessionCommandInput) {
@@ -172,7 +222,7 @@ export class SessionManager {
       agent: input.agent,
       model: input.model,
     });
-    return unwrap(result.data, "session.command");
+    return unwrap(result, "session.command");
   }
 
   async fork(input: SessionForkInput): Promise<Session> {
@@ -182,7 +232,7 @@ export class SessionManager {
       workspace: input.workspace,
       messageID: input.messageID,
     });
-    return unwrap(result.data, "session.fork");
+    return unwrap(result, "session.fork");
   }
 
   async status(directory?: string): Promise<Record<string, { type: string }>> {
@@ -199,7 +249,7 @@ export class SessionManager {
       limit: options?.limit,
       directory: options?.directory,
     });
-    return unwrap(result.data, "session.messages");
+    return unwrap(result, "session.messages");
   }
 
   async summarize(
@@ -249,7 +299,7 @@ export class SessionManager {
       messageID: lastUserMessageID,
     });
 
-    const revertedSession = unwrap(result.data, "session.revert");
+    const revertedSession = unwrap(result, "session.revert");
 
     return {
       session: revertedSession,
@@ -272,6 +322,6 @@ export class SessionManager {
       directory: input.directory,
       workspace: input.workspace,
     });
-    return unwrap(result.data, "session.unrevert");
+    return unwrap(result, "session.unrevert");
   }
 }

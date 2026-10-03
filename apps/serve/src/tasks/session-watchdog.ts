@@ -136,13 +136,18 @@ export class SessionWatchdog {
       elapsedMs,
     });
 
-    this.#bridge.abortSession(sessionId).catch((error) => {
-      logger.error(
-        "watchdog-abort-failed",
-        error instanceof Error ? error : undefined,
-        { sessionId }
-      );
-    });
+    // The board's own directory, not the bridge default: a worktree board's
+    // session does not exist in the directory serve was started in, so the abort
+    // would fail to reach it.
+    this.#bridge
+      .abortSession(sessionId, entry.info.directory)
+      .catch((error) => {
+        logger.error(
+          "watchdog-abort-failed",
+          error instanceof Error ? error : undefined,
+          { sessionId }
+        );
+      });
 
     this.#callbacks.onTimeout(sessionId, entry.info, message);
   }

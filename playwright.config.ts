@@ -47,14 +47,22 @@ export default defineConfig({
     },
     {
       name: "mobile",
+      // The agent lifecycle is server-side behaviour and one project covers it.
+      // Excluded here rather than skipped inside the spec so `beforeEach` never
+      // runs on a phone, where board selection is not drivable.
+      testIgnore: "**/agent.e2e.ts",
       // The phone layout is the spec §9 deliverable, and the lane list replaces
       // the canvas below `md`, so the mobile project is not redundant.
       use: { ...devices["Pixel 7"] },
     },
   ],
-  // Serve is started by `globalSetup` rather than here, because one spec has to
-  // stop and restart it mid-session and `webServer` will not let a test reach
-  // its own process.
+  // Neither serve nor the engine is started here.
+  //
+  // One spec stops and restarts serve mid-session, and `webServer` will not let a
+  // test reach its own process. The engine moved for a different reason: Playwright
+  // spawning `opencode serve` proved unreliable here, intermittently leaving the
+  // child dead while the wait ran the full timeout. `globalSetup` starts both,
+  // waits for them explicitly, and `globalTeardown` stops them.
   webServer: [
     {
       // The production build, not `next dev`.

@@ -30,60 +30,233 @@ export class EventStream {
     const key = options?.directory ?? "__default__";
 
     if (this.#dirSubscriptions.has(key)) {
-      return {
-        stop: () => {
-          this.#dirSubscriptions.delete(key);
-          if (this.#dirSubscriptions.size === 0) {
-            this.#running = false;
-          }
-        },
-      };
+      // A duplicate handle shares the owner's pump. Stopping it must not release
+      // the slot, which would orphan that pump: the next subscriber would open a
+      // second stream for the same key and both would deliver every event, and
+      // the store does not deduplicate agent events. The owner's handle is the
+      // one that stops the stream.
+      return { stop: () => undefined };
     }
 
     const abort = new AbortController();
     const sub: DirSubscription = { abort };
+
+    // Claim the slot before awaiting, so two concurrent subscribers cannot both
+    // open a stream for the same directory.
     this.#dirSubscriptions.set(key, sub);
 
-    const events = await this.client.event.subscribe({
-      directory: options?.directory,
-    });
+    // Deliberately NOT resetting `assistantMessageRoles` here.
+    //
+    // The map is global because `normalize` has no directory context, and the
+    // engine does not replay `message.updated` for a message already in flight.
+    // Clearing it on a new subscription therefore *causes* the silent content
+    // drop it looks like it prevents: another board's in-flight parts lose the
+    // only record that says whose text they are. Entries are session-scoped, so
+    // one session never legitimately appears under two directories.
 
-    this.#consume(
-      events.stream as AsyncIterable<OCEvent>,
+    let initial: Awaited<ReturnType<OpencodeClient["event"]["subscribe"]>>;
+    try {
+      initial = await this.client.event.subscribe({
+        directory: options?.directory,
+      });
+    } catch (error) {
+      // Release the claim. Leaving it behind meant every later attempt took the
+      // "already subscribed" branch and returned a handle wired to nothing — a
+      // dead subscription that looked perfectly healthy to its caller.
+      this.#release(key, sub);
+      throw error;
+    }
+
+    // Reconnection runs detached so `subscribe` still resolves once the stream
+    // is attached; awaiting the loop here would hang the caller forever.
+    this.#pump(
+      sub,
+      key,
+      initial.stream as AsyncIterable<OCEvent>,
       onEvent,
-      abort
-    ).catch(() => {
-      // stream errors are handled internally by the subscription
-    });
+      abort,
+      options?.directory
+    );
 
     return {
       stop: () => {
-        this.#dirSubscriptions.delete(key);
         abort.abort();
-        if (this.#dirSubscriptions.size === 0) {
-          this.#running = false;
-        }
+        this.#release(key, sub);
       },
     };
   }
 
+  /**
+   * Keeps an event stream open for as long as the subscription is wanted.
+   *
+   * The engine's event stream is the only way agent activity reaches us, and it
+   * ends for reasons unrelated to any run: a proxy timeout, an engine restart, a
+   * dropped socket. `#consume` used to log that and give up, after which the
+   * board silently stopped updating while the agent kept working.
+   *
+   * Retries with capped, jittered backoff. The attempt counter resets whenever a
+   * stream actually delivered something, so a long-lived subscription that blips
+   * occasionally reconnects indefinitely, while one that cannot stay open at all
+   * is abandoned after `MAX_STREAM_RECONNECTS`.
+   */
+  async #pump(
+    sub: DirSubscription,
+    key: string,
+    firstStream: AsyncIterable<OCEvent>,
+    onEvent: EventCallback,
+    abort: AbortController,
+    directory: string | undefined
+  ): Promise<void> {
+    let stream: AsyncIterable<OCEvent> | null = firstStream;
+    let attempts = 0;
+
+    while (stream !== null) {
+      let delivered = 0;
+
+      try {
+        delivered = await this.#consume(stream, onEvent, abort);
+      } catch (error) {
+        if (!this.#running || abort.signal.aborted) {
+          this.#release(key, sub);
+          return;
+        }
+        console.error("[oc-adapter] event stream error:", error);
+      }
+
+      if (!this.#running || abort.signal.aborted) {
+        this.#release(key, sub);
+        return;
+      }
+
+      // A stream that produced events was healthy up to the moment it ended, so
+      // whatever follows starts fresh.
+      attempts = delivered > 0 ? 0 : attempts + 1;
+
+      if (attempts > MAX_STREAM_RECONNECTS) {
+        console.error(
+          "[oc-adapter] abandoning the event stream after repeated failures:",
+          key
+        );
+        this.#release(key, sub);
+        return;
+      }
+
+      await this.#backoff(Math.max(attempts, 1), abort);
+
+      if (!this.#running || abort.signal.aborted) {
+        this.#release(key, sub);
+        return;
+      }
+
+      stream = await this.#reopen(directory, abort);
+    }
+
+    // `#reopen` returned null: the engine will not give us a stream, so the slot
+    // must be released or every later subscriber gets a handle to a dead pump.
+    this.#release(key, sub);
+  }
+
+  /**
+   * Drains one stream, returning how many events it delivered.
+   *
+   * Iterates manually rather than with `for await` so a pending `next()` can be
+   * abandoned on abort: `for await` only checks between iterations, so a stream
+   * that never settles again would hang the pump — and its slot — forever.
+   */
   async #consume(
     stream: AsyncIterable<OCEvent>,
     onEvent: EventCallback,
     abort: AbortController
-  ): Promise<void> {
+  ): Promise<number> {
+    const iterator = stream[Symbol.asyncIterator]();
+    let delivered = 0;
+
     try {
-      for await (const event of stream) {
+      for (;;) {
         if (!this.#running || abort.signal.aborted) {
-          break;
+          return delivered;
         }
-        onEvent(event);
+
+        const next = await raceAbort(iterator.next(), abort.signal);
+        if (next === ABORTED || next.done) {
+          return delivered;
+        }
+
+        onEvent(next.value as OCEvent);
+        delivered += 1;
       }
-    } catch (error) {
-      if (this.#running && !abort.signal.aborted) {
-        console.error("[oc-adapter] event stream error:", error);
-      }
+    } finally {
+      // Closes the engine-side stream rather than leaving it open until the
+      // engine happens to notice.
+      await iterator.return?.(undefined).catch(() => undefined);
     }
+  }
+
+  /** Reopens the stream, or returns null when it will not open. */
+  async #reopen(
+    directory: string | undefined,
+    abort: AbortController
+  ): Promise<AsyncIterable<OCEvent> | null> {
+    try {
+      const reopened = await this.client.event.subscribe({ directory });
+      return reopened.stream as AsyncIterable<OCEvent>;
+    } catch (error) {
+      if (!this.#running || abort.signal.aborted) {
+        return null;
+      }
+      console.error("[oc-adapter] event resubscribe failed:", error);
+      return null;
+    }
+  }
+
+  /**
+   * Drops a subscription's claim.
+   *
+   * Every exit from the pump has to do this. Missing one leaves a key behind, and
+   * the next `subscribe` for that directory takes the "already subscribed" branch
+   * and hands its caller a handle wired to a pump that no longer exists.
+   */
+  #release(key: string, sub: DirSubscription): void {
+    // Only if this subscription still owns the slot.
+    //
+    // Deleting by key alone let a superseded pump wipe its successor's claim: stop
+    // one directory, subscribe again before the old pump reached its next
+    // checkpoint, and the old pump's release deletes the *new* slot. The next
+    // subscriber then opens a third stream, so two pumps run for one key and the
+    // global `#running` flag can be flipped off while one is still live.
+    if (this.#dirSubscriptions.get(key) !== sub) {
+      return;
+    }
+
+    this.#dirSubscriptions.delete(key);
+    if (this.#dirSubscriptions.size === 0) {
+      this.#running = false;
+    }
+  }
+
+  /** Sleeps, resolving early if the subscription is stopped while waiting. */
+  async #backoff(attempt: number, abort: AbortController): Promise<void> {
+    const ceiling = Math.min(
+      STREAM_RECONNECT_BASE_MS * 2 ** (attempt - 1),
+      STREAM_RECONNECT_MAX_MS
+    );
+    const delayMs = Math.round(ceiling * Math.random());
+
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        abort.signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, delayMs);
+
+      // Removed on the normal path too. `{ once: true }` alone leaves a listener
+      // behind on every reconnect, and they all run when `abort()` finally fires.
+      function onAbort(): void {
+        clearTimeout(timer);
+        resolve();
+      }
+
+      abort.signal.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   stop() {
@@ -94,6 +267,64 @@ export class EventStream {
     this.#dirSubscriptions.clear();
   }
 }
+
+/** Sentinel for "the subscription was aborted mid-read". */
+const ABORTED = Symbol("aborted");
+
+/**
+ * Resolves with the iterator result, or `ABORTED` if the signal fires first.
+ *
+ * Without this a `next()` that never settles cannot be interrupted, so stopping
+ * the subscription would leave the pump and its slot alive indefinitely.
+ */
+function raceAbort<T>(
+  pending: Promise<T>,
+  signal: AbortSignal
+): Promise<T | typeof ABORTED> {
+  if (signal.aborted) {
+    return Promise.resolve(ABORTED);
+  }
+
+  return new Promise<T | typeof ABORTED>((resolve, reject) => {
+    // First settlement wins, and only one is ever made.
+    //
+    // The earlier version resolved with `Promise.reject(error)` when the read
+    // failed after an abort had already settled the race. Settling an already-
+    // settled promise is a no-op, so the rejected thenable it created was never
+    // observed and surfaced as an unhandled rejection.
+    let settled = false;
+    const settle = (apply: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      apply();
+    };
+
+    const onAbort = (): void => settle(() => resolve(ABORTED));
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    pending.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        settle(() => resolve(value));
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        // Attaching this handler is also what keeps a late rejection from the
+        // underlying iterator from becoming unhandled when the race was aborted.
+        settle(() => reject(error));
+      }
+    );
+  });
+}
+
+/** Backoff bounds for re-opening a dropped event stream. */
+const STREAM_RECONNECT_BASE_MS = 250;
+const STREAM_RECONNECT_MAX_MS = 10_000;
+
+/** Consecutive failed reopens before a stream is abandoned. */
+const MAX_STREAM_RECONNECTS = 10;
 
 export type NormalizedActivity =
   | "writing"
@@ -221,7 +452,29 @@ function extractFileDiff(
   return undefined;
 }
 
+/**
+ * Which messages the engine has said are assistant-authored, per session.
+ *
+ * Part events carry no role, so the normalizer has to remember what
+ * `message.updated` said. The map is global because `normalize` has no directory
+ * context, and entries are session-scoped, so one session never legitimately
+ * appears under two directories.
+ *
+ * Recorded roles are deliberately not cleared when a subscription starts. The
+ * engine does not replay `message.updated` for a message already in flight, so
+ * forgetting on reconnect would *cause* the silent content drop it looks like it
+ * prevents: part events would miss and return a bare `{ type, sessionID }`, with
+ * no error and nothing to distinguish them from the `default:` arm of
+ * `normalizeEvent`. `resetMessageTracking` exists for tests and for a deliberate
+ * full reset, not for routine subscription.
+ *
+ * It grew without bound, one entry per assistant message for the life of the
+ * process. Capped per session now: the oldest entries are dropped, which costs a
+ * little classification accuracy on a very long session rather than a leak.
+ */
 const assistantMessageRoles = new Map<string, Set<string>>();
+
+const MAX_TRACKED_MESSAGES_PER_SESSION = 512;
 
 function isAssistantMessage(sessionID: string, messageID: string): boolean {
   const sessionRoles = assistantMessageRoles.get(sessionID);
@@ -234,7 +487,28 @@ function recordAssistantMessage(sessionID: string, messageID: string) {
     sessionRoles = new Set();
     assistantMessageRoles.set(sessionID, sessionRoles);
   }
+
+  if (sessionRoles.size >= MAX_TRACKED_MESSAGES_PER_SESSION) {
+    const oldest = sessionRoles.values().next();
+    if (!oldest.done) {
+      sessionRoles.delete(oldest.value);
+    }
+  }
+
   sessionRoles.add(messageID);
+}
+
+/**
+ * Forgets remembered assistant messages.
+ *
+ * Deliberately NOT called when a subscription starts: the map is global because
+ * `normalize` has no directory context, and the engine does not replay
+ * `message.updated` for a message already in flight, so clearing on subscribe would
+ * discard the only record classifying another board's streamed content. Used by
+ * tests, which would otherwise leak state between cases.
+ */
+export function resetMessageTracking(): void {
+  assistantMessageRoles.clear();
 }
 
 function normalizeMessagePartUpdated(

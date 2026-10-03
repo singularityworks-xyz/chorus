@@ -71,6 +71,7 @@ describe("WebSocket handler", () => {
       hub,
       ticketOptions: { now: Date.now, store: emptyTicketStore() },
       token: "test-token",
+      workspaceStore: store,
     });
 
     expect(handler).toBeDefined();
@@ -87,6 +88,7 @@ describe("WebSocket handler", () => {
       hub,
       ticketOptions: { now: Date.now, store: emptyTicketStore() },
       token: "test-token",
+      workspaceStore: store,
     });
 
     expect(hub.clientCount()).toBe(0);

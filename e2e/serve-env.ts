@@ -9,6 +9,9 @@
  */
 
 export const SERVE_PORT = Number(process.env.CHORUS_E2E_SERVE_PORT ?? 2199);
+export const OPENCODE_PORT = Number(
+  process.env.CHORUS_E2E_OPENCODE_PORT ?? 4199
+);
 export const WEB_PORT = Number(process.env.CHORUS_E2E_WEB_PORT ?? 3199);
 export const TOKEN =
   "e2e00000000000000000000000000000000000000000000000000000000000000";
@@ -31,5 +34,16 @@ export const SERVE_DATA_DIR =
 
 export const SERVE_LOG_FILE = `${SERVE_DATA_DIR}/serve.log`;
 export const SERVE_PID_FILE = `${SERVE_DATA_DIR}/serve.pid`;
+export const ENGINE_LOG_FILE = `${SERVE_DATA_DIR}/opencode.log`;
+export const ENGINE_PID_FILE = `${SERVE_DATA_DIR}/opencode.pid`;
+
+/**
+ * A throwaway git repository for board-creating tests.
+ *
+ * Boards bind to a real repository and the engine wants a working tree, so the
+ * agent specs point at this rather than at the repo they are running from.
+ */
+export const E2E_REPO_DIR =
+  process.env.CHORUS_E2E_REPO_DIR ?? "/tmp/chorus-e2e-repo";
 
 export { repoRoot };

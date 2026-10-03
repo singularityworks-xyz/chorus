@@ -2,6 +2,7 @@ import { access, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createLogger } from "@chorus/logger";
+import { sdkVersion } from "@chorus/oc-adapter";
 import { cors } from "@elysiajs/cors";
 import { Elysia } from "elysia";
 import { LoginRateLimiter } from "./auth/brute-force";
@@ -14,8 +15,10 @@ import { MissingTokenError, resolveToken } from "./auth/token";
 import { OpenCodeBridge } from "./bridge/opencode/bridge";
 import { loadConfig } from "./config";
 import { OpenCodeProcessManager } from "./opencode/process-manager";
+import { assertEngineLockstep } from "./paths/engine-lockstep";
 import { NativeFolderPicker } from "./projects/folder-picker";
 import { ProjectService } from "./projects/service";
+import { WorktreeManager } from "./projects/worktree-manager";
 import { createHttpRoutes } from "./routes";
 import { createProjectRoutes } from "./routes/projects";
 import { voiceRoutes } from "./routes/voice";
@@ -79,11 +82,35 @@ const corsOptions = corsOptionsFor(corsPolicy);
 
 const processManager = new OpenCodeProcessManager({
   directory: config.opencodeDirectory,
+  port: config.opencodePort,
 });
 
 if (config.autoStartOpencode) {
   await processManager.start();
 }
+
+// SDK ↔ binary lockstep (pre-implementation decision #5).
+//
+// The adapter re-exports SDK event types, so an SDK that disagrees with the
+// binary it is talking to produces type-level fiction and silently mis-normalized
+// events — the failure mode recorded as known drift between 1.3.15 and 1.18.29.
+// A boot-time mismatch is unrecoverable and must be loud rather than discovered
+// later as missing cards.
+//
+// The binary side is what the engine reports, not what is on PATH: serve adopts
+// an already-running engine when it finds one, and that one may not be the
+// binary we would have spawned.
+// Checked for an adopted engine too, not only one we spawned. An engine reached
+// over `OPENCODE_BASE_URL` is exactly the case where the SDK and binary are most
+// likely to have been upgraded independently, and `assertEngineLockstep` treats a
+// version the engine does not report as a warning rather than a refusal.
+//
+// Probed without spawning when auto-start is off: serve must not start an engine
+// the operator did not ask for, but it still needs to know what is serving.
+const engineVersion = config.autoStartOpencode
+  ? processManager.observedVersion
+  : await processManager.probeVersion();
+assertEngineLockstep(sdkVersion(), engineVersion);
 
 const bridge = new OpenCodeBridge(
   config.opencodeBaseUrl,
@@ -114,10 +141,22 @@ function legacySnapshotPaths(): string[] {
   ];
 }
 
+/**
+ * One manager for the process, injected here and reused for the boot prune.
+ *
+ * It has to be constructed and passed in: the store takes the provisioner by
+ * injection, so a store built without one never creates a worktree at all and
+ * every board silently shares the repo's primary checkout. Leaving this out is
+ * how worktree-per-board shipped inert the first time — the tests that cover it
+ * all build their own store, so none of them noticed.
+ */
+const worktrees = new WorktreeManager();
+
 const workspaceStore = new WorkspaceStore(config.dataDir, {
   dbSizeCapMb: config.dbSizeCapMb,
   retentionDays: config.retentionDays,
   snapshotInterval: config.snapshotInterval,
+  worktreeProvisioner: worktrees,
 });
 
 if (config.enableLegacyWorkspaceImport) {
@@ -137,6 +176,44 @@ logger.info("workspace-ready", {
   database: workspaceStore.databasePath,
   headSeq: workspaceStore.headSeq(),
 });
+
+/**
+ * Drops worktrees no live board claims (plan P6 task 1).
+ *
+ * Runs after the store has loaded and before anything accepts a connection, so a
+ * crashed serve does not leave its checkouts registered in the repo: `git
+ * worktree list` would grow without bound across restarts, and a new board could
+ * collide with a stale directory. Only entries under `.chorus-worktrees` whose
+ * name is not a live board id are removed.
+ *
+ * Not conditional on spawning an engine. Pruning is local git state, and gating it
+ * on auto-start meant a serve pointed at a remote engine never cleaned up, so
+ * stale worktrees accumulated and a new board could collide with one.
+ */
+{
+  const boards = workspaceStore.getSnapshot().boards;
+  const liveBoardIds = new Set(boards.map((board) => board.boardId));
+  const repositories = new Set(boards.map((board) => board.repo.directory));
+
+  for (const directory of repositories) {
+    try {
+      const removed = await worktrees.pruneOrphans(directory, liveBoardIds);
+      if (removed.length > 0) {
+        logger.info("worktree-orphans-pruned", {
+          count: removed.length,
+          repository: directory,
+        });
+      }
+    } catch (error) {
+      // A repository that cannot be inspected (moved, deleted, not a git repo)
+      // must not stop serve from booting.
+      logger.warn("worktree-prune-failed", {
+        error: error instanceof Error ? error.message : String(error),
+        repository: directory,
+      });
+    }
+  }
+}
 
 /**
  * The one downstream emit path (spec §3).
@@ -239,7 +316,13 @@ bridge.subscribe((event) => {
     ...(event.text && { textPreview: event.text.slice(0, 80) }),
   });
 
-  if (!(event.sessionID && event.activity)) {
+  // A streamed delta carries no `activity` -- `normalizeMessagePartDelta` sets
+  // `delta`, `messageID` and `partID` only -- so gating on `activity` alone
+  // discarded every token of streamed model output before it could become a
+  // `step.delta_appended`. Accept a delta as sufficient to reach the store; it
+  // converts to a step event there, and the step projector is what decides
+  // whether it has anywhere to land.
+  if (!(event.sessionID && (event.activity || event.delta))) {
     return;
   }
 
@@ -372,6 +455,7 @@ const securedApp = new Elysia()
       bridge,
       boardTasks,
       hub,
+      workspaceStore,
       ticketOptions,
       token,
     })
@@ -448,7 +532,9 @@ async function gracefulShutdown(signal: string): Promise<void> {
 }
 
 function forceKillOpencode(): void {
-  processManager.forceKill();
+  // Deliberately not awaited: this is the last-resort path the shutdown timeout
+  // timer calls, and the process is about to exit regardless.
+  processManager.forceKill().catch(() => undefined);
 }
 
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));

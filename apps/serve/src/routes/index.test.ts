@@ -46,18 +46,34 @@ function makeMockBoardTasks() {
 }
 
 describe("HTTP routes", () => {
+  /** The worktree a seeded board owns, so tests can prove it is the one used. */
+  const BOARD_WORKTREE = "/repo/.chorus-worktrees/board-1";
+
   function makeApp() {
     const bridge = makeMockBridge();
     const boardTasks = makeMockBoardTasks();
+    const updateBoardSession = mock(async () => undefined);
     const app = new Elysia().use(
       createHttpRoutes(
         bridge as never,
         boardTasks as never,
-        // The store backs the registered-root check on the git/snapshot routes.
-        { getSnapshot: () => ({ boards: [] }) } as never
+        // The store backs the registered-root check on the git/snapshot routes,
+        // and resolves the checkout a follow-up command runs against. A session it
+        // cannot place is refused rather than silently defaulted.
+        {
+          getBoardBySessionId: (sessionID: string) =>
+            sessionID === "sess-1" || sessionID === "sess-123"
+              ? {
+                  boardId: "board-1",
+                  repo: { directory: "/repo", worktree: BOARD_WORKTREE },
+                }
+              : undefined,
+          getSnapshot: () => ({ boards: [] }),
+          updateBoardSession,
+        } as never
       )
     );
-    return { app, bridge, boardTasks };
+    return { app, bridge, boardTasks, updateBoardSession };
   }
 
   describe("GET /health", () => {
@@ -199,6 +215,7 @@ describe("HTTP routes", () => {
       });
 
       expect(bridge.replyPermission).toHaveBeenCalledWith({
+        directory: BOARD_WORKTREE,
         requestID: "perm-1",
         sessionID: "sess-1",
         reply: "once",
@@ -218,6 +235,7 @@ describe("HTTP routes", () => {
       );
 
       expect(bridge.replyPermission).toHaveBeenCalledWith({
+        directory: BOARD_WORKTREE,
         requestID: "perm-1",
         sessionID: "sess-1",
         reply: "once",
@@ -264,6 +282,7 @@ describe("HTTP routes", () => {
 
       expect(bridge.replyPermission).toHaveBeenCalledWith({
         requestID: "perm-1",
+        directory: BOARD_WORKTREE,
         sessionID: "sess-1",
         reply: "reject",
         message: undefined,
@@ -292,7 +311,30 @@ describe("HTTP routes", () => {
         timestamp: expect.any(Number),
       });
 
-      expect(bridge.abortSession).toHaveBeenCalledWith("sess-1");
+      expect(bridge.abortSession).toHaveBeenCalledWith(
+        "sess-1",
+        BOARD_WORKTREE
+      );
+    });
+
+    test("refuses a session no board owns", async () => {
+      // The directory for a follow-up command comes from the board, so a session
+      // the server cannot place has no safe directory. Falling back to the one
+      // serve was started in is how a command lands in the wrong checkout.
+      const { app, bridge } = makeApp();
+
+      const res = await app.handle(
+        new Request("http://localhost/tasks/sess-unknown/approve", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ requestID: "perm-1" }),
+        })
+      );
+
+      // A lookup miss, not a server fault. Letting it default to 500 hid the
+      // actionable message from anything keying on status.
+      expect(res.status).toBe(404);
+      expect(bridge.replyPermission).not.toHaveBeenCalled();
     });
 
     test("rejects missing sessionID param", async () => {
@@ -332,13 +374,14 @@ describe("HTTP routes", () => {
       });
 
       expect(bridge.promptSession).toHaveBeenCalledWith({
+        directory: BOARD_WORKTREE,
         sessionID: "sess-1",
         text: "Redirect instruction: change approach",
       });
     });
 
     test("hard redirect forks the session", async () => {
-      const { app, bridge } = makeApp();
+      const { app, bridge, updateBoardSession } = makeApp();
 
       const res = await app.handle(
         new Request("http://localhost/tasks/sess-1/redirect", {
@@ -359,12 +402,21 @@ describe("HTTP routes", () => {
       });
 
       expect(bridge.forkSession).toHaveBeenCalledWith({
+        directory: BOARD_WORKTREE,
         sessionID: "sess-1",
       });
 
       expect(bridge.promptSession).toHaveBeenCalledWith({
+        directory: BOARD_WORKTREE,
         sessionID: "sess-forked",
         text: "start fresh",
+      });
+
+      // The fork becomes the board's session, or every later command for it fails
+      // as unknown and its agent events have no board.
+      expect(updateBoardSession).toHaveBeenCalledWith("board-1", {
+        sessionId: "sess-forked",
+        state: "active",
       });
     });
 
