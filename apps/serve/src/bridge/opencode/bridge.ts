@@ -138,8 +138,8 @@ export class OpenCodeBridge {
     return this.adapter.sessions.promptAsync(input);
   }
 
-  abortSession(sessionID: string) {
-    return this.adapter.sessions.abort(sessionID);
+  abortSession(sessionID: string, directory?: string) {
+    return this.adapter.sessions.abort(sessionID, directory);
   }
 
   replyPermission(input: PermissionHandlerInput) {
@@ -154,21 +154,22 @@ export class OpenCodeBridge {
     return this.adapter.questions.reply(input);
   }
 
-  rejectQuestion(requestID: string) {
-    return this.adapter.questions.reject(requestID);
+  rejectQuestion(requestID: string, directory?: string) {
+    return this.adapter.questions.reject(requestID, directory);
   }
 
   forkSession(input: SessionForkInput) {
     return this.adapter.sessions.fork(input);
   }
 
-  revertSession(sessionID: string) {
+  revertSession(sessionID: string, directory?: string) {
+    const target = directory ?? this.#defaultDirectory;
     this.#logger.debug("Reverting session", {
       sessionID,
-      directory: this.#defaultDirectory,
+      directory: target,
     });
     return this.adapter.sessions
-      .revert({ sessionID, directory: this.#defaultDirectory })
+      .revert({ sessionID, directory: target })
       .then((result) => {
         this.#logger.info("Session reverted", {
           sessionID,
@@ -187,7 +188,7 @@ export class OpenCodeBridge {
           error instanceof Error ? error : undefined,
           {
             sessionID,
-            directory: this.#defaultDirectory,
+            directory: target,
             errorMessage,
             errorStack,
           }
@@ -196,13 +197,14 @@ export class OpenCodeBridge {
       });
   }
 
-  unrevertSession(sessionID: string) {
+  unrevertSession(sessionID: string, directory?: string) {
+    const target = directory ?? this.#defaultDirectory;
     this.#logger.debug("Unreverting session", {
       sessionID,
-      directory: this.#defaultDirectory,
+      directory: target,
     });
     return this.adapter.sessions
-      .unrevert({ sessionID, directory: this.#defaultDirectory })
+      .unrevert({ sessionID, directory: target })
       .then((result) => {
         this.#logger.info("Session unreverted", { sessionID });
         return result;

@@ -84,7 +84,9 @@ describe("SessionWatchdog", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 40));
 
-    expect(bridge.abortSession).toHaveBeenCalledWith("sess-1");
+    // The board's own directory is passed, not the bridge default: a worktree
+    // board's session does not exist in the directory serve was started in.
+    expect(bridge.abortSession).toHaveBeenCalledWith("sess-1", REPO.directory);
     watchdog.dispose();
 
     await store.close();
@@ -167,7 +169,7 @@ describe("SessionWatchdog", () => {
 
     // Once activity stops, it does fire.
     await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(bridge.abortSession).toHaveBeenCalledWith("sess-1");
+    expect(bridge.abortSession).toHaveBeenCalledWith("sess-1", REPO.directory);
 
     watchdog.dispose();
 

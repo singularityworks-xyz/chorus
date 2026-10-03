@@ -13,6 +13,11 @@ export interface QuestionReplyInput {
     optionIndices?: number[];
     customAnswer?: string;
   }>;
+  /**
+   * The board's checkout, so the engine routes the reply to the session that
+   * raised it. A board's worktree is not the directory serve was started in.
+   */
+  directory?: string;
   requestID: string;
 }
 
@@ -43,10 +48,11 @@ export class QuestionHandler {
     await this.client.question.reply({
       requestID: input.requestID,
       answers: answers as never,
+      directory: input.directory,
     });
   }
 
-  async reject(requestID: string): Promise<void> {
-    await this.client.question.reject({ requestID });
+  async reject(requestID: string, directory?: string): Promise<void> {
+    await this.client.question.reject({ requestID, directory });
   }
 }

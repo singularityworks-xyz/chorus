@@ -451,6 +451,7 @@ const securedApp = new Elysia()
       bridge,
       boardTasks,
       hub,
+      workspaceStore,
       ticketOptions,
       token,
     })

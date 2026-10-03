@@ -7,6 +7,8 @@ import { verifyRequestCredential } from "../auth/guard";
 import type { TicketOptions } from "../auth/ticket";
 import type { OpenCodeBridge } from "../bridge/opencode/bridge";
 import type { BoardTaskService } from "../tasks/board-task-service";
+import { resolveSessionDirectory } from "../tasks/session-directory";
+import type { WorkspaceStore } from "../workspace/store";
 import type { HubSocket, WorkspaceHub } from "./hub";
 import type { WsMessage } from "./types";
 import {
@@ -127,10 +129,19 @@ export interface WsHandlerOptions {
   /** Cookie/ticket verification for the upgrade (spec §6.2). */
   ticketOptions: TicketOptions;
   token: string;
+  /**
+   * Read-only access to boards, to resolve the checkout a session belongs to.
+   *
+   * Command frames carry a session id, not a board, and the engine needs the
+   * board's directory or the command lands in whatever directory serve was
+   * started in.
+   */
+  workspaceStore: WorkspaceStore;
 }
 
 export function createWsHandler(options: WsHandlerOptions) {
-  const { bridge, boardTasks, hub, ticketOptions, token } = options;
+  const { bridge, boardTasks, hub, workspaceStore, ticketOptions, token } =
+    options;
 
   /**
    * Authenticates the upgrade.
@@ -210,6 +221,7 @@ export function createWsHandler(options: WsHandlerOptions) {
         message,
         bridge,
         boardTasks,
+        workspaceStore,
         hub.clientCount(),
         hub.reply.bind(hub)
       ).catch((error: unknown) => {
@@ -253,6 +265,7 @@ async function handleCommand(
   message: { type: string; payload?: unknown },
   bridge: OpenCodeBridge,
   boardTasks: BoardTaskService,
+  workspaceStore: WorkspaceStore,
   hubClientCount = 0,
   reply: (socket: HubSocket, payload: unknown) => boolean = (
     socket,
@@ -272,6 +285,19 @@ async function handleCommand(
     // A false result means the client disconnected before its reply arrived.
     // Nothing to do, and nothing to pretend about.
     reply(ws as HubSocket, payload);
+  };
+
+  /** The checkout a session belongs to; throws for a session we cannot place. */
+  const directoryFor = (sessionID: string): string =>
+    resolveSessionDirectory(workspaceStore, sessionID);
+
+  /** Best-effort variant, for frames whose session id predates the board model. */
+  const tryDirectoryFor = (sessionID: string): string | undefined => {
+    try {
+      return directoryFor(sessionID);
+    } catch {
+      return undefined;
+    }
   };
 
   const msg = message as WsMessage;
@@ -305,6 +331,7 @@ async function handleCommand(
       const payload = validate(WS_MESSAGE_TYPE.TASK_APPROVE, msg.payload);
 
       const result = await bridge.replyPermission({
+        directory: directoryFor(payload.sessionID),
         requestID: payload.requestID,
         sessionID: payload.sessionID,
         reply: "once",
@@ -326,6 +353,7 @@ async function handleCommand(
       const payload = validate(WS_MESSAGE_TYPE.TASK_REJECT, msg.payload);
 
       const result = await bridge.replyPermission({
+        directory: directoryFor(payload.sessionID),
         requestID: payload.requestID,
         sessionID: payload.sessionID,
         reply: "reject",
@@ -346,7 +374,10 @@ async function handleCommand(
     case WS_MESSAGE_TYPE.TASK_ABORT: {
       const payload = validate(WS_MESSAGE_TYPE.TASK_ABORT, msg.payload);
 
-      const result = await bridge.abortSession(payload.sessionID);
+      const result = await bridge.abortSession(
+        payload.sessionID,
+        directoryFor(payload.sessionID)
+      );
 
       wsSend({
         type: WS_RESPONSE_TYPE.TASK_ABORTED,
@@ -364,6 +395,7 @@ async function handleCommand(
 
       if (payload.mode === "soft") {
         await bridge.promptSession({
+          directory: directoryFor(payload.sessionID),
           sessionID: payload.sessionID,
           text: `Redirect instruction: ${payload.text}`,
         });
@@ -379,11 +411,15 @@ async function handleCommand(
         break;
       }
 
+      const directory = directoryFor(payload.sessionID);
+
       const forked = await bridge.forkSession({
         sessionID: payload.sessionID,
+        directory,
       });
 
       await bridge.promptSession({
+        directory,
         sessionID: forked.id,
         text: payload.text,
       });
@@ -406,6 +442,7 @@ async function handleCommand(
       );
 
       await bridge.replyQuestion({
+        directory: directoryFor(payload.sessionID),
         requestID: payload.requestID,
         answers: payload.answers,
       });
@@ -427,7 +464,10 @@ async function handleCommand(
         msg.payload
       );
 
-      await bridge.rejectQuestion(payload.requestID);
+      await bridge.rejectQuestion(
+        payload.requestID,
+        directoryFor(payload.sessionID)
+      );
 
       wsSend({
         type: WS_RESPONSE_TYPE.TASK_QUESTION_REJECTED,
@@ -476,6 +516,10 @@ async function handleCommand(
 
       try {
         await bridge.promptSession({
+          // This frame carries a session id from a namespace older than the task
+          // routes, so resolution is attempted and a miss falls back rather than
+          // rejecting a legacy client.
+          directory: tryDirectoryFor(payload.sessionId),
           sessionID: payload.sessionId,
           text: `[Mobile prompt] ${payload.text}`,
         });

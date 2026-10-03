@@ -281,6 +281,23 @@ export class WorkspaceStore {
     return this.#snapshot.boards.find((board) => board.boardId === boardId);
   }
 
+  /**
+   * The board a session belongs to, by the session id the engine issued.
+   *
+   * Reverse of the lookup `applyAgentEvent` does. Used to resolve the working
+   * directory for follow-up commands — an approval reply, an abort, a redirect —
+   * which otherwise fall back to the directory serve was started in rather than
+   * the board's own checkout.
+   */
+  getBoardBySessionId(sessionId: string): WorkspaceBoard | undefined {
+    if (!sessionId) {
+      return undefined;
+    }
+    return this.#snapshot.boards.find(
+      (board) => board.session.sessionId === sessionId
+    );
+  }
+
   headSeq(): number {
     return this.#db.headSeq();
   }
