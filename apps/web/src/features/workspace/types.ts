@@ -50,6 +50,8 @@ export interface WorkspaceContextValue {
   createBoardFromHistory: (entry: WorkspaceHistoryEntry) => void;
   createBoardFromProject: (project: RepoProject) => void;
   dismissComposerHint: () => void;
+  /** Focus a board on this device without changing the shared board selection. */
+  focusBoardLocally: (boardId: string) => void;
   /**
    * Whether workspace state is loaded yet.
    *

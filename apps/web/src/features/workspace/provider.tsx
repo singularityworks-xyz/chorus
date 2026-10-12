@@ -72,8 +72,11 @@ export function ChorusWorkspaceProvider({
     pendingDrags,
     preferences,
     previousWorkspaces,
-    selectedBoardId,
+    selectedBoardId: persistedSelectedBoardId,
   } = state;
+
+  const [localBoardFocus, setLocalBoardFocus] = useState<string | null>(null);
+  const selectedBoardId = localBoardFocus ?? persistedSelectedBoardId;
 
   const [boardLayoutVersion, setBoardLayoutVersion] = useState(0);
   const [isOpeningFolder, setIsOpeningFolder] = useState(false);
@@ -93,6 +96,15 @@ export function ChorusWorkspaceProvider({
   const selectedBoard = boards.find(
     (board) => board.boardId === selectedBoardId
   );
+
+  useEffect(() => {
+    if (
+      localBoardFocus &&
+      !boards.some((board) => board.boardId === localBoardFocus)
+    ) {
+      setLocalBoardFocus(null);
+    }
+  }, [boards, localBoardFocus]);
 
   // ── sync ──────────────────────────────────────────────────────────────────
 
@@ -347,6 +359,7 @@ export function ChorusWorkspaceProvider({
 
   const selectBoard = useCallback(
     (boardId: string) => {
+      setLocalBoardFocus(null);
       dispatch({ boardId, type: "optimistic/drag-settle" });
       mutateWorkspace(
         createWorkspaceMutation(
@@ -363,6 +376,10 @@ export function ChorusWorkspaceProvider({
     },
     [mutateWorkspace]
   );
+
+  const focusBoardLocally = useCallback((boardId: string) => {
+    setLocalBoardFocus(boardId);
+  }, []);
 
   const clearSelection = useCallback(() => {
     mutateWorkspace(
@@ -683,6 +700,7 @@ export function ChorusWorkspaceProvider({
     createBoardFromHistory,
     createBoardFromProject: createBoardFromRecentProject,
     dismissComposerHint,
+    focusBoardLocally,
     isOpeningFolder,
     isQueueingPrompt,
     kanbanHistory: {

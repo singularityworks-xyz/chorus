@@ -1,6 +1,8 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useState } from "react";
+import { safeNotificationReturnTo } from "@/features/notifications/browser";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 
 /**
@@ -24,6 +26,16 @@ import { useWorkspace } from "@/features/workspace/workspace-context";
  */
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const { authExpired } = useWorkspace();
+  const [returnTo, setReturnTo] = useState("/");
+
+  useEffect(() => {
+    setReturnTo(
+      safeNotificationReturnTo(
+        window.location.pathname + window.location.search,
+        window.location.origin
+      )
+    );
+  }, []);
 
   if (!authExpired) {
     return children;
@@ -41,7 +53,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
         </div>
         <Link
           className="block w-full rounded bg-white px-3 py-2 text-center font-medium text-black text-sm"
-          href="/login"
+          href={`/login?returnTo=${encodeURIComponent(returnTo)}`}
         >
           Sign in
         </Link>

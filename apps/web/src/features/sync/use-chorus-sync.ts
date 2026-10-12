@@ -12,6 +12,7 @@ import {
   resolveSocketUrl,
 } from "./chorus-sync";
 import { eventsAfterSnapshot } from "./protocol";
+import { prepareAuthenticatedSocketUrl } from "./socket-credentials";
 
 /**
  * The one socket owner (plan P5 task 1).
@@ -131,6 +132,10 @@ export function useChorusSync(
             : ReturnType<
                 ConstructorParameters<typeof ChorusSync>[0]["createSocket"]
               >,
+        prepareSocketUrl: (target) =>
+          prepareAuthenticatedSocketUrl(target, {
+            pageOrigin: window.location.origin,
+          }),
         url,
         urlIsExplicit,
       },
@@ -196,9 +201,7 @@ export function useChorusSync(
       sync.reconnectNow();
     };
     const onOffline = () => {
-      // Nothing to do but let the close handler run; recorded so the UI can say
-      // so rather than showing a silent stall.
-      setState((current) => ({ ...current, lastError: "offline" }));
+      sync.networkOffline();
     };
 
     document.addEventListener("visibilitychange", onVisible);

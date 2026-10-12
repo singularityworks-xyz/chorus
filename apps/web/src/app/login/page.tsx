@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { safeNotificationReturnTo } from "@/features/notifications/browser";
 
 /**
  * Token entry (plan P5 task 5).
@@ -38,7 +39,12 @@ export default function LoginPage() {
 
       if (response.ok) {
         // `replace` so Back does not return to a route that will 401 again.
-        router.replace("/");
+        const requested = new URLSearchParams(window.location.search).get(
+          "returnTo"
+        );
+        router.replace(
+          safeNotificationReturnTo(requested, window.location.origin)
+        );
         router.refresh();
         return;
       }

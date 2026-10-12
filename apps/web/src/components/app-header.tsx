@@ -7,25 +7,18 @@ import {
   opencodeConfiguredProviderCatalogSchema,
   opencodeCredentialCatalogSchema,
   opencodeProviderCatalogSchema,
+  type WorkspaceBoard,
 } from "@chorus/contracts";
 import {
-  ArchiveIcon,
   BellIcon,
   CheckCircle2Icon,
   CheckIcon,
-  ChevronRightIcon,
   CpuIcon,
-  EyeIcon,
   FolderIcon,
-  HelpCircleIcon,
   MenuIcon,
   PlugZapIcon,
-  SendIcon,
   Settings,
-  SquareIcon,
-  TriangleAlertIcon,
   XIcon,
-  ZapIcon,
 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
@@ -55,6 +48,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { PushSettings } from "@/features/notifications/push-settings";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 import { useVoiceConfig } from "@/hooks/use-voice-config";
 import { cn } from "@/lib/utils";
@@ -136,276 +130,48 @@ async function fetchConfiguredProviders() {
     .providerIDs;
 }
 
-type NotifType = "review" | "question" | "done" | "warning";
+type NotifType = "permission" | "question";
 
 interface Notification {
+  boardId: string;
+  boardTitle: string;
   body: string;
-  id: number;
-  read: boolean;
-  /** e.g. "2 min ago" */
-  time: string;
+  cardId: string;
+  id: string;
+  kind: NotifType;
   title: string;
-  type: NotifType;
 }
 
-const INITIAL_NOTIFICATIONS: Notification[] = [
-  {
-    id: 1,
-    type: "review",
-    title: "Review requested",
-    body: 'Agent completed "Update color palette for dark mode" — changes are ready for your approval.',
-    time: "just now",
-    read: false,
-  },
-  {
-    id: 2,
-    type: "question",
-    title: "Agent needs clarification",
-    body: "Should the refresh token be stored in an httpOnly cookie or localStorage? Waiting on your call.",
-    time: "3 min ago",
-    read: false,
-  },
-  {
-    id: 3,
-    type: "done",
-    title: "Task completed",
-    body: '"Set up GitHub Actions CI/CD pipeline" finished successfully. 47 files changed.',
-    time: "12 min ago",
-    read: false,
-  },
-  {
-    id: 4,
-    type: "warning",
-    title: "Rate limit approaching",
-    body: 'The OpenCode session for "Real-time cursor tracking" is nearing its token budget.',
-    time: "28 min ago",
-    read: true,
-  },
-  {
-    id: 5,
-    type: "question",
-    title: "Agent needs clarification",
-    body: "Which pricing tiers should be listed on the landing page? Found 3 different configs — please specify.",
-    time: "1 hr ago",
-    read: true,
-  },
-];
-
-const NOTIF_META: Record<
-  NotifType,
-  {
-    icon: React.ComponentType<{ className?: string }>;
-    dot: string;
-    iconCls: string;
-  }
-> = {
-  review: {
-    icon: EyeIcon,
-    dot: "bg-amber-400",
-    iconCls: "text-amber-400/80",
-  },
-  question: {
-    icon: HelpCircleIcon,
-    dot: "bg-sky-400",
-    iconCls: "text-sky-400/80",
-  },
-  done: {
-    icon: CheckCircle2Icon,
-    dot: "bg-emerald-400",
-    iconCls: "text-emerald-400/80",
-  },
-  warning: {
-    icon: TriangleAlertIcon,
-    dot: "bg-rose-400",
-    iconCls: "text-rose-400/75",
-  },
-};
-
-// ─── NotificationItem ──────────────────────────────────────────────────────────
-function NotificationItem({
-  notification: n,
-  onDismiss,
-}: {
-  notification: Notification;
-  onDismiss: (id: number) => void;
-}) {
-  const meta = NOTIF_META[n.type];
-  const Icon = meta.icon;
-  const [answerOpen, setAnswerOpen] = useState(false);
-  const [answer, setAnswer] = useState("");
-
-  return (
-    <div
-      className={cn(
-        "group relative flex flex-col gap-0 px-4 py-3.5 transition-colors",
-        n.read ? "bg-transparent" : "bg-white/[0.022]",
-        "hover:bg-white/[0.035]"
-      )}
-    >
-      {/* unread dot */}
-      {!n.read && (
-        <span
-          className={cn(
-            "absolute top-4 left-1.5 size-1.5 rounded-full",
-            meta.dot
-          )}
-        />
-      )}
-
-      {/* top row: icon + text */}
-      <div className="flex gap-3">
-        {/* icon */}
-        <div className="mt-0.5 shrink-0">
-          <Icon className={cn("size-4", meta.iconCls)} />
-        </div>
-
-        {/* text */}
-        <div className="min-w-0 flex-1 pr-6">
-          <div className="flex items-baseline gap-1.5">
-            <span className="font-medium text-[0.72rem] text-white/75">
-              {n.title}
-            </span>
-            <span className="ml-auto shrink-0 text-[0.6rem] text-white/25">
-              {n.time}
-            </span>
-          </div>
-          <p className="mt-0.5 text-[0.67rem] text-white/38 leading-relaxed">
-            {n.body}
-          </p>
-        </div>
-      </div>
-
-      {/* CTAs */}
-      <div className="mt-2.5 ml-7">
-        {n.type === "review" && (
-          <div className="flex gap-1.5">
-            <button
-              className="flex flex-1 items-center justify-center gap-1.5 rounded-xs border border-emerald-500/25 bg-emerald-500/10 py-1.5 font-medium text-[0.65rem] text-emerald-400 transition-all hover:border-emerald-500/40 hover:bg-emerald-500/18 active:scale-[0.97]"
-              onClick={() => onDismiss(n.id)}
-              type="button"
-            >
-              <CheckIcon className="size-3" />
-              Approve
-            </button>
-            <button
-              className="flex flex-1 items-center justify-center gap-1.5 rounded-xs border border-rose-500/20 bg-rose-500/8 py-1.5 font-medium text-[0.65rem] text-rose-400/80 transition-all hover:border-rose-500/35 hover:bg-rose-500/15 active:scale-[0.97]"
-              onClick={() => onDismiss(n.id)}
-              type="button"
-            >
-              <XIcon className="size-3" />
-              Reject
-            </button>
-            <button
-              className="flex flex-1 items-center justify-center gap-1.5 rounded-xs border border-white/6 bg-white/3 py-1.5 text-[0.65rem] text-white/30 transition-all hover:bg-white/6 hover:text-white/55 active:scale-[0.97]"
-              type="button"
-            >
-              <ChevronRightIcon className="size-3" />
-              View diff
-            </button>
-          </div>
-        )}
-
-        {n.type === "question" && !answerOpen && (
-          <div className="flex gap-1.5">
-            <button
-              className="flex flex-1 items-center justify-center gap-1.5 rounded-xs border border-sky-500/25 bg-sky-500/10 py-1.5 font-medium text-[0.65rem] text-sky-400 transition-all hover:border-sky-500/40 hover:bg-sky-500/18 active:scale-[0.97]"
-              onClick={() => setAnswerOpen(true)}
-              type="button"
-            >
-              <SendIcon className="size-3" />
-              Answer
-            </button>
-          </div>
-        )}
-
-        {n.type === "question" && answerOpen && (
-          <div className="flex flex-col gap-1.5">
-            <textarea
-              autoFocus
-              className="w-full resize-none rounded-xs border border-sky-500/20 bg-sky-950/20 px-2.5 py-2 text-[0.67rem] text-white/70 placeholder-white/25 outline-none transition-all [scrollbar-width:none] focus:border-sky-500/35 focus:bg-sky-950/30 [&::-webkit-scrollbar]:hidden"
-              onChange={(e) => setAnswer(e.target.value)}
-              placeholder="Type your answer…"
-              rows={2}
-              value={answer}
-            />
-            <div className="flex gap-1.5">
-              <button
-                className="flex flex-1 items-center justify-center gap-1.5 rounded-xs border border-sky-500/25 bg-sky-500/10 py-1.5 font-medium text-[0.65rem] text-sky-400 transition-all hover:border-sky-500/40 hover:bg-sky-500/18 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40"
-                disabled={!answer.trim()}
-                onClick={() => answer.trim() && onDismiss(n.id)}
-                type="button"
-              >
-                <SendIcon className="size-3" />
-                Send
-              </button>
-              <button
-                className="flex flex-1 items-center justify-center gap-1.5 rounded-xs border border-white/6 bg-white/3 py-1.5 text-[0.65rem] text-white/30 transition-all hover:bg-white/6 hover:text-white/55 active:scale-[0.97]"
-                onClick={() => {
-                  setAnswerOpen(false);
-                  setAnswer("");
-                }}
-                type="button"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        )}
-
-        {n.type === "done" && (
-          <div className="flex gap-1.5">
-            <button
-              className="flex flex-1 items-center justify-center gap-1.5 rounded-xs border border-white/8 bg-white/4 py-1.5 font-medium text-[0.65rem] text-white/55 transition-all hover:border-white/14 hover:bg-white/8 hover:text-white/80 active:scale-[0.97]"
-              type="button"
-            >
-              <ChevronRightIcon className="size-3" />
-              View changes
-            </button>
-            <button
-              className="flex flex-1 items-center justify-center gap-1.5 rounded-xs border border-emerald-500/15 bg-emerald-500/6 py-1.5 font-medium text-[0.65rem] text-emerald-400/70 transition-all hover:border-emerald-500/28 hover:bg-emerald-500/12 hover:text-emerald-400 active:scale-[0.97]"
-              onClick={() => onDismiss(n.id)}
-              type="button"
-            >
-              <ArchiveIcon className="size-3" />
-              Archive
-            </button>
-          </div>
-        )}
-
-        {n.type === "warning" && (
-          <div className="flex gap-1.5">
-            <button
-              className="flex flex-1 items-center justify-center gap-1.5 rounded-xs border border-amber-500/25 bg-amber-500/10 py-1.5 font-medium text-[0.65rem] text-amber-400 transition-all hover:border-amber-500/40 hover:bg-amber-500/18 active:scale-[0.97]"
-              type="button"
-            >
-              <ZapIcon className="size-3" />
-              Extend budget
-            </button>
-            <button
-              className="flex flex-1 items-center justify-center gap-1.5 rounded-xs border border-rose-500/20 bg-rose-500/8 py-1.5 font-medium text-[0.65rem] text-rose-400/80 transition-all hover:border-rose-500/35 hover:bg-rose-500/15 active:scale-[0.97]"
-              onClick={() => onDismiss(n.id)}
-              type="button"
-            >
-              <SquareIcon className="size-3" />
-              Stop session
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* dismiss */}
-      <button
-        className="absolute top-3 right-3 flex size-5 items-center justify-center rounded-xs text-white/20 opacity-0 transition-all hover:bg-white/8 hover:text-white/50 group-hover:opacity-100"
-        onClick={() => onDismiss(n.id)}
-        title="Dismiss"
-        type="button"
-      >
-        <XIcon className="size-3" />
-      </button>
-    </div>
+function getPendingNotifications(
+  boards: readonly WorkspaceBoard[]
+): Notification[] {
+  return boards.flatMap((board) =>
+    Object.values(board.columns).flatMap((tasks) =>
+      tasks.flatMap((task) => {
+        const pending =
+          task.pendingApprovals ??
+          (task.pendingApproval ? [task.pendingApproval] : []);
+        return pending.map((request) => ({
+          boardId: board.boardId,
+          boardTitle: board.title,
+          body: task.title,
+          cardId: task.id,
+          id:
+            board.boardId +
+            ":" +
+            task.id +
+            ":" +
+            (request.requestId ?? request.kind),
+          kind: request.kind,
+          title:
+            request.kind === "permission"
+              ? "Permission needed"
+              : "Answer requested",
+        }));
+      })
+    )
   );
 }
-
 function ProviderMark({
   providerID,
   providerName,
@@ -987,44 +753,24 @@ function VoiceSettingsPanel({
 
 // ─── NotificationPane ──────────────────────────────────────────────────────────
 function NotificationPane({ onClose }: { onClose: () => void }) {
-  const [notifs, setNotifs] = useState<Notification[]>(INITIAL_NOTIFICATIONS);
-
-  const unread = notifs.filter((n) => !n.read).length;
-
-  function dismiss(id: number) {
-    setNotifs((prev) => prev.filter((n) => n.id !== id));
-  }
-
-  function markAllRead() {
-    setNotifs((prev) => prev.map((n) => ({ ...n, read: true })));
-  }
+  const { boards } = useWorkspace();
+  const notifications = getPendingNotifications(boards);
 
   return (
     <div
       className={cn(
-        // On mobile: attach to viewport edges with a small margin
-        // On sm+: fixed width anchored to the right of the button
         "absolute top-[calc(100%+8px)] right-0",
         "w-[calc(100vw-1.5rem)] max-w-[360px] sm:w-[360px]",
         "overflow-hidden rounded-sm",
         "border border-white/10 bg-zinc-950/90 shadow-[0_24px_60px_rgba(0,0,0,0.55)] backdrop-blur-2xl"
       )}
     >
-      {/* Header */}
       <div className="flex items-center gap-2 border-white/6 border-b px-4 py-3">
         <span className="flex-1 font-semibold text-[0.78rem] text-white/80 tracking-wide">
-          Notifications
+          Pending approvals
         </span>
-        {unread > 0 && (
-          <button
-            className="rounded-xs px-2 py-0.5 text-[0.62rem] text-white/35 transition-colors hover:text-white/60"
-            onClick={markAllRead}
-            type="button"
-          >
-            Mark all read
-          </button>
-        )}
         <button
+          aria-label="Close notifications"
           className="flex size-6 items-center justify-center rounded-xs text-white/30 transition-colors hover:bg-white/6 hover:text-white/60"
           onClick={onClose}
           type="button"
@@ -1033,23 +779,43 @@ function NotificationPane({ onClose }: { onClose: () => void }) {
         </button>
       </div>
 
-      {/* List */}
-      <div className="flex max-h-[min(520px,calc(100dvh-7rem))] flex-col divide-y divide-white/[0.04] overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        {notifs.length === 0 ? (
-          <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
-            <BellIcon className="size-7 text-zinc-800" />
-            <p className="text-[0.7rem] text-white/25">You're all caught up</p>
-          </div>
+      <PushSettings />
+
+      <div className="max-h-[min(360px,calc(100dvh-12rem))] overflow-y-auto">
+        {notifications.length === 0 ? (
+          <p className="px-4 py-8 text-center text-[0.68rem] text-white/30">
+            No pending approval requests.
+          </p>
         ) : (
-          notifs.map((n) => (
-            <NotificationItem key={n.id} notification={n} onDismiss={dismiss} />
-          ))
+          notifications.map((notification) => {
+            const target = new URLSearchParams({
+              board: notification.boardId,
+              card: notification.cardId,
+            });
+            return (
+              <Link
+                className="block border-white/[0.04] border-b px-4 py-3 transition-colors hover:bg-white/[0.04]"
+                href={`/?${target.toString()}`}
+                key={notification.id}
+                onClick={onClose}
+              >
+                <span className="block font-medium text-[0.68rem] text-white/80">
+                  {notification.title}
+                </span>
+                <span className="mt-1 block truncate text-[0.62rem] text-white/45">
+                  {notification.body}
+                </span>
+                <span className="mt-1 block truncate text-[0.58rem] text-white/25">
+                  {notification.boardTitle}
+                </span>
+              </Link>
+            );
+          })
         )}
       </div>
     </div>
   );
 }
-
 // ─── MobileMenuDrawer ──────────────────────────────────────────────────────────
 function MobileMenuDrawer({
   open,
@@ -1125,7 +891,7 @@ function MobileMenuDrawer({
               className="h-5 w-6 invert"
               height={19}
               loading="eager"
-              src="/chrous.svg"
+              src="/chorus.svg"
               width={24}
             />
             <span className="select-none font-semibold text-sm text-white tracking-[0.02em]">
@@ -1490,6 +1256,7 @@ export function AppHeader() {
   const notifRef = useRef<HTMLDivElement>(null);
 
   const {
+    boards,
     createBoardFromHistory,
     createBoardFromProject,
     isOpeningFolder,
@@ -1514,7 +1281,7 @@ export function AppHeader() {
     return () => document.removeEventListener("mousedown", handleClick);
   }, [notifOpen]);
 
-  const unreadCount = INITIAL_NOTIFICATIONS.filter((n) => !n.read).length;
+  const unreadCount = getPendingNotifications(boards).length;
 
   return (
     <>
@@ -1552,7 +1319,7 @@ export function AppHeader() {
                   className="h-4.75 w-6 invert"
                   height={19}
                   loading="eager"
-                  src="/chrous.svg"
+                  src="/chorus.svg"
                   width={24}
                 />
                 {/* Hide the wordmark on very small screens (<480px) */}

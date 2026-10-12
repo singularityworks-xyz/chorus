@@ -1,4 +1,10 @@
+import {
+  type SessionFileDiff,
+  sessionFileDiffsSchema,
+} from "@chorus/contracts";
 import posthog from "posthog-js";
+
+export type { SessionFileDiff } from "@chorus/contracts";
 
 const OPENCODE_BASE_URL =
   process.env.NEXT_PUBLIC_OPENCODE_URL ?? "http://localhost:4096";
@@ -161,14 +167,6 @@ export async function fetchDirectory(
   );
 }
 
-export interface SessionFileDiff {
-  additions: number;
-  after: string;
-  before: string;
-  deletions: number;
-  file: string;
-}
-
 export async function fetchSessionDiff(
   sessionId: string
 ): Promise<SessionFileDiff[]> {
@@ -187,7 +185,14 @@ export async function fetchSessionDiff(
     if (!text) {
       return [];
     }
-    return JSON.parse(text) as SessionFileDiff[];
+    const parsed = sessionFileDiffsSchema.safeParse(JSON.parse(text));
+    if (!parsed.success) {
+      console.error("[opencode-client] Invalid session diff response", {
+        sessionId,
+      });
+      return [];
+    }
+    return parsed.data;
   } catch (error) {
     if (IS_DEV) {
       console.error("[opencode-client] Fetch session diff failed", {

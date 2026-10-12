@@ -5,6 +5,7 @@ import {
   WS_CLOSE_UNAUTHORIZED,
 } from "./chorus-sync";
 import { LAST_SEQ_KEY, SNAPSHOT_KEY, writePersistedSnapshot } from "./last-seq";
+import { SocketAuthenticationExpiredError } from "./socket-credentials";
 import {
   approvalEvent,
   eventFrame,
@@ -89,6 +90,12 @@ function liveSocket(sync: ChorusSync): FakeSocket {
   socket.emit({ head: 0, type: "ready" });
   socket.emit({ data: snapshotFixture(), seq: 0, type: "snapshot" });
   return socket;
+}
+
+async function flushPromiseQueue(): Promise<void> {
+  for (let tick = 0; tick < 8; tick += 1) {
+    await Promise.resolve();
+  }
 }
 
 beforeEach(() => {
@@ -214,6 +221,28 @@ describe("handshake and resume (plan P5 task 1)", () => {
     sync.reconnectNow();
 
     expect(FakeSocket.instances).toHaveLength(2);
+  });
+
+  test("browser offline closes the socket and online reconnects from the applied cursor", () => {
+    const { sync } = makeSync();
+    const first = liveSocket(sync);
+    first.emit(eventFrame(1, 1));
+
+    sync.networkOffline();
+
+    expect(first.closed).toBe(true);
+    expect(sync.state.status).toBe("offline");
+    expect(sync.state.lastSeq).toBe(1);
+
+    sync.reconnectNow();
+    const second = FakeSocket.last;
+    expect(second).not.toBe(first);
+    second.open();
+
+    expect(JSON.parse(second.sent[0] as string)).toEqual({
+      since: 1,
+      type: "hello",
+    });
   });
 
   test("only one handshake is in flight at a time", () => {
@@ -706,6 +735,132 @@ describe("reconnect scheduling", () => {
 
     expect(() => socket.open()).not.toThrow();
     expect(sync.handshakeInFlight).toBe(false);
+  });
+});
+
+describe("asynchronous socket credentials", () => {
+  test("waits for credentials before opening the socket and avoids duplicate requests", async () => {
+    let resolveUrl: ((url: string) => void) | undefined;
+    let preparations = 0;
+    const sync = new ChorusSync(
+      {
+        createSocket: (url) => new FakeSocket(url),
+        prepareSocketUrl: () => {
+          preparations += 1;
+          return new Promise((resolve) => {
+            resolveUrl = resolve;
+          });
+        },
+        storage: new FakeStorage(),
+        url: "wss://serve.example.test/ws",
+      },
+      {}
+    );
+
+    sync.start();
+    sync.reconnectNow();
+    await flushPromiseQueue();
+
+    expect(preparations).toBe(1);
+    expect(FakeSocket.instances).toHaveLength(0);
+
+    resolveUrl?.("wss://serve.example.test/ws?ticket=once");
+    await flushPromiseQueue();
+
+    expect(FakeSocket.last.url).toBe("wss://serve.example.test/ws?ticket=once");
+  });
+
+  test("a network-offline transition invalidates pending credentials", async () => {
+    let resolveUrl: ((url: string) => void) | undefined;
+    const sync = new ChorusSync(
+      {
+        createSocket: (url) => new FakeSocket(url),
+        prepareSocketUrl: () =>
+          new Promise((resolve) => {
+            resolveUrl = resolve;
+          }),
+        storage: new FakeStorage(),
+        url: "wss://serve.example.test/ws",
+      },
+      {}
+    );
+
+    sync.start();
+    await flushPromiseQueue();
+    sync.networkOffline();
+    resolveUrl?.("wss://serve.example.test/ws?ticket=stale");
+    await flushPromiseQueue();
+
+    expect(FakeSocket.instances).toHaveLength(0);
+    expect(sync.state.status).toBe("offline");
+  });
+
+  test("a credential 401 expires auth, while transient failures retry", async () => {
+    const scheduler = new FakeScheduler();
+    let authExpired = 0;
+    const authSync = new ChorusSync(
+      {
+        createSocket: (url) => new FakeSocket(url),
+        prepareSocketUrl: () =>
+          Promise.reject(new SocketAuthenticationExpiredError()),
+        schedule: scheduler.schedule,
+        storage: new FakeStorage(),
+        url: "wss://serve.example.test/ws",
+      },
+      { onAuthExpired: () => (authExpired += 1) }
+    );
+
+    authSync.start();
+    await flushPromiseQueue();
+
+    expect(authSync.state.status).toBe("auth-expired");
+    expect(authExpired).toBe(1);
+    expect(scheduler.pending).toHaveLength(0);
+
+    const retryScheduler = new FakeScheduler();
+    const retrySync = new ChorusSync(
+      {
+        createSocket: (url) => new FakeSocket(url),
+        prepareSocketUrl: () =>
+          Promise.reject(new Error("ticket service unavailable")),
+        schedule: retryScheduler.schedule,
+        storage: new FakeStorage(),
+        url: "wss://serve.example.test/ws",
+      },
+      {}
+    );
+
+    retrySync.start();
+    await flushPromiseQueue();
+
+    expect(retrySync.state.status).toBe("offline");
+    expect(retrySync.state.lastError).toContain("ticket service unavailable");
+    expect(retryScheduler.pending).toHaveLength(1);
+  });
+
+  test("stop invalidates a late credential response", async () => {
+    let resolveUrl: ((url: string) => void) | undefined;
+    const sync = new ChorusSync(
+      {
+        createSocket: (url) => new FakeSocket(url),
+        prepareSocketUrl: () =>
+          new Promise((resolve) => {
+            resolveUrl = resolve;
+          }),
+        storage: new FakeStorage(),
+        url: "wss://serve.example.test/ws",
+      },
+      {}
+    );
+
+    sync.start();
+    await flushPromiseQueue();
+    sync.stop();
+    resolveUrl?.("wss://serve.example.test/ws?ticket=late");
+    await flushPromiseQueue();
+
+    expect(FakeSocket.instances).toHaveLength(0);
+    expect(sync.state.status).toBe("offline");
   });
 });
 
