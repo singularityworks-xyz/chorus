@@ -3,7 +3,7 @@ pre-commit:
     ultracite-staged:
       glob:
         - "*.{js,jsx,ts,tsx,json,jsonc,css,scss,md,mdx}"
-      run: bunx ultracite fix {staged_files}
+      run: bun x ultracite fix {staged_files}
       stage_fixed: true
     version-autobump:
       skip_empty: false
@@ -12,6 +12,6 @@ pre-commit:
 pre-push:
   jobs:
     - name: ultracite-push
-      run: bunx ultracite fix {push_files}
+      run: bun x ultracite fix {push_files}
     - script: checks.sh
       runner: bash

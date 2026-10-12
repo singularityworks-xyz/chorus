@@ -9,17 +9,26 @@ import { WorktreeManager } from "./worktree-manager";
 
 function makeRepository(): string {
   const directory = mkdtempSync(join(tmpdir(), "chorus-repository-registry-"));
-  execFileSync("git", ["init", "--quiet"], { cwd: directory });
+  execFileSync("git", ["init", "--quiet"], {
+    cwd: directory,
+    windowsHide: true,
+  });
   execFileSync("git", ["config", "user.email", "chorus@example.test"], {
     cwd: directory,
+    windowsHide: true,
   });
   execFileSync("git", ["config", "user.name", "Chorus Test"], {
     cwd: directory,
+    windowsHide: true,
   });
   writeFileSync(join(directory, "README.md"), "registry fixture\n");
-  execFileSync("git", ["add", "README.md"], { cwd: directory });
+  execFileSync("git", ["add", "README.md"], {
+    cwd: directory,
+    windowsHide: true,
+  });
   execFileSync("git", ["commit", "--quiet", "-m", "initial"], {
     cwd: directory,
+    windowsHide: true,
   });
   return directory;
 }

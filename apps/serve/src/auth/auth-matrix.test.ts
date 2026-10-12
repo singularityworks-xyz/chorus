@@ -118,6 +118,7 @@ async function startServer(): Promise<ServerHandle> {
     },
     stdout: "pipe",
     stderr: "pipe",
+    windowsHide: true,
   });
 
   const base = `http://127.0.0.1:${port}`;

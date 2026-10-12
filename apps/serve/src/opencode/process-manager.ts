@@ -469,6 +469,7 @@ export class OpenCodeProcessManager {
         env: { ...process.env },
         stderr: "pipe",
         stdout: "pipe",
+        windowsHide: true,
       }
     );
 

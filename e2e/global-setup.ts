@@ -69,16 +69,25 @@ function seedFixtureRepo(): void {
   }
 
   mkdirSync(E2E_REPO_DIR, { recursive: true });
-  execFileSync("git", ["init", "--quiet"], { cwd: E2E_REPO_DIR });
+  execFileSync("git", ["init", "--quiet"], {
+    cwd: E2E_REPO_DIR,
+    windowsHide: true,
+  });
   execFileSync("git", ["config", "user.email", "e2e@example.com"], {
     cwd: E2E_REPO_DIR,
+    windowsHide: true,
   });
   execFileSync("git", ["config", "user.name", "Chorus E2E"], {
     cwd: E2E_REPO_DIR,
+    windowsHide: true,
   });
   writeFileSync(join(E2E_REPO_DIR, "README.md"), "# chorus e2e fixture\n");
-  execFileSync("git", ["add", "-A"], { cwd: E2E_REPO_DIR });
+  execFileSync("git", ["add", "-A"], {
+    cwd: E2E_REPO_DIR,
+    windowsHide: true,
+  });
   execFileSync("git", ["commit", "--quiet", "-m", "fixture"], {
     cwd: E2E_REPO_DIR,
+    windowsHide: true,
   });
 }

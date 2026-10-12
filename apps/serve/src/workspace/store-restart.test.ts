@@ -88,6 +88,7 @@ describe("crash recovery", () => {
     const killer = Bun.spawn(["bun", "run", workerPath, dataDir, "kill", "5"], {
       stdout: "pipe",
       stderr: "pipe",
+      windowsHide: true,
     });
     const killerOut = await new Response(killer.stdout).text();
     await killer.exited;
@@ -120,6 +121,7 @@ describe("crash recovery", () => {
       {
         stdout: "pipe",
         stderr: "pipe",
+        windowsHide: true,
       }
     );
     const out = await new Response(worker.stdout).text();

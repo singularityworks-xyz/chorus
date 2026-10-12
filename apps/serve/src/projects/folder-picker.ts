@@ -28,6 +28,7 @@ async function runCommand(
     cmd: [command, ...args],
     stdout: "pipe",
     stderr: "pipe",
+    windowsHide: true,
   });
 
   const [stdout, stderr, exitCode] = await Promise.all([

@@ -25,14 +25,21 @@ import { WORKTREE_CONTAINER, WorktreeManager } from "./worktree-manager";
 
 function makeRepo(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
-  execFileSync("git", ["init", "--quiet"], { cwd: dir });
+  execFileSync("git", ["init", "--quiet"], { cwd: dir, windowsHide: true });
   execFileSync("git", ["config", "user.email", "test@example.com"], {
     cwd: dir,
+    windowsHide: true,
   });
-  execFileSync("git", ["config", "user.name", "Test"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "Test"], {
+    cwd: dir,
+    windowsHide: true,
+  });
   writeFileSync(join(dir, "README.md"), "# fixture\n");
-  execFileSync("git", ["add", "-A"], { cwd: dir });
-  execFileSync("git", ["commit", "--quiet", "-m", "init"], { cwd: dir });
+  execFileSync("git", ["add", "-A"], { cwd: dir, windowsHide: true });
+  execFileSync("git", ["commit", "--quiet", "-m", "init"], {
+    cwd: dir,
+    windowsHide: true,
+  });
   return dir;
 }
 
@@ -60,7 +67,10 @@ async function createBoard(
 
 /** Every path git currently has registered for this repository. */
 function worktreeList(repo: string): string[] {
-  return execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: repo })
+  return execFileSync("git", ["worktree", "list", "--porcelain"], {
+    cwd: repo,
+    windowsHide: true,
+  })
     .toString()
     .split("\n")
     .filter((line) => line.startsWith("worktree "))
@@ -100,9 +110,13 @@ describe("parallel worktree writes", () => {
       }
       expect(() => {
         writeFileSync(join(path, "agent-output.txt"), path);
-        execFileSync("git", ["add", "-A"], { cwd: path });
+        execFileSync("git", ["add", "-A"], {
+          cwd: path,
+          windowsHide: true,
+        });
         execFileSync("git", ["commit", "--quiet", "-m", "agent work"], {
           cwd: path,
+          windowsHide: true,
         });
       }).not.toThrow();
     }
