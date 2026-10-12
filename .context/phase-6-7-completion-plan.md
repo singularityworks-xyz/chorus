@@ -31,7 +31,7 @@ database, not another workspace state channel.
 | Worktree lifecycle | Serialized provisioning, failed-commit compensation, restart cleanup intents, dirty-worktree preservation, real-Git concurrency/removal tests, and the passing eight-run qualification | Target deployment load/capacity evidence is tracked under engine identity and pool |
 | Session ownership | Board-scoped session lookup and exact checkout validation; the passing qualification routes approval, result, WebSocket mirrors, snapshot diff, and session diff through the board checkout | Credentialed real-engine inference remains separate acceptance |
 | Engine identity and pool | SDK and packaged CLI are pinned at 1.19.0; health/version checks and `OPENCODE_PER_WORKTREE` registry are wired; pool lifecycle tests pass | Sustained load/capacity evidence in the deployment environment |
-| Agent stream recovery | SDK events normalize into Chorus types; retry, reconciliation, and reconnect tests pass; the scripted eight-run approval flow now passes after reconciliation was limited to attached recoverable sessions | Ten-minute sustained-load and active-session server-restart evidence |
+| Agent stream recovery | SDK events normalize into Chorus types; retry, reconciliation, and reconnect tests pass; the scripted eight-run approval flow and ten-minute sustained load pass after scoping recovery and applying the configured snapshot interval | Active-session server-restart evidence |
 | Legacy import, D4 | Import validates roots and rejects colliding checkout bindings before parking the source; collision-preservation test passes | None for the collision safety change; import remains disabled by default |
 | Board removal, D6 | Task service reserves, aborts, waits for idle, commits removal, then cleans up; failure and concurrent-removal tests pass | Exercise abort/removal against the scripted live engine in the full lifecycle qualification |
 | Device identity | Signed stable device cookie, device-bound one-use tickets, and per-device socket presence are implemented and tested | Multi-browser browser-E2E recovery remains unrun |
@@ -48,9 +48,11 @@ database, not another workspace state channel.
 - Focused P6/P7 suite: 299 tests passed across 24 files; the session-diff API suite passed 28 tests across four files; the legacy store suite passed 28 tests. Counts overlap between focused commands.
 - Follow-up focused checks passed: 9 tests across `bridge.test.ts` and `phase-6-harness.test.ts`, including the eight-run qualification; 77 tests across six auth, workspace, repository, worktree, and snapshot files.
 - The eight-run qualification passed with eight isolated checkouts across three real Git repositories, ten authenticated WebSocket mirrors, approval/reply, snapshot diff, and board-scoped session diff. Reconciliation now ignores sessions not attached to recoverable board work; mirror equality compares the JSON wire representation.
+- The ten-minute scripted load passed at 200 events/second: 120,000 events, p95 delivery latency 113 ms, peak RSS growth 42.68 MB, a 133,813-byte snapshot, eight distinct checkouts, and ten converged mirrors. The first measurement reached 54.11 MB; the run exposed that the configured snapshot interval was not applied automatically. The store now snapshots after the configured number of events and preserves committed state if maintenance fails.
+- Latest focused verification passed: 84 tests across the store, WebSocket hub, and scripted qualification; `bun run check`; and `bun run check-types` across all seven workspace packages. `bun run build` also passed after the store snapshot change, compiling Next.js and generating all 24 static pages and API routes.
 - Latest `bun run check`, `bun run check-types`, and `bun run build` passed. The production build compiled Next.js and emitted the session-diff API route.
 - Windows child windows are now hidden for noninteractive Git fixtures, process-backed tests, and managed/background server helpers to prevent the test run from opening console windows.
-- No Playwright/E2E test, real-model inference run, ten-minute load run, or real-device push acceptance was performed.
+- No Playwright/E2E test, credentialed real-model inference run, active-session server-restart acceptance, or real-device push acceptance was performed.
 
 ## 3. Decisions for implementation
 

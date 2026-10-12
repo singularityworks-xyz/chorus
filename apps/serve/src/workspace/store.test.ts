@@ -33,8 +33,8 @@ function trackStore(store: WorkspaceStore): WorkspaceStore {
   return store;
 }
 
-function createStoreAt(dir: string): WorkspaceStore {
-  return trackStore(new WorkspaceStore(dir));
+function createStoreAt(dir: string, options?: StoreOptions): WorkspaceStore {
+  return trackStore(new WorkspaceStore(dir, options));
 }
 
 afterEach(async () => {
@@ -443,6 +443,64 @@ describe("WorkspaceStore durability", () => {
 });
 
 describe("WorkspaceStore snapshots and retention", () => {
+  test("automatically snapshots after the configured event interval", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chorus-auto-snap-"));
+    dirs.push(dir);
+
+    const store = createStoreAt(dir, { snapshotInterval: 2 });
+    await store.load();
+    const boardId = await seedBoard(store);
+    await store.applyMutation(
+      mutation("board.move", { boardId, position: { x: 5, y: 5 } })
+    );
+
+    const { Database } = await import("bun:sqlite");
+    const db = new Database(store.databasePath);
+    const count = db.query("SELECT COUNT(*) AS c FROM events").get() as {
+      c: number;
+    };
+    db.close();
+
+    expect(store.headSeq()).toBe(2);
+    expect(count.c).toBe(1);
+    expect(store.getBoard(boardId)?.position).toEqual({ x: 5, y: 5 });
+
+    await store.close();
+    const recovered = createStoreAt(dir);
+    await recovered.load();
+    expect(recovered.getBoard(boardId)?.position).toEqual({ x: 5, y: 5 });
+    await recovered.close();
+  });
+
+  test("a snapshot failure does not fail an already durable mutation", async () => {
+    const store = createStore({ snapshotInterval: 1 });
+    await store.load();
+    const { Database } = await import("bun:sqlite");
+    const db = new Database(store.databasePath);
+    db.exec(`
+      CREATE TRIGGER reject_snapshot_insert
+      BEFORE INSERT ON snapshots
+      BEGIN SELECT RAISE(FAIL, 'snapshot unavailable'); END;
+    `);
+
+    try {
+      const commit = await store.applyMutation(
+        mutation("board.create", { seed: SEED })
+      );
+      const boardId =
+        commit?.events[0]?.type === "board.created"
+          ? commit.events[0].board.boardId
+          : undefined;
+
+      expect(boardId).toBeDefined();
+      expect(commit?.lastSeq).toBe(1);
+      expect(store.getBoard(boardId ?? "")?.title).toBe("Repo");
+    } finally {
+      db.exec("DROP TRIGGER IF EXISTS reject_snapshot_insert");
+      db.close();
+    }
+  });
+
   test("writeSnapshot folds the covered events away", async () => {
     const store = createStore({ snapshotInterval: 1000 });
     await store.load();

@@ -996,6 +996,33 @@ describe("backpressure recovery", () => {
 });
 
 describe("heartbeat", () => {
+  test("the first heartbeat sends a ping before the pong timeout begins", async () => {
+    const store = makeStore();
+    await store.load();
+    let clock = 1000;
+    const hub = new WorkspaceHub(store, {
+      now: () => clock,
+      pingIntervalMs: 30,
+      pongTimeoutMs: 10,
+    });
+    const socket = makeSocket();
+    await connect(hub, socket, 0);
+    socket.messages.length = 0;
+
+    const advanceClock = setTimeout(() => {
+      clock += 30;
+    }, 15);
+    await Bun.sleep(40);
+    clearTimeout(advanceClock);
+
+    expect(socket.closeCalls).toHaveLength(0);
+    expect(socket.messages.some((message) => message.type === "ping")).toBe(
+      true
+    );
+    expect(hub.clientCount()).toBe(1);
+    hub.close();
+  });
+
   test("a client that misses two pongs is closed and fully deregistered", async () => {
     const store = makeStore();
     await store.load();

@@ -37,10 +37,34 @@ the final run passed after comparing the same JSON representation that clients
 receive. The bridge regression test also confirms unrelated idle sessions and
 their pending requests are ignored during recovery.
 
+## Follow-up verification — 2026-10-12
+
+The first ten-minute load measurement missed the RSS budget at 54.11 MB. Review
+found that `WorkspaceStore` counted events toward the configured snapshot
+interval, but no normal commit path applied it. The store now writes a snapshot
+when that interval is reached, logs snapshot failures without misreporting an
+already durable mutation, and only swaps the retained in-memory snapshot after
+its database write succeeds. A regression test verifies event pruning and state
+recovery across restart. The load also exposed and verified a WebSocket heartbeat
+deadline correction; the harness now responds with the protocol's exact `pong`
+shape and resynchronizes clients after sequence gaps.
+
+| Command | Result |
+|---|---|
+| `bun test apps/serve/src/workspace/store.test.ts apps/serve/src/ws/hub.test.ts apps/serve/scripts/phase-6-harness.test.ts` | Passed: 84 tests across 3 files, including the eight-run qualification, automatic snapshot/restart and snapshot-failure regressions, and heartbeat regression. |
+| `bun run check` | Passed; formatting and log gate are green. |
+| `bun run check-types` | Passed across all 7 workspace packages. |
+| `bun run apps/serve/scripts/phase-6-load.ts` | Passed: 600 seconds, 120,000 events at 200/s, p95 latency 113 ms, peak RSS growth 42.68 MB, final snapshot 133,813 bytes, eight checkouts, and ten converged mirrors. Full measurements are in [phase-6-load-report.md](./phase-6-load-report.md). |
+
+The sandbox denied Git writes in the temporary fixture directories on the first
+load and focused-harness attempts. Both commands passed outside the sandbox; the
+fixtures used hidden Git child windows, and no Windows Terminal/OpenConsole
+processes appeared during the load runs. No browser E2E was run.
+
 ## Still open
 
-- Ten-minute 200 events/second load and memory/latency budget.
 - Credentialed real-model inference and target-deployment engine-pool capacity.
+- Active-session server-restart acceptance.
 - Manual desktop folder-picker acceptance.
 - Live-engine abort/removal qualification beyond the focused lifecycle tests.
 - Real Chrome and installed iOS Safari push delivery, including offline-device

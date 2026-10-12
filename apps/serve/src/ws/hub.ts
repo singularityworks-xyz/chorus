@@ -287,6 +287,7 @@ export interface HubOptions {
   coalesceMs?: number;
   now?: () => number;
   pingIntervalMs?: number;
+  pongTimeoutMs?: number;
 }
 
 export interface HubStats {
@@ -308,6 +309,7 @@ export class WorkspaceHub {
   readonly #now: () => number;
   readonly #coalesceMs: number;
   readonly #pingIntervalMs: number;
+  readonly #pongTimeoutMs: number;
 
   /**
    * Per-board buffers of coalescible events awaiting flush. Holds whole
@@ -333,6 +335,7 @@ export class WorkspaceHub {
     this.#now = options.now ?? Date.now;
     this.#coalesceMs = options.coalesceMs ?? COALESCE_MS;
     this.#pingIntervalMs = options.pingIntervalMs ?? PING_INTERVAL_MS;
+    this.#pongTimeoutMs = options.pongTimeoutMs ?? PONG_TIMEOUT_MS;
     this.#startHeartbeat();
   }
 
@@ -399,7 +402,7 @@ export class WorkspaceHub {
   }
 
   hasReadyConnectionForDevice(deviceId: string): boolean {
-    const healthyWithinMs = this.#pingIntervalMs + PONG_TIMEOUT_MS;
+    const healthyWithinMs = this.#pingIntervalMs + this.#pongTimeoutMs;
     const now = this.#now();
     return [...this.#clients].some(
       (client) =>
@@ -965,7 +968,7 @@ export class WorkspaceHub {
 
   #startHeartbeat(): void {
     this.#heartbeatTimer = setInterval(() => {
-      const cutoff = this.#now() - PONG_TIMEOUT_MS * 2;
+      const cutoff = this.#now() - this.#pingIntervalMs - this.#pongTimeoutMs;
       for (const client of [...this.#clients]) {
         if (client.lastPongAt < cutoff) {
           client.socket.close?.(4000, "pong timeout");

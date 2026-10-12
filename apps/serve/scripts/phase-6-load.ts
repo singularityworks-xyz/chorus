@@ -32,7 +32,7 @@ try {
     }
   }
   const elapsedMs = Date.now() - startedAt;
-  const result = await harness.complete();
+  const result = await harness.complete(60_000);
   const growthMb = Math.max(0, peakRss - initialRss) / (1024 * 1024);
   const rate = emitted / (elapsedMs / 1000);
   const passed =

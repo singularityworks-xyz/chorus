@@ -1359,20 +1359,37 @@ export class WorkspaceStore {
       }
     }
 
+    if (
+      shouldSnapshot(this.#eventsSinceSnapshot, this.#options.snapshotInterval)
+    ) {
+      try {
+        this.#writeSnapshotNow();
+      } catch (error) {
+        // The append above is already durable. A maintenance failure must not
+        // report that committed mutation as failed; keep the event tail intact
+        // and try the snapshot again after more events arrive.
+        logger.error(
+          "workspace-snapshot-failed",
+          error instanceof Error ? error : undefined
+        );
+      }
+    }
+
     return commit;
   }
 
   #writeSnapshotNow(): void {
-    this.#snapshot = this.#applyRetention(this.#snapshot);
+    const snapshot = this.#applyRetention(this.#snapshot);
     const head = this.#db.headSeq();
     this.#db.writeSnapshot(
       head,
       Date.now(),
       JSON.stringify({
-        snapshot: this.#snapshot,
+        snapshot,
         v: SNAPSHOT_BLOB_VERSION,
       } satisfies PersistedBlob)
     );
+    this.#snapshot = snapshot;
     this.#db.pruneEventsBefore(head);
     this.#eventsSinceSnapshot = 0;
   }

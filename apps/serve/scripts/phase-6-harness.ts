@@ -33,6 +33,76 @@ interface QualificationRun {
   sessionId: string;
 }
 
+interface QualificationMirror {
+  boards: WorkspaceBoard[];
+  error?: string;
+  initialized: boolean;
+  resyncing: boolean;
+  seq: number;
+  socket: WebSocket;
+}
+
+type QualificationEventFrame = Extract<
+  ReturnType<typeof serverMessageSchema.parse>,
+  { type: "event" }
+>;
+
+function applyQualificationEvent(
+  mirror: QualificationMirror,
+  frame: QualificationEventFrame,
+  onEvent: (frame: QualificationEventFrame) => void
+): void {
+  onEvent(frame);
+  if (mirror.resyncing || frame.seq <= mirror.seq) {
+    return;
+  }
+  if (frame.fromSeq !== mirror.seq + 1) {
+    mirror.resyncing = true;
+    mirror.socket.send(JSON.stringify({ type: "resync" }));
+    return;
+  }
+
+  mirror.boards = mirror.boards.map((board) =>
+    frame.boardId === null || board.boardId === frame.boardId
+      ? applyEventToBoard(board, frame.event)
+      : board
+  );
+  mirror.seq = frame.seq;
+}
+
+function receiveQualificationFrame(
+  mirror: QualificationMirror,
+  data: unknown,
+  onEvent: (frame: QualificationEventFrame) => void
+): void {
+  const raw = String(data);
+  try {
+    const frame = serverMessageSchema.parse(JSON.parse(raw));
+    switch (frame.type) {
+      case "snapshot":
+        mirror.boards = frame.data.boards;
+        mirror.seq = frame.seq;
+        mirror.initialized = true;
+        mirror.resyncing = false;
+        return;
+      case "event":
+        applyQualificationEvent(mirror, frame, onEvent);
+        return;
+      case "ping":
+        mirror.socket.send(JSON.stringify({ type: "pong" }));
+        return;
+      case "error":
+        mirror.error = JSON.stringify(frame);
+        return;
+      default:
+        return;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    mirror.error = `${message}; frame=${raw.slice(0, 200)}`;
+  }
+}
+
 export async function waitForQualification(
   predicate: () => boolean,
   timeoutMs = 5000,
@@ -79,13 +149,7 @@ export async function startPhase6Harness() {
   let hub: WorkspaceHub | undefined;
   let bridge: OpenCodeBridge | undefined;
   let stopHttp: (() => Promise<void>) | undefined;
-  const mirrors: Array<{
-    socket: WebSocket;
-    boards: WorkspaceBoard[];
-    seq: number;
-    error?: string;
-    initialized: boolean;
-  }> = [];
+  const mirrors: QualificationMirror[] = [];
   const latencies: number[] = [];
   let latencyCursor = 0;
   let frameCount = 0;
@@ -265,42 +329,24 @@ export async function startPhase6Harness() {
         boards: [] as WorkspaceBoard[],
         seq: 0,
         initialized: false,
+        resyncing: false,
         error: undefined as string | undefined,
       };
       mirrors.push(mirror);
       socket.addEventListener("open", () =>
         socket.send(JSON.stringify({ type: "hello", since: 0 }))
       );
-      socket.addEventListener("message", (message) => {
-        try {
-          const frame = serverMessageSchema.parse(
-            JSON.parse(String(message.data))
+      socket.addEventListener("message", (message) =>
+        receiveQualificationFrame(mirror, message.data, (frame) => {
+          latencies[latencyCursor++ % 20_000] = Math.max(
+            0,
+            Date.now() - frame.ts
           );
-          if (frame.type === "snapshot") {
-            mirror.boards = frame.data.boards;
-            mirror.seq = frame.seq;
-            mirror.initialized = true;
-          }
-          if (frame.type === "event") {
-            mirror.boards = mirror.boards.map((board) =>
-              applyEventToBoard(board, frame.event)
-            );
-            mirror.seq = Math.max(mirror.seq, frame.seq);
-            latencies[latencyCursor++ % 20_000] = Math.max(
-              0,
-              Date.now() - frame.ts
-            );
-            frameCount += 1;
-          }
-          if (frame.type === "ping") {
-            socket.send(JSON.stringify({ type: "pong", at: frame.at }));
-          }
-          if (frame.type === "error") {
-            mirror.error = JSON.stringify(frame);
-          }
-        } catch (error) {
-          mirror.error = error instanceof Error ? error.message : String(error);
-        }
+          frameCount += 1;
+        })
+      );
+      socket.addEventListener("close", (event) => {
+        mirror.error ??= `socket closed (${event.code}): ${event.reason}`;
       });
     }
     await waitForQualification(() =>
@@ -467,15 +513,44 @@ export async function startPhase6Harness() {
           }
         }
       },
-      async complete() {
+      async complete(settleTimeoutMs = 5000) {
         await Promise.all(runs.map(completeRun));
-        await waitForQualification(() =>
-          runs.every(
-            (run) => workspace.getBoard(run.boardId)?.columns.done?.length === 1
-          )
+        await waitForQualification(
+          () =>
+            runs.every(
+              (run) =>
+                workspace.getBoard(run.boardId)?.columns.done?.length === 1
+            ),
+          settleTimeoutMs,
+          () =>
+            runs.map((run) => {
+              const board = workspace.getBoard(run.boardId);
+              return {
+                boardId: run.boardId,
+                session: board?.session,
+                taskCounts: {
+                  approve: board?.columns.approve?.length ?? 0,
+                  done: board?.columns.done?.length ?? 0,
+                  inProgress: board?.columns.in_progress?.length ?? 0,
+                  queue: board?.columns.queue?.length ?? 0,
+                },
+              };
+            })
         );
-        await waitForQualification(() =>
-          mirrors.every((mirror) => mirror.seq === workspace.headSeq())
+        await waitForQualification(
+          () => mirrors.every((mirror) => mirror.seq === workspace.headSeq()),
+          settleTimeoutMs,
+          () => ({
+            expectedSeq: workspace.headSeq(),
+            hub: workspaceHub.stats(),
+            mirrors: mirrors.map((mirror, mirrorIndex) => ({
+              error: mirror.error,
+              initialized: mirror.initialized,
+              mirrorIndex,
+              resyncing: mirror.resyncing,
+              seq: mirror.seq,
+            })),
+          })
         );
         await Promise.all(runs.map(verifyRunDiff));
         assertMirrorsConverged();

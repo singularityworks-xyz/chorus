@@ -26,16 +26,17 @@ or real-provider acceptance.
 
 ## D2 — `OPENCODE_PER_WORKTREE`
 
-**Found:** Phase 6 task 4. **Status: implemented; load acceptance remains open.**
+**Found:** Phase 6 task 4. **Status: implemented; scripted load passed, deployment capacity remains open.**
 
 The environment flag now selects the bounded `EngineRegistry`; default shared
 engine behavior remains the default. Registry tests cover canonical checkout
 deduplication, distinct ports, capacity limits, idle reclamation, and shutdown
 during startup. Config and Serve wire the registry into directory resolution.
 
-The scripted eight-run qualification passed on 2026-10-12. Sustained load and
-target-deployment capacity gates have not passed. Keep the flag off until those
-gates are green in the target deployment environment.
+The scripted eight-run qualification and ten-minute 200-event/second load passed
+on 2026-10-12. The load measured 42.68 MB peak RSS growth, 113 ms p95 client
+latency, and a 133,813-byte final snapshot. Target-deployment capacity remains
+open; keep the flag off until that gate is green in the target environment.
 
 ## D3 — Complete multi-run and inference proof
 
@@ -43,14 +44,15 @@ gates are green in the target deployment environment.
 
 The scripted harness provisions eight isolated boards across three real Git
 repositories, sends HTTP commands through the SDK-backed scripted engine, and
-checks authenticated WebSocket mirrors, snapshot diffs, and session diffs. It
-passed on 2026-10-12 after startup reconciliation was scoped to sessions attached
-to recoverable board work. The ten-minute load run and credentialed real-model
-inference were not run.
+checks authenticated WebSocket mirrors, snapshot diffs, and session diffs. The
+eight-run flow and ten-minute load passed on 2026-10-12 after startup
+reconciliation was scoped to sessions attached to recoverable board work and the
+store began applying its configured event snapshot interval automatically.
+Credentialed real-model inference remains open.
 
-**What closes it:** run the stated ten-minute load budget, then retain a separate
-credentialed inference run with no shared-index collisions or missed events.
-Provider credentials were not available for this execution.
+**What closes it:** retain a separate credentialed inference run with no
+shared-index collisions or missed events. Provider credentials were not
+available for this execution.
 
 ## D4 — Legacy snapshot checkout collisions
 

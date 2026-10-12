@@ -192,8 +192,10 @@ Done when: old socket code deleted; no component fetches workspace over HTTP pol
 worktree provisioning/removal, session ownership, SDK/CLI lockstep, engine pooling,
 and stream recovery are implemented with focused tests. The eight-run scripted
 qualification now passes through approval, completion, ten WebSocket mirrors,
-and both diff paths. Ten-minute load and credentialed inference acceptance remain
-open; browser E2E and manual folder-picker acceptance are also unverified. See
+and both diff paths. The ten-minute 200-event/second load gate also passed after
+the store began snapshotting at the configured event interval. Credentialed
+inference acceptance remains open; browser E2E and manual folder-picker
+acceptance are also unverified. See
 [`phase-6-7-completion-plan.md`](./phase-6-7-completion-plan.md) for the exact
 verification record.
 
@@ -220,9 +222,9 @@ Done when: 8 simulated concurrent runs across ≥3 repos hold §8 budgets locall
 **Implementation status (2026-10-12): partial.** Device identity, push key and
 subscription persistence, notification delivery, service-worker navigation,
 and browser opt-in recovery are implemented. Focused tests, type checks, and the
-production build pass. The scripted server-side multi-client approval flow now
-passes. Real Chrome/iOS device acceptance and browser E2E remain open; no browser
-E2E was run in this execution.
+production build pass. The scripted server-side multi-client approval flow and
+ten-minute server load gate now pass. Real Chrome/iOS device acceptance and
+browser E2E remain open; no browser E2E was run in this execution.
 
 Tasks
 1. Dep: `web-push-neo` (`bun add`, never hand-edit); VAPID keypair generated into `meta` table on first boot; `VAPID_PUBLIC_KEY` exposed via authenticated `GET /auth/vapid-key` endpoint.
