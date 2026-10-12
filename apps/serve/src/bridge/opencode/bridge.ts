@@ -371,6 +371,7 @@ export class OpenCodeBridge {
     try {
       const adapter = await this.#adapterFor(directory);
       const recoverySessions = this.#recoverySessions(directory);
+      const recoverableSessionIds = new Set(recoverySessions);
       const [statuses, permissions, questions, histories] = await Promise.all([
         adapter.sessions.status(directory),
         adapter.permissions.list(directory),
@@ -404,6 +405,9 @@ export class OpenCodeBridge {
 
       const timestamp = Date.now();
       for (const [sessionID, status] of Object.entries(statuses)) {
+        if (!recoverableSessionIds.has(sessionID)) {
+          continue;
+        }
         const normalized: NormalizedAgentEvent = {
           activity: status.type === "idle" ? "idle" : "thinking",
           sessionID,
@@ -429,6 +433,9 @@ export class OpenCodeBridge {
       }
 
       for (const permission of permissions) {
+        if (!recoverableSessionIds.has(permission.sessionID)) {
+          continue;
+        }
         await this.#broadcastAndWait({
           activity: "waiting_for_approval",
           permissionID: permission.id,
@@ -441,6 +448,9 @@ export class OpenCodeBridge {
       }
 
       for (const question of questions) {
+        if (!recoverableSessionIds.has(question.sessionID)) {
+          continue;
+        }
         await this.#broadcastAndWait({
           activity: "waiting_for_question",
           questionID: question.id,

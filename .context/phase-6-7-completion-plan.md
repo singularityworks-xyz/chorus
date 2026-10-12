@@ -27,17 +27,17 @@ database, not another workspace state channel.
 
 | Area | Current implementation and evidence | Remaining acceptance |
 |---|---|---|
-| Repository authority, D1 | Operator-approved `RepositoryRegistry`, canonical path validation, server-computed checkout paths, store-level enforcement, and targeted tests | Manual folder-picker check; the full scripted run below is not green |
-| Worktree lifecycle | Serialized provisioning, failed-commit compensation, restart cleanup intents, dirty-worktree preservation, and real-Git concurrency/removal tests | Repeat the complete eight-run qualification after fixing its approval-event timeout |
-| Session ownership | Board-scoped session lookup and exact checkout validation; session diff now resolves the board's checkout through the engine adapter | Full route through approval, result, WebSocket mirrors, and both diff paths |
+| Repository authority, D1 | Operator-approved `RepositoryRegistry`, canonical path validation, server-computed checkout paths, store-level enforcement, and targeted tests | Manual desktop folder-picker check |
+| Worktree lifecycle | Serialized provisioning, failed-commit compensation, restart cleanup intents, dirty-worktree preservation, real-Git concurrency/removal tests, and the passing eight-run qualification | Target deployment load/capacity evidence is tracked under engine identity and pool |
+| Session ownership | Board-scoped session lookup and exact checkout validation; the passing qualification routes approval, result, WebSocket mirrors, snapshot diff, and session diff through the board checkout | Credentialed real-engine inference remains separate acceptance |
 | Engine identity and pool | SDK and packaged CLI are pinned at 1.19.0; health/version checks and `OPENCODE_PER_WORKTREE` registry are wired; pool lifecycle tests pass | Sustained load/capacity evidence in the deployment environment |
-| Agent stream recovery | SDK events normalize into Chorus types; retry, reconciliation, and reconnect tests pass | Full scripted qualification currently times out before approvals reach the board state |
+| Agent stream recovery | SDK events normalize into Chorus types; retry, reconciliation, and reconnect tests pass; the scripted eight-run approval flow now passes after reconciliation was limited to attached recoverable sessions | Ten-minute sustained-load and active-session server-restart evidence |
 | Legacy import, D4 | Import validates roots and rejects colliding checkout bindings before parking the source; collision-preservation test passes | None for the collision safety change; import remains disabled by default |
-| Board removal, D6 | Task service reserves, aborts, waits for idle, commits removal, then cleans up; failure and concurrent-removal tests pass | Complete qualification with real SSE and board events |
-| Device identity | Signed stable device cookie, device-bound one-use tickets, and per-device socket presence are implemented and tested | Multi-browser end-to-end recovery remains unrun |
+| Board removal, D6 | Task service reserves, aborts, waits for idle, commits removal, then cleans up; failure and concurrent-removal tests pass | Exercise abort/removal against the scripted live engine in the full lifecycle qualification |
+| Device identity | Signed stable device cookie, device-bound one-use tickets, and per-device socket presence are implemented and tested | Multi-browser browser-E2E recovery remains unrun |
 | Push delivery | Persisted key/subscription state, opt-in recovery, bounded retries, shutdown cancellation, and 410 cleanup tests pass | Real Chrome desktop and installed iOS Safari acceptance |
 | Notification UI | Push-only worker validates payloads and same-origin targets; client opt-in and login return path are implemented | Verify on real devices and unauthenticated notification click |
-| Auth boundary | Explicit public frontend paths and expanded auth inventory tests cover catalogs and push routes | Run the process-backed auth matrix as part of the release verification |
+| Auth boundary | Explicit public frontend paths and expanded auth inventory tests cover catalogs and push routes; the process-backed auth matrix passes | Browser login-return recovery remains unrun |
 | Browser E2E | Existing Playwright configuration and suite remain available; no browser E2E was run in this execution at the operator's request | Run only after explicit approval; it is not evidence in this report |
 
 ## Verification recorded 2026-10-12
@@ -46,7 +46,10 @@ database, not another workspace state channel.
 - `bun run check-types`: passed across all seven workspace packages.
 - `bun run build`: passed, including the Next.js production build and `/api/sessions/[sessionID]/diff` route.
 - Focused P6/P7 suite: 299 tests passed across 24 files; the session-diff API suite passed 28 tests across four files; the legacy store suite passed 28 tests. Counts overlap between focused commands.
-- The non-browser eight-run harness was attempted. It created isolated repositories and queued work, but timed out while waiting for all approval events to reach the board lanes. The run is not counted as passing evidence.
+- Follow-up focused checks passed: 9 tests across `bridge.test.ts` and `phase-6-harness.test.ts`, including the eight-run qualification; 77 tests across six auth, workspace, repository, worktree, and snapshot files.
+- The eight-run qualification passed with eight isolated checkouts across three real Git repositories, ten authenticated WebSocket mirrors, approval/reply, snapshot diff, and board-scoped session diff. Reconciliation now ignores sessions not attached to recoverable board work; mirror equality compares the JSON wire representation.
+- Latest `bun run check`, `bun run check-types`, and `bun run build` passed. The production build compiled Next.js and emitted the session-diff API route.
+- Windows child windows are now hidden for noninteractive Git fixtures, process-backed tests, and managed/background server helpers to prevent the test run from opening console windows.
 - No Playwright/E2E test, real-model inference run, ten-minute load run, or real-device push acceptance was performed.
 
 ## 3. Decisions for implementation

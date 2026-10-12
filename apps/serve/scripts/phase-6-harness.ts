@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
   applyEventToBoard,
   queueBoardPromptResponseSchema,
@@ -34,15 +35,26 @@ interface QualificationRun {
 
 export async function waitForQualification(
   predicate: () => boolean,
-  timeoutMs = 5000
+  timeoutMs = 5000,
+  timeoutDetails?: () => unknown
 ) {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) {
-      throw new Error("qualification condition timed out");
+      const details = timeoutDetails?.();
+      throw new Error(
+        details === undefined
+          ? "qualification condition timed out"
+          : `qualification condition timed out: ${JSON.stringify(details)}`
+      );
     }
     await new Promise((done) => setTimeout(done, 10));
   }
+}
+
+function wireComparable(value: unknown): unknown {
+  const serialized = JSON.stringify(value);
+  return serialized === undefined ? undefined : JSON.parse(serialized);
 }
 
 function readSnapshotHash(value: unknown): string {
@@ -308,11 +320,22 @@ export async function startPhase6Harness() {
         return { boardId, sessionId: response.sessionId };
       })
     );
-    await waitForQualification(() =>
-      boardIds.every(
-        (boardId) =>
-          (workspace.getBoard(boardId)?.columns.approve?.length ?? 0) === 1
-      )
+    await waitForQualification(
+      () =>
+        boardIds.every(
+          (boardId) =>
+            (workspace.getBoard(boardId)?.columns.approve?.length ?? 0) === 1
+        ),
+      5000,
+      () =>
+        boardIds.map((boardId) => {
+          const board = workspace.getBoard(boardId);
+          return {
+            boardId,
+            columns: board?.columns,
+            session: board?.session,
+          };
+        })
     );
     await Promise.all(
       runs.map((run) =>
@@ -370,13 +393,62 @@ export async function startPhase6Harness() {
     }
 
     function assertMirrorsConverged(): void {
-      const expected = JSON.stringify(workspace.getSnapshot().boards);
-      if (
-        mirrors.some(
-          (mirror) => mirror.error || JSON.stringify(mirror.boards) !== expected
-        )
-      ) {
-        throw new Error("qualification WS mirrors diverged");
+      const expectedBoards = workspace.getSnapshot().boards;
+      const expectedBoardIds = new Set(
+        expectedBoards.map((board) => board.boardId)
+      );
+      const mismatches = mirrors.flatMap((mirror, mirrorIndex) => {
+        const missingBoardIds = expectedBoards
+          .filter(
+            (board) =>
+              !mirror.boards.some((actual) => actual.boardId === board.boardId)
+          )
+          .map((board) => board.boardId);
+        const unexpectedBoardIds = mirror.boards
+          .filter((board) => !expectedBoardIds.has(board.boardId))
+          .map((board) => board.boardId);
+        const differingBoard = expectedBoards.find((expected) => {
+          const actual = mirror.boards.find(
+            (board) => board.boardId === expected.boardId
+          );
+          return !(
+            actual &&
+            isDeepStrictEqual(wireComparable(actual), wireComparable(expected))
+          );
+        });
+
+        if (
+          !mirror.error &&
+          missingBoardIds.length === 0 &&
+          unexpectedBoardIds.length === 0 &&
+          !differingBoard
+        ) {
+          return [];
+        }
+
+        const actualBoard = differingBoard
+          ? mirror.boards.find(
+              (board) => board.boardId === differingBoard.boardId
+            )
+          : undefined;
+        return [
+          {
+            actualBoard,
+            differingBoard,
+            error: mirror.error,
+            expectedSeq: workspace.headSeq(),
+            missingBoardIds,
+            mirrorIndex,
+            seq: mirror.seq,
+            unexpectedBoardIds,
+          },
+        ];
+      });
+
+      if (mismatches.length > 0) {
+        throw new Error(
+          `qualification WS mirrors diverged: ${JSON.stringify(mismatches)}`
+        );
       }
     }
 
@@ -423,7 +495,14 @@ export async function startPhase6Harness() {
       },
     };
   } catch (error) {
-    await close();
+    try {
+      await close();
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "Phase 6 qualification setup and cleanup both failed"
+      );
+    }
     throw error;
   }
 }

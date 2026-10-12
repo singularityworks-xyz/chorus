@@ -19,9 +19,10 @@ the same registry. `repository-registry.test.ts` covers configured roots,
 aliases, arbitrary paths, persisted local registrations, production behavior,
 and store level board creation.
 
-Remaining acceptance is a manual desktop folder picker check. The local full
-stack qualification did not reach the approval stage, so it is not evidence of
-the complete user flow.
+Remaining acceptance is a manual desktop folder-picker check. The eight-run
+scripted qualification now passes through approval, completion, converged WebSocket
+mirrors, and both diff paths; it supplies deterministic flow evidence, not browser
+or real-provider acceptance.
 
 ## D2 — `OPENCODE_PER_WORKTREE`
 
@@ -32,24 +33,24 @@ engine behavior remains the default. Registry tests cover canonical checkout
 deduplication, distinct ports, capacity limits, idle reclamation, and shutdown
 during startup. Config and Serve wire the registry into directory resolution.
 
-The qualification and sustained load gates have not passed. Keep the flag off
-until those gates are green in the target deployment environment.
+The scripted eight-run qualification passed on 2026-10-12. Sustained load and
+target-deployment capacity gates have not passed. Keep the flag off until those
+gates are green in the target deployment environment.
 
 ## D3 — Complete multi-run and inference proof
 
 **Found:** Phase 6 concurrency exit bar. **Status: open.**
 
-The scripted harness now provisions eight isolated boards across three real Git
+The scripted harness provisions eight isolated boards across three real Git
 repositories, sends HTTP commands through the SDK-backed scripted engine, and
-checks authenticated WebSocket mirrors, snapshot diffs, and session diffs. The
-current run timed out before all boards reached the approval lane. It is not
-accepted as passing evidence. The ten-minute load run and credentialed real
-model inference were not run.
+checks authenticated WebSocket mirrors, snapshot diffs, and session diffs. It
+passed on 2026-10-12 after startup reconciliation was scoped to sessions attached
+to recoverable board work. The ten-minute load run and credentialed real-model
+inference were not run.
 
-**What closes it:** make the scripted qualification pass, run the stated ten
-minute load budget, then retain a separate credentialed inference run with no
-shared-index collisions or missed events. Provider credentials were not
-available for this execution.
+**What closes it:** run the stated ten-minute load budget, then retain a separate
+credentialed inference run with no shared-index collisions or missed events.
+Provider credentials were not available for this execution.
 
 ## D4 — Legacy snapshot checkout collisions
 
@@ -69,8 +70,9 @@ Phase 7 now includes persisted VAPID configuration, signed device identity,
 device-bound WebSocket tickets, per-device connection tracking, opt-in push
 subscriptions, bounded/cancellable delivery retries, push-only service-worker
 handling, deep links, and recovery tests. The focused P6/P7 unit and service
-tests passed. No real Chrome or iOS device acceptance was run, and the full
-scripted multi-client flow is still red as recorded under D3.
+tests passed. The scripted multi-client server flow now passes as recorded under
+D3. No browser E2E or real Chrome/iOS device acceptance was run; browser E2E
+remains unrun at the operator's request.
 
 Docker packaging and authenticated status/observability remain Phase 8 and Phase
 9 work. Their source and deployment gates are not claimed as complete here.

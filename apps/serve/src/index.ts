@@ -219,6 +219,7 @@ bridge.setRecoverySessionProvider((directory) =>
     .boards.filter(
       (board) =>
         (board.repo.worktree ?? board.repo.directory) === directory &&
+        board.session.currentTaskId !== undefined &&
         (board.session.state === "active" ||
           Object.values(board.columns)
             .flat()

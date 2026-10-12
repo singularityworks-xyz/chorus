@@ -190,9 +190,10 @@ Done when: old socket code deleted; no component fetches workspace over HTTP pol
 
 **Implementation status (2026-10-12): partial.** Repository authorization,
 worktree provisioning/removal, session ownership, SDK/CLI lockstep, engine pooling,
-and stream recovery are implemented with focused tests. The full scripted
-multi-run qualification currently times out before approval events reach the
-board lanes; load and credentialed inference acceptance remain open. See
+and stream recovery are implemented with focused tests. The eight-run scripted
+qualification now passes through approval, completion, ten WebSocket mirrors,
+and both diff paths. Ten-minute load and credentialed inference acceptance remain
+open; browser E2E and manual folder-picker acceptance are also unverified. See
 [`phase-6-7-completion-plan.md`](./phase-6-7-completion-plan.md) for the exact
 verification record.
 
@@ -219,9 +220,9 @@ Done when: 8 simulated concurrent runs across ≥3 repos hold §8 budgets locall
 **Implementation status (2026-10-12): partial.** Device identity, push key and
 subscription persistence, notification delivery, service-worker navigation,
 and browser opt-in recovery are implemented. Focused tests, type checks, and the
-production build pass. Real Chrome/iOS device acceptance and the full
-multi-client approval flow remain open; no browser E2E was run in this
-execution.
+production build pass. The scripted server-side multi-client approval flow now
+passes. Real Chrome/iOS device acceptance and browser E2E remain open; no browser
+E2E was run in this execution.
 
 Tasks
 1. Dep: `web-push-neo` (`bun add`, never hand-edit); VAPID keypair generated into `meta` table on first boot; `VAPID_PUBLIC_KEY` exposed via authenticated `GET /auth/vapid-key` endpoint.
@@ -331,4 +332,4 @@ Suggested cadence: land P0–P4 as one reviewable arc ("backend core"), then P5 
 - 2026-10: Phase 0 added (cleanup finish, Bun pin fix, `.context/versions.md`, RCE hotfix pulled forward from P4.7 with `resolveInside` seed, baselines, log-gate script + owner, root `.env.example` skeleton). SDK pin updated (1.3.13 → upgrade mandate to 1.18.x with binary lockstep; decision #5; P6.5 rewritten; risk #7). P4 rescoped (auth/transport/abuse; RCE now verify-only; voice routes explicitly in cookie guard). P8.2 env table completed. Per-phase Deliverables + Unit + Integration test lists added (P0–P9). Phase-exit bar added. `AGENTS.md` realtime-line fix assigned to P0. Amendment review owners: plan author + one reviewer before P0 starts.
 - 2026-10-12: SDK and observed OpenCode engine aligned at exact version 1.19.0 after dev startup exposed a 1.18.29/1.19.0 mismatch.
 - 2026-10-12: Added the P6/P7 completion companion with source-verified gaps, proposed repository/lifecycle/engine/device decisions, ordered work packages, and testing/release gates. Both phases retain their current implementation status until those gates are satisfied.
-- 2026-10-12: Implemented the P6/P7 repository, checkout lifecycle, engine pool, device identity, push delivery, and opt-in recovery work. Added a board-scoped session-diff endpoint and collision rejection for legacy imports. `bun run check`, `bun run check-types`, `bun run build`, and focused tests passed; the scripted multi-run qualification timed out before approval events reached board state. Real-device, sustained-load, credentialed-inference, and browser E2E gates remain open.
+- 2026-10-12: Implemented the P6/P7 repository, checkout lifecycle, engine pool, device identity, push delivery, and opt-in recovery work. Added a board-scoped session-diff endpoint and collision rejection for legacy imports. A follow-up scoped reconciliation to attached recoverable sessions and corrected the qualification mirror comparison to use JSON wire semantics; the eight-run qualification now passes. Latest `bun run check`, `bun run check-types`, `bun run build`, and affected focused tests pass. Real-device, sustained-load, credentialed-inference, manual folder-picker, and browser E2E gates remain open.
