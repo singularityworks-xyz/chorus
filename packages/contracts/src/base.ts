@@ -215,6 +215,33 @@ export const reviewModeSchema = z.union([
   z.literal("auto"),
 ]);
 
+export const pendingApprovalRequestSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("permission"),
+    permission: z.string().optional(),
+    requestId: z.string().min(1).optional(),
+  }),
+  z.object({
+    kind: z.literal("question"),
+    questions: z.array(
+      z.object({
+        custom: z.boolean().optional(),
+        header: z.string(),
+        multiple: z.boolean().optional(),
+        options: z.array(
+          z.object({ description: z.string(), label: z.string() })
+        ),
+        question: z.string(),
+      })
+    ),
+    requestId: z.string().min(1).optional(),
+  }),
+]);
+
+export type PendingApprovalRequest = z.infer<
+  typeof pendingApprovalRequestSchema
+>;
+
 export const taskSchema = z.object({
   changedFiles: z
     .array(
@@ -237,6 +264,8 @@ export const taskSchema = z.object({
   linesAdded: z.number().optional(),
   linesRemoved: z.number().optional(),
   plan: z.string().optional(),
+  pendingApproval: pendingApprovalRequestSchema.optional(),
+  pendingApprovals: z.array(pendingApprovalRequestSchema).optional(),
   questions: z.array(z.string()).optional(),
   run: agentRunContextSchema.optional(),
   runId: z.string().min(1).optional(),

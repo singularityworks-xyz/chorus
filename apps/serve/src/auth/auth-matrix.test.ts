@@ -31,6 +31,7 @@ const SERVE_ENTRY = join(import.meta.dir, "..", "index.ts");
 
 const HEX_32 = /^[0-9a-f]{32}$/;
 const COOKIE_PAIR = /chorus_session=[^;]+/;
+const DEVICE_COOKIE_PAIR = /chorus_device=[^;]+/;
 const COOKIE_VALUE = /chorus_session=([^;]+)/;
 
 /** POSIX mode mask: keeps permission bits, drops the file-type bits. */
@@ -40,6 +41,31 @@ const TOKEN = "f".repeat(64);
 
 /** Routes the plan requires to reject an unauthenticated caller. */
 const GATED_ROUTES = [
+  { label: "GET /models", method: "GET", path: "/models" },
+  { label: "GET /providers", method: "GET", path: "/providers" },
+  {
+    label: "GET /opencode/auth-credentials",
+    method: "GET",
+    path: "/opencode/auth-credentials",
+  },
+  {
+    label: "GET /opencode/configured-providers",
+    method: "GET",
+    path: "/opencode/configured-providers",
+  },
+  { label: "GET /auth/push-config", method: "GET", path: "/auth/push-config" },
+  {
+    label: "POST /auth/push-subscriptions",
+    method: "POST",
+    path: "/auth/push-subscriptions",
+    body: {},
+  },
+  {
+    label: "DELETE /auth/push-subscriptions",
+    method: "DELETE",
+    path: "/auth/push-subscriptions",
+    body: {},
+  },
   { label: "GET /workspace", method: "GET", path: "/workspace" },
   {
     label: "POST /tasks",
@@ -60,7 +86,13 @@ const GATED_ROUTES = [
     path: "/git/status?directory=%2Fetc",
   },
   { label: "GET /bridge/status", method: "GET", path: "/bridge/status" },
+  {
+    label: "GET /sessions/:sessionID/diff",
+    method: "GET",
+    path: "/sessions/session-1/diff",
+  },
   { label: "GET /auth/ws-ticket", method: "GET", path: "/auth/ws-ticket" },
+  { label: "POST /auth/device", method: "POST", path: "/auth/device" },
 ];
 
 interface ServerHandle {
@@ -106,9 +138,21 @@ async function startServer(): Promise<ServerHandle> {
           method: "POST",
         });
         const setCookie = login.headers.get("set-cookie") ?? "";
-        const cookie = setCookie.match(COOKIE_PAIR)?.[0] ?? "";
+        const sessionCookie = setCookie.match(COOKIE_PAIR)?.[0] ?? "";
 
-        if (login.status === 200 && cookie) {
+        const deviceResponse = sessionCookie
+          ? await fetch(`${base}/auth/device`, {
+              headers: { cookie: sessionCookie },
+              method: "POST",
+            })
+          : null;
+        const deviceCookie =
+          deviceResponse?.headers
+            .get("set-cookie")
+            ?.match(DEVICE_COOKIE_PAIR)?.[0] ?? "";
+        const cookie = [sessionCookie, deviceCookie].filter(Boolean).join("; ");
+
+        if (login.status === 200 && deviceResponse?.ok && cookie) {
           return {
             base,
             cookie,
@@ -311,8 +355,12 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
     const db = join(server.dataDir, "chorus.db");
     const tokenFile = join(server.dataDir, "chorus.token");
 
-    // biome-ignore lint/suspicious/noBitwiseOperators: reading POSIX mode bits
-    expect(statSync(db).mode & MODE_MASK).toBe(0o600);
+    expect(statSync(db).isFile()).toBe(true);
+    if (process.platform !== "win32") {
+      // Linux CI enforces the POSIX database permission contract.
+      // biome-ignore lint/suspicious/noBitwiseOperators: reading POSIX mode bits
+      expect(statSync(db).mode & MODE_MASK).toBe(0o600);
+    }
 
     // The production boot used CHORUS_TOKEN from the environment and so never
     // wrote a token file; laptop mode does, and that path is asserted in
@@ -348,6 +396,7 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
       headers: { cookie: server.cookie },
     });
     expect(ticketRes.status).toBe(200);
+    expect(ticketRes.headers.get("cache-control")).toBe("no-store");
 
     const { ticket } = (await ticketRes.json()) as { ticket: string };
     expect(ticket).toMatch(HEX_32);
@@ -360,6 +409,27 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
     // Replay is refused. A replayable ticket would be a bearer credential with
     // no bound beyond its TTL.
     expect(await wsCloseCode(`${server.base}/ws?ticket=${ticket}`)).toBe(4401);
+  });
+
+  test("a WS ticket minted for one device cannot be used with another identity", async () => {
+    const ticketRes = await fetch(`${server.base}/auth/ws-ticket`, {
+      headers: { cookie: server.cookie },
+    });
+    expect(ticketRes.status).toBe(200);
+    const { ticket } = (await ticketRes.json()) as { ticket: string };
+    const otherDevice = await fetch(`${server.base}/auth/device`, {
+      headers: { cookie: server.cookie.split(";")[0] },
+      method: "POST",
+    });
+    const otherCookie =
+      otherDevice.headers.get("set-cookie")?.match(DEVICE_COOKIE_PAIR)?.[0] ??
+      "";
+    expect(otherCookie).toBeTruthy();
+    expect(
+      await wsCloseCode(`${server.base}/ws?ticket=${ticket}`, {
+        cookie: `${server.cookie.split(";")[0]}; ${otherCookie}`,
+      })
+    ).toBe(4401);
   });
 
   test("a WebSocket ticket cannot be minted without a session", async () => {
@@ -452,10 +522,29 @@ async function wsFrames(
       resolve("open");
     }, 3000);
 
-    socket.onmessage = () => {
+    socket.onopen = () => {
+      socket.send(JSON.stringify({ since: 0, type: "hello" }));
+    };
+    socket.onmessage = (event) => {
       clearTimeout(timer);
-      socket.close();
-      resolve("open");
+      try {
+        const frame: unknown = JSON.parse(String(event.data));
+        if (
+          typeof frame !== "object" ||
+          frame === null ||
+          !("type" in frame) ||
+          frame.type !== "ready"
+        ) {
+          reject(new Error("WebSocket did not complete the hello handshake"));
+          socket.close();
+          return;
+        }
+        socket.close();
+        resolve("open");
+      } catch {
+        reject(new Error("WebSocket returned a malformed hello response"));
+        socket.close();
+      }
     };
     socket.onclose = (event) => {
       clearTimeout(timer);

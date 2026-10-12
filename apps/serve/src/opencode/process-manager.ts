@@ -1,4 +1,8 @@
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { createLogger } from "@chorus/logger";
+import { z } from "zod";
 
 const logger = createLogger({ env: "development" }, "SERVE");
 
@@ -21,34 +25,70 @@ interface HealthPayload {
   version?: string;
 }
 
+export class EngineUnavailableError extends Error {
+  readonly code = "engine_unavailable";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "EngineUnavailableError";
+  }
+}
+
+const healthPayloadSchema = z.object({
+  healthy: z.boolean(),
+  version: z.string().optional(),
+});
+
+const packageManifestSchema = z.object({
+  bin: z.union([z.string(), z.record(z.string(), z.string())]),
+});
+
+const require = createRequire(import.meta.url);
+
+/** Resolve the binary shipped by the pinned local dependency, never PATH. */
+export function resolveOpenCodeBinary(): string {
+  const manifestPath = require.resolve("opencode-ai/package.json");
+  const manifestResult = packageManifestSchema.safeParse(
+    JSON.parse(readFileSync(manifestPath, "utf8")) as unknown
+  );
+  if (!manifestResult.success) {
+    throw new Error(
+      "The installed opencode-ai package has no valid CLI entrypoint"
+    );
+  }
+
+  const bin = manifestResult.data.bin;
+  const relativeBinary = typeof bin === "string" ? bin : bin.opencode;
+  if (!relativeBinary) {
+    throw new Error(
+      "The installed opencode-ai package does not expose the opencode CLI"
+    );
+  }
+  return join(dirname(manifestPath), relativeBinary);
+}
+
 async function probeHealth(
-  port: number,
-  host: string,
-  timeoutMs: number
+  baseUrl: string,
+  timeoutMs: number,
+  authorization?: string
 ): Promise<HealthPayload | null> {
   try {
-    const response = await fetch(
-      `http://${host}:${String(port)}${HEALTH_PATH}`,
-      {
-        signal: AbortSignal.timeout(timeoutMs),
-      }
-    );
+    const headers = new Headers();
+    if (authorization) {
+      headers.set("authorization", authorization);
+    }
+    const response = await fetch(new URL(HEALTH_PATH, baseUrl), {
+      headers,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
 
     if (!response.ok) {
       return null;
     }
 
     const parsed: unknown = await response.json();
-    if (typeof parsed !== "object" || parsed === null) {
-      return null;
-    }
-
-    const candidate = parsed as Partial<HealthPayload>;
-    return {
-      healthy: candidate.healthy === true,
-      version:
-        typeof candidate.version === "string" ? candidate.version : undefined,
-    };
+    const result = healthPayloadSchema.safeParse(parsed);
+    return result.success ? result.data : null;
   } catch {
     return null;
   }
@@ -58,10 +98,16 @@ export class OpenCodeProcessManager {
   #proc: ReturnType<typeof Bun.spawn> | null = null;
   readonly #port: number;
   readonly #hostname: string;
+  readonly #baseUrl: string;
+  readonly #authorization: string | undefined;
   readonly #directory: string;
   readonly #readinessTimeoutMs: number;
+  readonly #maxRestarts: number;
   /** Version the spawned binary reported, once it has answered a health probe. */
   #observedVersion: string | null = null;
+  #ready = false;
+  readonly #expectedVersion: string | undefined;
+  readonly #adoptExisting: boolean;
   /** True when we spawned it and are therefore responsible for stopping it. */
   #owned = false;
   #stopping = false;
@@ -82,14 +128,28 @@ export class OpenCodeProcessManager {
   constructor(options: {
     port?: number;
     hostname?: string;
+    baseUrl?: string;
+    username?: string;
+    password?: string;
     directory: string;
     readinessTimeoutMs?: number;
     maxRestarts?: number;
+    expectedVersion?: string;
+    adoptExisting?: boolean;
   }) {
     this.#port = options.port ?? OPENCODE_PORT;
     this.#hostname = options.hostname ?? OPENCODE_HOSTNAME;
+    this.#baseUrl =
+      options.baseUrl ?? `http://${this.#hostname}:${String(this.#port)}`;
+    this.#authorization =
+      options.username && options.password
+        ? `Basic ${Buffer.from(`${options.username}:${options.password}`).toString("base64")}`
+        : undefined;
     this.#directory = options.directory;
+    this.#expectedVersion = options.expectedVersion;
+    this.#adoptExisting = options.adoptExisting ?? true;
     this.#readinessTimeoutMs = options.readinessTimeoutMs ?? 30_000;
+    this.#maxRestarts = options.maxRestarts ?? MAX_RESTARTS;
   }
 
   get port(): number {
@@ -107,6 +167,35 @@ export class OpenCodeProcessManager {
     return this.#observedVersion;
   }
 
+  get ready(): boolean {
+    return this.#ready;
+  }
+
+  /** Verifies a live healthy engine and exact SDK/binary compatibility. */
+  async assertReady(expectedVersion = this.#expectedVersion): Promise<void> {
+    const health = await probeHealth(this.#baseUrl, 2000, this.#authorization);
+    if (!health?.healthy) {
+      this.#ready = false;
+      throw new EngineUnavailableError(
+        `OpenCode engine at ${this.#baseUrl} is unavailable or unhealthy`
+      );
+    }
+    this.#observedVersion = health.version ?? null;
+    if (!(this.#observedVersion && expectedVersion)) {
+      this.#ready = false;
+      throw new EngineUnavailableError(
+        "OpenCode engine readiness cannot be verified because its version is unknown"
+      );
+    }
+    if (this.#observedVersion !== expectedVersion) {
+      this.#ready = false;
+      throw new EngineUnavailableError(
+        `OpenCode engine version ${this.#observedVersion} does not match the required SDK version ${expectedVersion}`
+      );
+    }
+    this.#ready = true;
+  }
+
   /**
    * Reads the running engine's version without starting one.
    *
@@ -115,22 +204,45 @@ export class OpenCodeProcessManager {
    * find that out would be the wrong trade.
    */
   async probeVersion(): Promise<string | null> {
-    const health = await probeHealth(this.#port, this.#hostname, 2000);
-    this.#observedVersion = health?.version ?? null;
+    const health = await probeHealth(this.#baseUrl, 2000, this.#authorization);
+    this.#observedVersion = health?.healthy ? (health.version ?? null) : null;
+    this.#ready = false;
     return this.#observedVersion;
   }
 
   async start(): Promise<void> {
-    const existing = await probeHealth(this.#port, this.#hostname, 1000);
-    if (existing) {
+    this.#stopping = false;
+    this.#ready = false;
+    const existing = await probeHealth(
+      this.#baseUrl,
+      1000,
+      this.#authorization
+    );
+    if (this.#stopping) {
+      throw new EngineUnavailableError("engine startup was cancelled");
+    }
+    if (existing?.healthy) {
       this.#observedVersion = existing.version ?? null;
+      if (!this.#adoptExisting) {
+        throw new Error(
+          `engine port ${String(this.#port)} is already occupied`
+        );
+      }
+      this.#assertVersion(this.#observedVersion);
       this.#owned = false;
+      this.#ready = true;
       logger.info("opencode-already-running", {
         hostname: this.#hostname,
         observedVersion: this.#observedVersion ?? "unknown",
         port: this.#port,
       });
       return;
+    }
+    if (existing && !existing.healthy) {
+      this.#ready = false;
+      throw new Error(
+        `OpenCode at ${this.#baseUrl} reports an unhealthy state`
+      );
     }
 
     logger.info("opencode-starting", {
@@ -139,7 +251,6 @@ export class OpenCodeProcessManager {
       port: this.#port,
     });
 
-    this.#stopping = false;
     this.#owned = true;
     this.#spawn();
     await this.#awaitReady();
@@ -165,7 +276,11 @@ export class OpenCodeProcessManager {
         return;
       }
 
-      probeHealth(this.#port, this.#hostname, 2000).then((health) => {
+      const generation = this.#generation;
+      probeHealth(this.#baseUrl, 2000, this.#authorization).then((health) => {
+        if (this.#stopping || generation !== this.#generation) {
+          return;
+        }
         if (health?.healthy) {
           this.#missedProbes = 0;
           return;
@@ -182,6 +297,7 @@ export class OpenCodeProcessManager {
           missedProbes: this.#missedProbes,
           port: this.#port,
         });
+        this.#ready = false;
         this.#missedProbes = 0;
 
         // Kill it first. The wedged process still holds the port, so spawning a
@@ -218,9 +334,18 @@ export class OpenCodeProcessManager {
         );
       }
 
-      const health = await probeHealth(this.#port, this.#hostname, 1000);
+      const health = await probeHealth(
+        this.#baseUrl,
+        1000,
+        this.#authorization
+      );
+      if (this.#stopping) {
+        throw new EngineUnavailableError("engine startup was cancelled");
+      }
       if (health?.healthy) {
         this.#observedVersion = health.version ?? null;
+        this.#assertVersion(this.#observedVersion);
+        this.#ready = true;
         logger.info("opencode-ready", {
           observedVersion: this.#observedVersion ?? "unknown",
           port: this.#port,
@@ -236,6 +361,17 @@ export class OpenCodeProcessManager {
     throw new Error(
       `opencode did not become ready on port ${String(this.#port)} within ${String(this.#readinessTimeoutMs)}ms`
     );
+  }
+
+  #assertVersion(observed: string | null): void {
+    if (this.#expectedVersion && observed !== this.#expectedVersion) {
+      this.#ready = false;
+      throw new EngineUnavailableError(
+        observed
+          ? `OpenCode engine version ${observed} does not match the required SDK version ${this.#expectedVersion}`
+          : "OpenCode engine readiness cannot be verified because its version is unknown"
+      );
+    }
   }
 
   /**
@@ -257,6 +393,7 @@ export class OpenCodeProcessManager {
    * exit handler a no-op.
    */
   #supersedeCurrent(): void {
+    this.#ready = false;
     const previous = this.#proc;
     this.#generation += 1;
     this.#proc = null;
@@ -275,6 +412,7 @@ export class OpenCodeProcessManager {
    * leaves the old process holding the port while the new one fails to bind.
    */
   #restart(reason: string): void {
+    this.#ready = false;
     this.#stopLivenessChecks();
     this.#supersedeCurrent();
 
@@ -319,7 +457,7 @@ export class OpenCodeProcessManager {
   #spawn(): void {
     const proc = Bun.spawn(
       [
-        "opencode",
+        resolveOpenCodeBinary(),
         "serve",
         "--port",
         String(this.#port),
@@ -358,6 +496,7 @@ export class OpenCodeProcessManager {
       if (this.#proc === proc) {
         this.#proc = null;
       }
+      this.#ready = false;
 
       if (error === undefined) {
         logger.info("opencode-exited", { code: detail });
@@ -400,7 +539,7 @@ export class OpenCodeProcessManager {
       this.#restartTimer = null;
     }
 
-    if (this.#restartAttempts >= MAX_RESTARTS) {
+    if (this.#restartAttempts >= this.#maxRestarts) {
       logger.error("opencode-restart-exhausted", {
         attempts: this.#restartAttempts,
         reason,
@@ -440,7 +579,9 @@ export class OpenCodeProcessManager {
         }
         const text = new TextDecoder().decode(value).trim();
         if (text) {
-          logger.debug(label, { data: text });
+          // Engine output can include prompts or provider credentials. Record
+          // activity without forwarding third-party output into Chorus logs.
+          logger.debug(label, { characters: text.length });
         }
       }
     } catch {
@@ -450,6 +591,7 @@ export class OpenCodeProcessManager {
 
   async stop(): Promise<void> {
     this.#stopping = true;
+    this.#ready = false;
     this.#stopLivenessChecks();
     if (this.#restartTimer) {
       clearTimeout(this.#restartTimer);
@@ -469,6 +611,7 @@ export class OpenCodeProcessManager {
 
   async forceKill(): Promise<void> {
     this.#stopping = true;
+    this.#ready = false;
     this.#stopLivenessChecks();
     if (this.#restartTimer) {
       clearTimeout(this.#restartTimer);

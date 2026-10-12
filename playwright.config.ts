@@ -38,6 +38,10 @@ export default defineConfig({
   timeout: 60_000,
   use: {
     baseURL: `http://127.0.0.1:${WEB_PORT}`,
+    // The default headless executable is chrome-headless-shell. Playwright's
+    // Windows process launcher does not hide its child consoles, so select the
+    // supported modern headless mode that uses the full Chromium executable.
+    channel: "chromium",
     trace: "retain-on-failure",
   },
   projects: [

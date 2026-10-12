@@ -1,10 +1,11 @@
+import { resolveOpenCodeBinary } from "../opencode/process-manager";
+
 interface CommandAttempt {
   args: string[];
   command: string;
   cwd?: string;
 }
 
-const LOGIN_COMMAND = "opencode auth login";
 const WINDOWS_DRIVE_PATTERN = /^[A-Za-z]:[\\/]/;
 
 /**
@@ -49,17 +50,21 @@ async function runDetached(
 }
 
 export class AuthLoginLauncher {
+  readonly #binary = resolveOpenCodeBinary();
+
   async launch(directory: string): Promise<boolean> {
     if (!isUsableDirectory(directory)) {
       return false;
     }
+
+    const loginCommand = `${quotePosix(this.#binary)} auth login`;
 
     switch (process.platform) {
       case "darwin": {
         // Terminal.app has no working-directory argument, so the `cd` has to
         // stay in the script text — but it is POSIX-quoted, and the AppleScript
         // string itself is JSON-escaped.
-        const script = `cd ${quotePosix(directory)} && ${LOGIN_COMMAND}`;
+        const script = `cd ${quotePosix(directory)} && ${loginCommand}`;
         return runDetached("osascript", [
           "-e",
           `tell application "Terminal" to do script ${JSON.stringify(script)}`,
@@ -72,32 +77,32 @@ export class AuthLoginLauncher {
         const attempts: CommandAttempt[] = [
           {
             command: "x-terminal-emulator",
-            args: ["-e", "bash", "-lc", LOGIN_COMMAND],
+            args: ["-e", "bash", "-lc", loginCommand],
             cwd: directory,
           },
           {
             command: "gnome-terminal",
-            args: ["--", "bash", "-lc", LOGIN_COMMAND],
+            args: ["--", "bash", "-lc", loginCommand],
             cwd: directory,
           },
           {
             command: "konsole",
-            args: ["-e", "bash", "-lc", LOGIN_COMMAND],
+            args: ["-e", "bash", "-lc", loginCommand],
             cwd: directory,
           },
           {
             command: "xfce4-terminal",
-            args: ["--command", `bash -lc ${quotePosix(LOGIN_COMMAND)}`],
+            args: ["--command", `bash -lc ${quotePosix(loginCommand)}`],
             cwd: directory,
           },
           {
             command: "kitty",
-            args: ["bash", "-lc", LOGIN_COMMAND],
+            args: ["bash", "-lc", loginCommand],
             cwd: directory,
           },
           {
             command: "alacritty",
-            args: ["-e", "bash", "-lc", LOGIN_COMMAND],
+            args: ["-e", "bash", "-lc", loginCommand],
             cwd: directory,
           },
           {
@@ -107,7 +112,9 @@ export class AuthLoginLauncher {
               "--cwd",
               directory,
               "--",
-              ...LOGIN_COMMAND.split(" "),
+              this.#binary,
+              "auth",
+              "login",
             ],
           },
         ];
@@ -126,7 +133,7 @@ export class AuthLoginLauncher {
           "-NoProfile",
           "-Command",
           `Start-Process powershell -ArgumentList '-NoExit','-Command',${JSON.stringify(
-            `Set-Location ${quotePowerShell(directory)}; ${LOGIN_COMMAND}`
+            `Set-Location ${quotePowerShell(directory)}; & ${quotePowerShell(this.#binary)} auth login`
           )}`,
         ]);
 

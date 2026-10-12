@@ -7,7 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   assertRegisteredRoot,
   isRegisteredRoot,
@@ -48,7 +48,7 @@ describe("registered repository roots (spec §6.4, plan P4.6)", () => {
   test("a registered directory is accepted", () => {
     const boards = [{ repo: { directory: "/repos/a", worktree: null } }];
 
-    expect(assertRegisteredRoot("/repos/a", boards)).toBe("/repos/a");
+    expect(assertRegisteredRoot("/repos/a", boards)).toBe(resolve("/repos/a"));
     expect(isRegisteredRoot("/repos/a", boards)).toBe(true);
   });
 
@@ -94,7 +94,11 @@ describe("registered repository roots (spec §6.4, plan P4.6)", () => {
 
     try {
       writeFileSync(join(outside, "secret.txt"), "secret");
-      symlinkSync(outside, join(root, "escape"));
+      symlinkSync(
+        outside,
+        join(root, "escape"),
+        process.platform === "win32" ? "junction" : "dir"
+      );
 
       // Lexical containment passes this: the path is under the root and uses no
       // `..`. Only realpath resolution catches it.
@@ -112,7 +116,11 @@ describe("registered repository roots (spec §6.4, plan P4.6)", () => {
 
     try {
       mkdirSync(join(alias, "link"), { recursive: true });
-      symlinkSync(real, join(alias, "link", "repo"));
+      symlinkSync(
+        real,
+        join(alias, "link", "repo"),
+        process.platform === "win32" ? "junction" : "dir"
+      );
 
       // The board registered the alias; the request named the real path. Both
       // canonicalise to the same directory, so it is the same repository.

@@ -1,11 +1,18 @@
 import { Elysia, t } from "elysia";
 import { LoginRateLimiter } from "./brute-force";
 import {
+  buildDeviceCookieHeader,
+  deviceIdFromHeader,
+  issueDeviceCookie,
+} from "./device";
+import {
   buildClearedCookieHeader,
   buildSessionCookieHeader,
   issueSessionCookie,
+  readSessionCookie,
   SESSION_TTL_SECONDS,
   timingSafeEqualStrings,
+  verifySessionCookie,
 } from "./session";
 import { issueTicket, type TicketStore } from "./ticket";
 
@@ -21,6 +28,7 @@ import { issueTicket, type TicketStore } from "./ticket";
 export interface AuthRouteOptions {
   isProduction: boolean;
   now?: () => number;
+  onLogoutDevice?: (deviceId: string) => Promise<void>;
   rateLimiter?: LoginRateLimiter;
   ticketStore: TicketStore;
   token: string;
@@ -108,15 +116,77 @@ export function createAuthRoutes(options: AuthRouteOptions) {
       }
     )
 
-    .post("/auth/logout", ({ set }) => {
+    .post("/auth/logout", async ({ request, set }) => {
+      const device = await deviceIdFromHeader(
+        request.headers.get("cookie"),
+        options.token
+      );
+      if (device.ok && options.onLogoutDevice) {
+        try {
+          await options.onLogoutDevice(device.deviceId);
+        } catch {
+          set.status = 503;
+          set.headers["set-cookie"] = buildClearedCookieHeader(
+            options.isProduction
+          );
+          return {
+            authenticated: false,
+            code: "logout_cleanup_failed",
+          };
+        }
+      }
       set.headers["set-cookie"] = buildClearedCookieHeader(
         options.isProduction
       );
       return { authenticated: false };
     })
 
-    .get("/auth/ws-ticket", () => {
+    .post("/auth/device", async ({ request, set }) => {
+      const session = await verifySessionCookie(
+        readSessionCookie(request.headers.get("cookie")),
+        { token: options.token }
+      );
+      if (!session.ok) {
+        set.status = 401;
+        return { code: "unauthorized", message: "authentication required" };
+      }
+
+      const existing = await deviceIdFromHeader(
+        request.headers.get("cookie"),
+        options.token
+      );
+      if (existing.ok) {
+        return { deviceId: existing.deviceId };
+      }
+
+      const cookie = await issueDeviceCookie(options.token);
+      const deviceId = cookie.split(".")[1];
+      if (!deviceId) {
+        set.status = 500;
+        return { code: "device_identity_failed" };
+      }
+      set.headers["set-cookie"] = buildDeviceCookieHeader(
+        cookie,
+        options.isProduction
+      );
+      return { deviceId };
+    })
+
+    .get("/auth/ws-ticket", async ({ request, set }) => {
+      const device = await deviceIdFromHeader(
+        request.headers.get("cookie"),
+        options.token
+      );
+      if (!device.ok) {
+        set.status = 401;
+        set.headers["cache-control"] = "no-store";
+        return { code: "device_identity_required" };
+      }
+
+      set.headers["cache-control"] = "no-store";
+
       const ticket = issueTicket({
+        deviceId: device.deviceId,
         now,
         store: options.ticketStore,
       });

@@ -1,6 +1,7 @@
 import { createLogger } from "@chorus/logger";
 import { Elysia, t } from "elysia";
 import { FolderPickerUnavailableError } from "../projects/folder-picker";
+import { RepositoryRegistryError } from "../projects/repository-registry";
 import type { ProjectService } from "../projects/service";
 
 const logger = createLogger(
@@ -10,8 +11,18 @@ const logger = createLogger(
   "SERVE:PROJECT-ROUTES"
 );
 
-export function createProjectRoutes(projectService: ProjectService) {
+export function createProjectRoutes(
+  projectService: ProjectService,
+  isProduction = false
+) {
   return new Elysia()
+    .onError(({ error, set }) => {
+      if (error instanceof RepositoryRegistryError) {
+        set.status = error.code === "unregistered_repository_root" ? 403 : 400;
+        return { code: error.code, message: error.message };
+      }
+      return undefined;
+    })
     .get("/projects", () => {
       logger.debug("route:projects");
       return projectService.listProjects();
@@ -129,6 +140,14 @@ export function createProjectRoutes(projectService: ProjectService) {
       }
     )
     .post("/projects/open-folder", async ({ set }) => {
+      if (isProduction) {
+        set.status = 503;
+        return {
+          code: "host_folder_picker_disabled",
+          message:
+            "Configure CHORUS_REPOSITORY_ROOTS to add repositories on this server",
+        };
+      }
       try {
         return await projectService.openFolder();
       } catch (error) {

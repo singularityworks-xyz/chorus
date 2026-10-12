@@ -45,6 +45,6 @@ describe("engine lockstep", () => {
   test("the installed SDK and the recorded binary are the same version", () => {
     // The pairing documented in `.context/versions.md`. If a dependency bump
     // lands without a matching binary, this is the test that says so.
-    expect(sdkVersion()).toBe("1.18.29");
+    expect(sdkVersion()).toBe("1.19.0");
   });
 });

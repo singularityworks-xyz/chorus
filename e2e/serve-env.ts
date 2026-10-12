@@ -1,3 +1,6 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 /**
  * Shared between `playwright.config.ts`, the global setup and the specs.
  *
@@ -30,7 +33,7 @@ const repoRoot = process.cwd();
  * client has to resume against a process that has forgotten the connection.
  */
 export const SERVE_DATA_DIR =
-  process.env.CHORUS_E2E_DATA_DIR ?? "/tmp/chorus-e2e";
+  process.env.CHORUS_E2E_DATA_DIR ?? join(tmpdir(), "chorus-e2e");
 
 export const SERVE_LOG_FILE = `${SERVE_DATA_DIR}/serve.log`;
 export const SERVE_PID_FILE = `${SERVE_DATA_DIR}/serve.pid`;
@@ -44,6 +47,12 @@ export const ENGINE_PID_FILE = `${SERVE_DATA_DIR}/opencode.pid`;
  * agent specs point at this rather than at the repo they are running from.
  */
 export const E2E_REPO_DIR =
-  process.env.CHORUS_E2E_REPO_DIR ?? "/tmp/chorus-e2e-repo";
+  process.env.CHORUS_E2E_REPO_DIR ?? join(tmpdir(), "chorus-e2e-repo");
+
+export const E2E_SERVE_ENV = {
+  CHORUS_REPOSITORY_ROOTS: JSON.stringify([repoRoot, E2E_REPO_DIR]),
+  OPENCODE_DIRECTORY: E2E_REPO_DIR,
+  OPENCODE_BASE_URL: `http://127.0.0.1:${String(OPENCODE_PORT)}`,
+};
 
 export { repoRoot };

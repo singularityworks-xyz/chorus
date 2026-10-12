@@ -7,18 +7,26 @@ import { cors } from "@elysiajs/cors";
 import { Elysia } from "elysia";
 import { LoginRateLimiter } from "./auth/brute-force";
 import { corsOptionsFor, resolveCorsPolicy } from "./auth/cors";
-import { authGuardHandler } from "./auth/guard";
+import { authGuardHandler, isPublicFrontendPath } from "./auth/guard";
 import { UnregisteredRootError } from "./auth/roots";
 import { createAuthRoutes } from "./auth/routes";
 import { pruneExpiredTickets, type TicketStore } from "./auth/ticket";
 import { MissingTokenError, resolveToken } from "./auth/token";
 import { OpenCodeBridge } from "./bridge/opencode/bridge";
 import { loadConfig } from "./config";
-import { OpenCodeProcessManager } from "./opencode/process-manager";
+import { EngineRegistry } from "./opencode/engine-registry";
+import {
+  EngineUnavailableError,
+  OpenCodeProcessManager,
+} from "./opencode/process-manager";
 import { assertEngineLockstep } from "./paths/engine-lockstep";
 import { NativeFolderPicker } from "./projects/folder-picker";
+import { RepositoryRegistry } from "./projects/repository-registry";
 import { ProjectService } from "./projects/service";
 import { WorktreeManager } from "./projects/worktree-manager";
+import { resolvePushConfiguration } from "./push/config";
+import { PushDispatcher } from "./push/dispatcher";
+import { createPushRoutes } from "./push/routes";
 import { createHttpRoutes } from "./routes";
 import { createProjectRoutes } from "./routes/projects";
 import { voiceRoutes } from "./routes/voice";
@@ -32,6 +40,9 @@ import { createWsHandler } from "./ws/handler";
 import { WorkspaceHub } from "./ws/hub";
 
 const config = loadConfig();
+const repositoryRegistry = await RepositoryRegistry.fromEnvironment(
+  process.env.CHORUS_REPOSITORY_ROOTS
+);
 const isProduction = process.env.NODE_ENV === "production";
 const logger = createLogger(
   {
@@ -80,12 +91,32 @@ const corsPolicy = resolveCorsPolicy({
 });
 const corsOptions = corsOptionsFor(corsPolicy);
 
-const processManager = new OpenCodeProcessManager({
-  directory: config.opencodeDirectory,
-  port: config.opencodePort,
-});
+const engineAuth =
+  config.opencodeUsername && config.opencodePassword
+    ? {
+        password: config.opencodePassword,
+        username: config.opencodeUsername,
+      }
+    : undefined;
+const processManager = config.opencodePerWorktree
+  ? null
+  : new OpenCodeProcessManager({
+      baseUrl: config.opencodeBaseUrl,
+      directory: config.opencodeDirectory,
+      port: config.opencodePort,
+      username: config.opencodeUsername,
+      password: config.opencodePassword,
+      expectedVersion: sdkVersion(),
+    });
+const engineRegistry = config.opencodePerWorktree
+  ? new EngineRegistry({
+      expectedVersion: sdkVersion(),
+      username: config.opencodeUsername,
+      password: config.opencodePassword,
+    })
+  : null;
 
-if (config.autoStartOpencode) {
+if (config.autoStartOpencode && processManager) {
   await processManager.start();
 }
 
@@ -107,14 +138,23 @@ if (config.autoStartOpencode) {
 //
 // Probed without spawning when auto-start is off: serve must not start an engine
 // the operator did not ask for, but it still needs to know what is serving.
-const engineVersion = config.autoStartOpencode
-  ? processManager.observedVersion
-  : await processManager.probeVersion();
-assertEngineLockstep(sdkVersion(), engineVersion);
+if (processManager) {
+  const engineVersion = config.autoStartOpencode
+    ? processManager.observedVersion
+    : await processManager.probeVersion();
+  assertEngineLockstep(sdkVersion(), engineVersion);
+}
 
 const bridge = new OpenCodeBridge(
   config.opencodeBaseUrl,
-  config.opencodeDirectory
+  config.opencodeDirectory,
+  engineAuth,
+  {
+    ...(engineRegistry ? { engineProvider: engineRegistry } : {}),
+    ...(processManager
+      ? { ensureEngineReady: () => processManager.assertReady(sdkVersion()) }
+      : {}),
+  }
 );
 
 async function fileExists(candidate: string): Promise<boolean> {
@@ -157,6 +197,8 @@ const workspaceStore = new WorkspaceStore(config.dataDir, {
   retentionDays: config.retentionDays,
   snapshotInterval: config.snapshotInterval,
   worktreeProvisioner: worktrees,
+  repositoryRegistry,
+  restorePersistedRepositoryRoots: !isProduction,
 });
 
 if (config.enableLegacyWorkspaceImport) {
@@ -171,11 +213,41 @@ if (config.enableLegacyWorkspaceImport) {
   await workspaceStore.load();
 }
 
+bridge.setRecoverySessionProvider((directory) =>
+  workspaceStore
+    .getSnapshot()
+    .boards.filter(
+      (board) =>
+        (board.repo.worktree ?? board.repo.directory) === directory &&
+        (board.session.state === "active" ||
+          Object.values(board.columns)
+            .flat()
+            .some(
+              (task) =>
+                (task.pendingApprovals?.length ?? 0) > 0 ||
+                task.pendingApproval !== undefined
+            ))
+    )
+    .flatMap((board) =>
+      board.session.sessionId ? [board.session.sessionId] : []
+    )
+);
+
 logger.info("workspace-ready", {
   dataDir: config.dataDir,
   database: workspaceStore.databasePath,
   headSeq: workspaceStore.headSeq(),
 });
+
+const pushConfiguration = await resolvePushConfiguration(
+  {
+    enabled: config.pushEnabled,
+    privateKey: config.vapidPrivateKey,
+    publicKey: config.vapidPublicKey,
+    subject: config.vapidSubject,
+  },
+  workspaceStore
+);
 
 /**
  * Drops worktrees no live board claims (plan P6 task 1).
@@ -193,7 +265,10 @@ logger.info("workspace-ready", {
 {
   const boards = workspaceStore.getSnapshot().boards;
   const liveBoardIds = new Set(boards.map((board) => board.boardId));
-  const repositories = new Set(boards.map((board) => board.repo.directory));
+  const repositories = new Set([
+    ...boards.map((board) => board.repo.directory),
+    ...repositoryRegistry.roots,
+  ]);
 
   for (const directory of repositories) {
     try {
@@ -227,6 +302,14 @@ const hub = new WorkspaceHub(workspaceStore, {
   coalesceMs: config.coalesceMs,
 });
 
+const pushDispatcher = new PushDispatcher({
+  allowedHosts: config.pushAllowedHosts,
+  configuration: pushConfiguration,
+  presence: hub,
+  store: workspaceStore,
+});
+pushDispatcher.start();
+
 /**
  * Ticket storage and the login limiter.
  *
@@ -246,6 +329,10 @@ workspaceStore.onCommit((commit) => {
 
 const authRoutes = createAuthRoutes({
   isProduction,
+  onLogoutDevice: async (deviceId) => {
+    hub.disconnectDevice(deviceId);
+    await workspaceStore.deleteDevicePushSubscriptions(deviceId);
+  },
   rateLimiter: loginRateLimiter,
   ticketStore,
   token,
@@ -293,15 +380,28 @@ const boardTasks = new BoardTaskService(
   bridge,
   workspaceStore,
   undefined,
-  watchdog
+  watchdog,
+  repositoryRegistry
 );
 const projectService = new ProjectService(
   config.opencodeBaseUrl,
   config.opencodeDirectory,
-  new NativeFolderPicker()
+  new NativeFolderPicker(),
+  (directory) => workspaceStore.registerPickedRepository(directory),
+  config.opencodeUsername && config.opencodePassword
+    ? {
+        password: config.opencodePassword,
+        username: config.opencodeUsername,
+      }
+    : undefined,
+  repositoryRegistry,
+  engineRegistry
+    ? (directory) => engineRegistry.adapterForDirectory(directory)
+    : undefined,
+  (directory) => bridge.subscribeDirectory(directory)
 );
 
-bridge.subscribe((event) => {
+bridge.subscribe(async (event) => {
   // No raw opencode event fan-out. Agent events reach clients as sequenced
   // Chorus events through the store, so external payload shapes never appear on
   // the wire (spec §2 rule 5).
@@ -313,7 +413,6 @@ bridge.subscribe((event) => {
     type: event.type,
     ...(event.sessionID && { sessionID: event.sessionID }),
     ...(event.activity && { activity: event.activity }),
-    ...(event.text && { textPreview: event.text.slice(0, 80) }),
   });
 
   // A streamed delta carries no `activity` -- `normalizeMessagePartDelta` sets
@@ -326,64 +425,24 @@ bridge.subscribe((event) => {
     return;
   }
 
-  watchdog.reset(event.sessionID);
+  if (event.activity === "error") {
+    watchdog.stop(event.sessionID);
+  } else {
+    watchdog.reset(event.sessionID);
+  }
 
-  workspaceStore
-    .applyAgentEvent(event)
-    .then((commit) => {
-      if (!commit) {
-        return;
-      }
+  const commit = await workspaceStore.applyAgentEvent(event);
+  if (!commit) {
+    return;
+  }
 
-      logger.info("workspace-commit", {
-        sessionID: event.sessionID,
-        boardId: commit.boardId,
-        seq: commit.lastSeq,
-        events: commit.events.map((entry) => entry.type),
-      });
-    })
-    .catch((error) => {
-      logger.error(
-        "workspace-projection-failed",
-        error instanceof Error ? error : undefined,
-        {
-          sessionID: event.sessionID,
-          eventType: event.type,
-        }
-      );
-    });
+  logger.info("workspace-commit", {
+    sessionID: event.sessionID,
+    boardId: commit.boardId,
+    seq: commit.lastSeq,
+    events: commit.events.map((entry) => entry.type),
+  });
 });
-
-/**
- * Every prefix served by an API route.
- *
- * The frontend is served from a `/*` catch-all, so the guard cannot gate "all
- * non-API paths" without also gating the SPA the login screen is served from.
- * This list is the deny-side of that trade: anything matching an API prefix is
- * gated, and everything else is treated as a frontend route.
- *
- * The first cut of this helper allowed everything except `/api/`, which silently
- * exempted `/workspace`, `/tasks`, and `/voice` — the exact routes the plan
- * requires to 401.
- */
-const API_PREFIXES = [
-  "/api",
-  "/auth",
-  "/bridge",
-  "/git",
-  "/projects",
-  "/sessions",
-  "/snapshots",
-  "/tasks",
-  "/voice",
-  "/workspace",
-] as const;
-
-function isStaticFrontendPath(pathname: string): boolean {
-  return !API_PREFIXES.some(
-    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
-  );
-}
 
 const securedApp = new Elysia()
   // Response headers are set in `onRequest` via `set.headers`, not `mapResponse`.
@@ -403,6 +462,10 @@ const securedApp = new Elysia()
     logger.info("server-starting", { port: config.port });
   })
   .onError(({ error, code, set }) => {
+    if (error instanceof EngineUnavailableError) {
+      set.status = 503;
+      return { code: error.code, message: error.message };
+    }
     // A directory the workspace does not know about is a rejected request, not
     // a server fault. Surfacing it as 403 rather than 500 keeps the distinction
     // visible in logs and tells a client to fix its input rather than retry.
@@ -438,17 +501,25 @@ const securedApp = new Elysia()
   .resolve(
     { as: "global" },
     authGuardHandler({
-      isStaticAsset: isStaticFrontendPath,
+      isStaticAsset: isPublicFrontendPath,
       ticketOptions,
       token,
     })
   )
 
   .use(authRoutes)
+  .use(
+    createPushRoutes({
+      allowedHosts: config.pushAllowedHosts,
+      configuration: pushConfiguration,
+      store: workspaceStore,
+      token,
+    })
+  )
 
   .use(createHttpRoutes(bridge, boardTasks, workspaceStore))
-  .use(createProjectRoutes(projectService))
-  .use(createWorkspaceRoutes(workspaceStore))
+  .use(createProjectRoutes(projectService, isProduction))
+  .use(createWorkspaceRoutes(workspaceStore, boardTasks))
   .use(voiceRoutes)
   .use(
     createWsHandler({
@@ -470,9 +541,49 @@ const securedApp = new Elysia()
  * previous state — reflects any `Origin` with credentials, which is no policy at
  * all.
  */
-const app = corsOptions
-  ? securedApp.use(cors(corsOptions)).listen(config.port)
-  : securedApp.listen(config.port);
+const app = corsOptions ? securedApp.use(cors(corsOptions)) : securedApp;
+
+try {
+  await bridge.start();
+  logger.info(
+    engineRegistry ? "bridge-started-with-engine-pool" : "bridge-connected",
+    { url: config.opencodeBaseUrl }
+  );
+} catch (error) {
+  logger.error("bridge-failed", error instanceof Error ? error : undefined, {
+    url: config.opencodeBaseUrl,
+  });
+}
+
+for (const board of workspaceStore.getSnapshot().boards) {
+  const hasPendingApprovals = Object.values(board.columns)
+    .flat()
+    .some(
+      (task) =>
+        (task.pendingApprovals?.length ?? 0) > 0 ||
+        task.pendingApproval !== undefined
+    );
+  if (
+    !(
+      board.session.sessionId &&
+      (board.session.state === "active" || hasPendingApprovals)
+    )
+  ) {
+    continue;
+  }
+  try {
+    await bridge.subscribeDirectory(
+      board.repo.worktree ?? board.repo.directory
+    );
+  } catch (error) {
+    logger.warn("worktree-engine-restore-subscription-failed", {
+      boardId: board.boardId,
+      errorName: error instanceof Error ? error.name : "unknown",
+    });
+  }
+}
+
+app.listen(config.port);
 
 logger.info("server-running", {
   host: app.server?.hostname,
@@ -481,15 +592,6 @@ logger.info("server-running", {
   directory: config.opencodeDirectory,
   ws: `ws://${app.server?.hostname}:${app.server?.port}/ws`,
 });
-
-try {
-  await bridge.start();
-  logger.info("bridge-connected", { url: config.opencodeBaseUrl });
-} catch (error) {
-  logger.error("bridge-failed", error instanceof Error ? error : undefined, {
-    url: config.opencodeBaseUrl,
-  });
-}
 
 const SHUTDOWN_TIMEOUT_MS = 5000;
 let isShuttingDown = false;
@@ -512,6 +614,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
     // then children. Each step awaited so the bounded budget is honest
     // and later async flushes (snapshot/coalescer) slot in without
     // reordering.
+    pushDispatcher.stop();
     hub.close();
     bridge.stop();
     await app.server?.stop();
@@ -520,7 +623,10 @@ async function gracefulShutdown(signal: string): Promise<void> {
     // writes a final snapshot, and folds the WAL so a cold copy of chorus.db is
     // a complete backup.
     await workspaceStore.close();
-    await processManager.stop();
+    await Promise.all([
+      processManager?.stop() ?? Promise.resolve(),
+      engineRegistry?.stop() ?? Promise.resolve(),
+    ]);
     clearTimeout(shutdownTimeout);
     logger.info("shutdown-complete");
     process.exit(0);
@@ -534,7 +640,8 @@ async function gracefulShutdown(signal: string): Promise<void> {
 function forceKillOpencode(): void {
   // Deliberately not awaited: this is the last-resort path the shutdown timeout
   // timer calls, and the process is about to exit regardless.
-  processManager.forceKill().catch(() => undefined);
+  processManager?.forceKill().catch(() => undefined);
+  engineRegistry?.forceKill().catch(() => undefined);
 }
 
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));

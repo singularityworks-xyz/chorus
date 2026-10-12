@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import type { OpencodeClient } from "@opencode-ai/sdk/v2";
-import { createOpencodeClient as createSDKClient } from "@opencode-ai/sdk/v2";
+import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2";
+import { createClient as createAdapterClient } from "./features/client/client";
 import { ConfigManager } from "./features/config/config-manager";
 import {
   EventStream,
@@ -33,8 +33,11 @@ export type { ClientOptions, ClientResult } from "./features/client/client";
 export type {
   EventCallback,
   EventStreamHandle,
+  EventStreamOptions,
+  EventStreamStatus,
   NormalizedActivity,
   NormalizedAgentEvent,
+  SessionMessageWithParts,
 } from "./features/events/event-stream";
 /**
  * The normalizer and its reset, exported so a server-side replay test can drive
@@ -45,6 +48,7 @@ export type {
 // biome-ignore lint/performance/noBarrelFile: package entry point from package.json `exports` — serve imports `@chorus/oc-adapter` as one specifier by design.
 export {
   normalizeEvent,
+  normalizeSessionHistory,
   resetMessageTracking,
 } from "./features/events/event-stream";
 export type {
@@ -73,6 +77,7 @@ export type {
 export type {
   SessionCommandInput,
   SessionCreateInput,
+  SessionFileDiff,
   SessionForkInput,
   SessionPromptAsyncInput,
   SessionPromptInput,
@@ -83,17 +88,12 @@ export type { TuiLookupInput } from "./features/tui/tui-manager";
 export function createClient(
   options?: import("./features/client/client").ClientOptions
 ): import("./features/client/client").ClientResult {
-  const client = createSDKClient({
-    baseUrl: options?.baseUrl as `${string}://${string}`,
-    directory: options?.directory,
-    experimental_workspaceID: options?.experimental_workspaceID,
-  });
-
-  return { client };
+  return createAdapterClient(options);
 }
 
 export class OpenCodeAdapter {
   readonly client: OpencodeClient;
+  readonly #normalizationScope: string;
   readonly config: ConfigManager;
   readonly sessions: SessionManager;
   readonly events: EventStream;
@@ -104,8 +104,9 @@ export class OpenCodeAdapter {
   readonly providers: ProviderManager;
   readonly tui: TuiManager;
 
-  constructor(client: OpencodeClient) {
+  constructor(client: OpencodeClient, normalizationScope = "default") {
     this.client = client;
+    this.#normalizationScope = normalizationScope;
     this.config = new ConfigManager(client);
     this.sessions = new SessionManager(client);
     this.events = new EventStream(client);
@@ -118,15 +119,19 @@ export class OpenCodeAdapter {
   }
 
   static from(options?: {
+    auth?: { password: string; username: string };
     baseUrl?: string;
     directory?: string;
     experimental_workspaceID?: string;
   }): OpenCodeAdapter {
     const { client } = createClient(options);
-    return new OpenCodeAdapter(client);
+    return new OpenCodeAdapter(
+      client,
+      `${options?.baseUrl ?? "default"}\0${options?.directory ?? "default"}`
+    );
   }
 
-  normalize = normalizeEvent;
+  normalize = (event: Event) => normalizeEvent(event, this.#normalizationScope);
   /** The SDK version this adapter is compiled against. See decision #5. */
   sdkVersion = sdkVersion;
   resetMessageTracking = resetMessageTracking;

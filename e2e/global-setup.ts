@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   E2E_REPO_DIR,
+  E2E_SERVE_ENV,
   ENGINE_LOG_FILE,
   ENGINE_PID_FILE,
   OPENCODE_PORT,
@@ -35,7 +36,7 @@ export default async function globalSetup(): Promise<void> {
 
   // The engine first: serve adopts a running one rather than spawning its own,
   // and the agent specs need it reachable before the browser does.
-  await stop(OPENCODE_PORT, ENGINE_PID_FILE);
+  await stop(OPENCODE_PORT, ENGINE_PID_FILE, "engine");
   await startEngine({
     cwd: repoRoot,
     logFile: ENGINE_LOG_FILE,
@@ -47,7 +48,7 @@ export default async function globalSetup(): Promise<void> {
     dataDir: SERVE_DATA_DIR,
     // Adopt the engine the Playwright config started, so serve does not spawn a
     // second one on its own port.
-    env: { OPENCODE_BASE_URL: `http://127.0.0.1:${String(OPENCODE_PORT)}` },
+    env: E2E_SERVE_ENV,
     logFile: SERVE_LOG_FILE,
     pidFile: SERVE_PID_FILE,
     port: SERVE_PORT,

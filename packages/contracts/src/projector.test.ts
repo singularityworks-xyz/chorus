@@ -389,6 +389,101 @@ describe("card lifecycle events", () => {
     }
   });
 
+  test("pending request descriptors survive resume until the request is resolved", () => {
+    const waiting = applyEventToBoard(makeBoard(), {
+      boardId: BOARD,
+      kind: "question",
+      pendingApproval: {
+        kind: "question",
+        requestId: "question-1",
+        questions: [
+          {
+            header: "Scope",
+            question: "Which package should change?",
+            options: [{ label: "web", description: "Frontend package" }],
+          },
+        ],
+      },
+      requestId: "question-1",
+      taskId: TASK,
+      ts: T0,
+      type: "card.waiting_for_approval",
+    });
+    const pending = columnOf(waiting, "approve")[0]?.pendingApproval;
+    expect(pending?.kind).toBe("question");
+    if (pending?.kind === "question") {
+      expect(pending.questions[0]?.question).toBe(
+        "Which package should change?"
+      );
+    }
+
+    const resumed = applyEventToBoard(waiting, {
+      boardId: BOARD,
+      taskId: TASK,
+      ts: T0 + 1,
+      type: "card.started",
+    });
+    expect(
+      columnOf(resumed, "in_progress")[0]?.pendingApproval?.requestId
+    ).toBe("question-1");
+
+    const resolved = applyEventToBoard(resumed, {
+      boardId: BOARD,
+      requestId: "question-1",
+      taskId: TASK,
+      ts: T0 + 2,
+      type: "card.approval_resolved",
+    });
+    expect(
+      columnOf(resolved, "in_progress")[0]?.pendingApproval
+    ).toBeUndefined();
+    expect(columnOf(resolved, "in_progress")[0]?.pendingApprovals).toEqual([]);
+  });
+
+  test("resolving one request preserves other pending requests", () => {
+    const permission = applyEventToBoard(makeBoard(), {
+      boardId: BOARD,
+      kind: "permission",
+      pendingApproval: {
+        kind: "permission",
+        permission: "write",
+        requestId: "permission-1",
+      },
+      requestId: "permission-1",
+      taskId: TASK,
+      ts: T0,
+      type: "card.waiting_for_approval",
+    });
+    const question = applyEventToBoard(permission, {
+      boardId: BOARD,
+      kind: "question",
+      pendingApproval: {
+        kind: "question",
+        requestId: "question-1",
+        questions: [],
+      },
+      requestId: "question-1",
+      taskId: TASK,
+      ts: T0 + 1,
+      type: "card.waiting_for_approval",
+    });
+    const resolved = applyEventToBoard(question, {
+      boardId: BOARD,
+      requestId: "permission-1",
+      taskId: TASK,
+      ts: T0 + 2,
+      type: "card.approval_resolved",
+    });
+    expect(
+      columnOf(resolved, "approve")[0]?.pendingApprovals?.map(
+        (entry) => entry.requestId
+      )
+    ).toEqual(["question-1"]);
+    expect(columnOf(resolved, "approve")[0]?.pendingApproval?.requestId).toBe(
+      "question-1"
+    );
+  });
+
   test("card.completed moves to done and releases the session task", () => {
     const next = applyEventToBoard(makeBoard(), {
       type: "card.completed",
@@ -591,6 +686,23 @@ describe("run and step events", () => {
     expect(
       columnOf(next, "in_progress")[0].run?.steps[0].content
     ).toBeUndefined();
+  });
+
+  test("an empty first delta still creates a schema-valid step", () => {
+    const next = applyEventToBoard(makeBoard(), {
+      type: "step.delta_appended",
+      ts: T0,
+      boardId: BOARD,
+      taskId: TASK,
+      stepId: "empty-part",
+      delta: "",
+    });
+
+    const parsed = workspaceBoardSchema.safeParse(next);
+    expect(parsed.success).toBe(true);
+    expect(columnOf(next, "in_progress")[0].run?.steps[0]?.summary).toBe(
+      "Streaming response"
+    );
   });
 
   test("a step event lazily opens the run on a card that has none", () => {

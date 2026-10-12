@@ -57,8 +57,11 @@ function withTaskUpdated(
       if (task.id !== taskId) {
         return task;
       }
-      changed = true;
-      return updater(task);
+      const updated = updater(task);
+      if (updated !== task) {
+        changed = true;
+      }
+      return updated;
     });
   }
 
@@ -217,7 +220,7 @@ function appendDelta(
           id: stepId,
           kind: "response",
           status: "running",
-          summary: delta.slice(0, SUMMARY_MAX),
+          summary: delta.trim().slice(0, SUMMARY_MAX) || "Streaming response",
           content: delta,
         },
       ],
@@ -444,7 +447,11 @@ function applyCardEvent(
     case "card.started":
       return withColumns(
         board,
-        moveCard(board.columns, event.taskId, "in_progress")
+        withTaskUpdated(
+          moveCard(board.columns, event.taskId, "in_progress"),
+          event.taskId,
+          (task) => task
+        )
       );
 
     case "card.moved":
@@ -456,11 +463,70 @@ function applyCardEvent(
     case "card.waiting_for_approval":
       return withColumns(
         board,
-        moveCard(board.columns, event.taskId, "approve")
+        withTaskUpdated(
+          moveCard(board.columns, event.taskId, "approve"),
+          event.taskId,
+          (task) => {
+            if (!event.pendingApproval) {
+              return task;
+            }
+            const existing =
+              task.pendingApprovals ??
+              (task.pendingApproval ? [task.pendingApproval] : []);
+            const requestId =
+              event.requestId ?? event.pendingApproval.requestId;
+            const pending = requestId
+              ? existing.filter((entry) => entry.requestId !== requestId)
+              : existing.filter(
+                  (entry) => entry.kind !== event.pendingApproval?.kind
+                );
+            const next = [
+              ...pending,
+              { ...event.pendingApproval, ...(requestId ? { requestId } : {}) },
+            ];
+            return {
+              ...task,
+              pendingApproval: event.pendingApproval,
+              pendingApprovals: next,
+            };
+          }
+        )
+      );
+
+    case "card.approval_resolved":
+      return withColumns(
+        board,
+        withTaskUpdated(board.columns, event.taskId, (task) => {
+          const existing =
+            task.pendingApprovals ??
+            (task.pendingApproval ? [task.pendingApproval] : []);
+          const pending = existing.filter(
+            (entry) => entry.requestId !== event.requestId
+          );
+          if (pending.length === existing.length) {
+            return task;
+          }
+          return {
+            ...task,
+            pendingApproval:
+              task.pendingApproval?.requestId === event.requestId
+                ? pending.at(-1)
+                : task.pendingApproval,
+            pendingApprovals: pending,
+          };
+        })
       );
 
     case "card.completed": {
-      const columns = moveCard(board.columns, event.taskId, "done");
+      const columns = withTaskUpdated(
+        moveCard(board.columns, event.taskId, "done"),
+        event.taskId,
+        (task) => ({
+          ...task,
+          pendingApproval: undefined,
+          pendingApprovals: [],
+        })
+      );
       const releasesTask = board.session.currentTaskId === event.taskId;
       if (columns === board.columns && !releasesTask) {
         return board;
@@ -477,7 +543,15 @@ function applyCardEvent(
     case "card.failed":
       return {
         ...board,
-        columns: moveCard(board.columns, event.taskId, "done"),
+        columns: withTaskUpdated(
+          moveCard(board.columns, event.taskId, "done"),
+          event.taskId,
+          (task) => ({
+            ...task,
+            pendingApproval: undefined,
+            pendingApprovals: [],
+          })
+        ),
         session: {
           ...board.session,
           currentTaskId: undefined,
@@ -604,7 +678,15 @@ function applySessionEvent(
       return {
         ...board,
         columns: taskId
-          ? moveCard(board.columns, taskId, "done")
+          ? withTaskUpdated(
+              moveCard(board.columns, taskId, "done"),
+              taskId,
+              (task) => ({
+                ...task,
+                pendingApproval: undefined,
+                pendingApprovals: [],
+              })
+            )
           : board.columns,
         session: {
           ...board.session,
@@ -620,7 +702,15 @@ function applySessionEvent(
       return {
         ...board,
         columns: taskId
-          ? moveCard(board.columns, taskId, "done")
+          ? withTaskUpdated(
+              moveCard(board.columns, taskId, "done"),
+              taskId,
+              (task) => ({
+                ...task,
+                pendingApproval: undefined,
+                pendingApprovals: [],
+              })
+            )
           : board.columns,
         // `currentTaskId` is released here exactly as `session.error` releases it.
         // Leaving it set made the next prompt on this board attach its agent events

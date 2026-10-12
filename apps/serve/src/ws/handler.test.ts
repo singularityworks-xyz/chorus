@@ -76,6 +76,7 @@ describe("WebSocket handler", () => {
 
     expect(handler).toBeDefined();
     hub.close();
+    await store.close();
     rmSync(dir, { force: true, recursive: true });
   });
 
@@ -93,6 +94,7 @@ describe("WebSocket handler", () => {
 
     expect(hub.clientCount()).toBe(0);
     hub.close();
+    await store.close();
     rmSync(dir, { force: true, recursive: true });
   });
 });

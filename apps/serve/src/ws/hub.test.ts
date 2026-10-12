@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,21 +15,25 @@ import {
 } from "./hub";
 
 const dirs: string[] = [];
+const stores: WorkspaceStore[] = [];
 
 function makeStore(): WorkspaceStore {
   const dir = mkdtempSync(join(tmpdir(), "chorus-hub-"));
   dirs.push(dir);
-  return new WorkspaceStore(dir);
+  const store = new WorkspaceStore(dir);
+  stores.push(store);
+  return store;
 }
 
-function cleanup() {
+afterEach(async () => {
+  await Promise.all(stores.splice(0).map((store) => store.close()));
   while (dirs.length > 0) {
     const dir = dirs.pop();
     if (dir) {
       rmSync(dir, { force: true, recursive: true });
     }
   }
-}
+});
 
 let socketCounter = 0;
 
@@ -171,7 +175,6 @@ describe("resume handshake", () => {
     expect(hub.clientCount()).toBe(1);
 
     hub.close();
-    cleanup();
   });
 
   test("a caught-up client receives ready and no snapshot", async () => {
@@ -187,7 +190,6 @@ describe("resume handshake", () => {
     expect(socket.messages).toHaveLength(1);
 
     hub.close();
-    cleanup();
   });
 
   test("a small gap replays exactly the missing events in order", async () => {
@@ -217,7 +219,6 @@ describe("resume handshake", () => {
     );
 
     hub.close();
-    cleanup();
   });
 
   test("a gap larger than the threshold falls back to a snapshot", async () => {
@@ -245,7 +246,6 @@ describe("resume handshake", () => {
     expect(socket.messages.some((m) => m.type === "event")).toBe(false);
 
     hub.close();
-    cleanup();
   });
 
   test("a client ahead of the server gets a snapshot rather than silence", async () => {
@@ -259,7 +259,6 @@ describe("resume handshake", () => {
     expect(socket.messages[1]?.type).toBe("snapshot");
 
     hub.close();
-    cleanup();
   });
 
   test("a client resuming from before the snapshot floor gets a snapshot", async () => {
@@ -288,7 +287,6 @@ describe("resume handshake", () => {
     expect(socket.messages[1]?.type).toBe("snapshot");
 
     hub.close();
-    cleanup();
   });
 
   test("resync sends a snapshot on demand", async () => {
@@ -306,7 +304,6 @@ describe("resume handshake", () => {
     expect(socket.messages[0]?.type).toBe("snapshot");
 
     hub.close();
-    cleanup();
   });
 
   test("nothing is pushed before hello completes", async () => {
@@ -336,7 +333,74 @@ describe("resume handshake", () => {
     expect(socket.messages).toHaveLength(0);
 
     hub.close();
-    cleanup();
+  });
+});
+
+describe("authenticated device presence", () => {
+  test("only ready, healthy sockets suppress push and multiple tabs are counted independently", async () => {
+    const store = makeStore();
+    const hub = new WorkspaceHub(store, { pingIntervalMs: 1000 });
+    const firstTab = makeSocket();
+    const secondTab = makeSocket();
+    const deviceId = "d".repeat(32);
+
+    hub.register(firstTab, deviceId);
+    hub.register(secondTab, deviceId);
+    expect(hub.hasReadyConnectionForDevice(deviceId)).toBe(false);
+
+    await hub.handleRawMessage(
+      firstTab,
+      JSON.stringify({ since: 0, type: "hello" })
+    );
+    expect(hub.hasReadyConnectionForDevice(deviceId)).toBe(true);
+
+    hub.unregister(firstTab);
+    expect(hub.hasReadyConnectionForDevice(deviceId)).toBe(false);
+
+    await hub.handleRawMessage(
+      secondTab,
+      JSON.stringify({ since: 0, type: "hello" })
+    );
+    expect(hub.hasReadyConnectionForDevice(deviceId)).toBe(true);
+    hub.unregister(secondTab);
+    expect(hub.hasReadyConnectionForDevice(deviceId)).toBe(false);
+    hub.close();
+  });
+
+  test("logout closes every mirror for that device immediately", async () => {
+    const hub = new WorkspaceHub(makeStore());
+    const firstTab = makeSocket();
+    const secondTab = makeSocket();
+    const otherDevice = makeSocket();
+    const deviceId = "e".repeat(32);
+
+    hub.register(firstTab, deviceId);
+    hub.register(secondTab, deviceId);
+    hub.register(otherDevice, "f".repeat(32));
+    await Promise.all([
+      hub.handleRawMessage(
+        firstTab,
+        JSON.stringify({ since: 0, type: "hello" })
+      ),
+      hub.handleRawMessage(
+        secondTab,
+        JSON.stringify({ since: 0, type: "hello" })
+      ),
+      hub.handleRawMessage(
+        otherDevice,
+        JSON.stringify({ since: 0, type: "hello" })
+      ),
+    ]);
+
+    expect(hub.disconnectDevice(deviceId)).toBe(2);
+    expect(firstTab.closeCalls).toEqual([{ code: 1000, reason: "signed out" }]);
+    expect(secondTab.closeCalls).toEqual([
+      { code: 1000, reason: "signed out" },
+    ]);
+    expect(otherDevice.closeCalls).toEqual([]);
+    expect(hub.hasReadyConnectionForDevice(deviceId)).toBe(false);
+    expect(hub.hasReadyConnectionForDevice("f".repeat(32))).toBe(true);
+    hub.close();
   });
 });
 
@@ -394,7 +458,6 @@ describe("malformed input", () => {
       type: "error",
     });
     hub.close();
-    cleanup();
   });
 
   test("a message with no type is rejected", async () => {
@@ -411,7 +474,6 @@ describe("malformed input", () => {
       type: "error",
     });
     hub.close();
-    cleanup();
   });
 
   test("a hello with a bad `since` is rejected", async () => {
@@ -431,7 +493,6 @@ describe("malformed input", () => {
       type: "error",
     });
     hub.close();
-    cleanup();
   });
 
   test("messages from an unregistered socket are ignored", async () => {
@@ -447,7 +508,6 @@ describe("malformed input", () => {
 
     expect(socket.messages).toHaveLength(0);
     hub.close();
-    cleanup();
   });
 });
 
@@ -470,7 +530,6 @@ describe("command rate limit", () => {
     expect(hub.clientCount()).toBe(0);
 
     hub.close();
-    cleanup();
   });
 
   test("the budget resets after a minute", async () => {
@@ -497,7 +556,6 @@ describe("command rate limit", () => {
 
     expect(socket.closeCalls).toHaveLength(0);
     hub.close();
-    cleanup();
   });
 });
 
@@ -552,7 +610,6 @@ describe("coalescing", () => {
     expect(socket.messages).toHaveLength(50);
 
     hub.close();
-    cleanup();
   });
 
   test("an approval request waits for the buffer so sequences stay ordered", async () => {
@@ -581,7 +638,6 @@ describe("coalescing", () => {
     ).toStrictEqual(Array.from({ length: 21 }, (_, index) => index + 1));
 
     hub.close();
-    cleanup();
   });
 
   test("a burst of deltas flushes as far fewer messages than it had events", async () => {
@@ -613,7 +669,6 @@ describe("coalescing", () => {
     expect(merged.delta).toBe("x".repeat(500));
 
     hub.close();
-    cleanup();
   });
 
   test("coalesced events keep their sequence numbers and stay ordered", async () => {
@@ -634,7 +689,6 @@ describe("coalescing", () => {
     expect(new Set(seqs).size).toBe(100);
 
     hub.close();
-    cleanup();
   });
 
   test("deltas for different steps do not merge", async () => {
@@ -669,10 +723,12 @@ describe("coalescing", () => {
 
     hub.publishRecord(stepEvent("board-1", 1, "part-a"));
     hub.publishRecord(stepEvent("board-2", 2, "part-a"));
+    hub.publishRecord(stepEvent("board-1", 3, "part-b"));
     hub.flush();
 
-    // Same stepId on another board must not absorb the first board's delta.
-    expect(socket.messages).toHaveLength(2);
+    // Same stepId on another board must not absorb the first board's delta,
+    // and interleaved board records must respect the workspace-wide cursor.
+    expect(socket.messages.map((message) => message.seq)).toEqual([1, 2, 3]);
   });
 
   test("flush is a no-op when nothing is buffered", async () => {
@@ -682,7 +738,6 @@ describe("coalescing", () => {
     hub.flush();
     expect(hub.stats().coalescerDepth).toBe(0);
     hub.close();
-    cleanup();
   });
 });
 
@@ -717,7 +772,6 @@ describe("backpressure", () => {
 
     expect(socket.messages).toHaveLength(0);
     hub.close();
-    cleanup();
   });
 
   test("control events still flow to a critical-only client", async () => {
@@ -750,7 +804,6 @@ describe("backpressure", () => {
     expect(socket.messages[0]?.seq).toBe(2);
 
     hub.close();
-    cleanup();
   });
 
   test("the flag clears only once the buffer is comfortably low", async () => {
@@ -780,7 +833,6 @@ describe("backpressure", () => {
     expect(socket.messages[0]?.seq).toBe(3);
 
     hub.close();
-    cleanup();
   });
 
   test("a socket reporting no buffered amount is never throttled", async () => {
@@ -799,7 +851,6 @@ describe("backpressure", () => {
 
     expect(socket.messages).toHaveLength(1);
     hub.close();
-    cleanup();
   });
 });
 
@@ -845,7 +896,6 @@ describe("backpressure recovery", () => {
     expect(hub.stats().criticalOnlyClients).toBe(0);
 
     hub.close();
-    cleanup();
   });
 
   test("without a buffer gauge, recovery waits for a positive send", async () => {
@@ -881,7 +931,6 @@ describe("backpressure recovery", () => {
     expect(socket.messages.some((m) => m.seq === 3)).toBe(true);
 
     hub.close();
-    cleanup();
   });
 
   test("send statuses are counted separately for diagnostics", async () => {
@@ -908,8 +957,6 @@ describe("backpressure recovery", () => {
 
       hub.close();
     }
-
-    cleanup();
   });
 
   test("clients are tracked by connection id, not object identity", async () => {
@@ -945,7 +992,6 @@ describe("backpressure recovery", () => {
     expect(hub.clientCount()).toBe(1);
 
     hub.close();
-    cleanup();
   });
 });
 
@@ -981,7 +1027,6 @@ describe("heartbeat", () => {
     expect(socket.sent.length).toBe(before);
 
     hub.close();
-    cleanup();
   });
 
   test("a pong resets the deadline", async () => {
@@ -1004,7 +1049,6 @@ describe("heartbeat", () => {
 
     expect(hub.clientCount()).toBe(1);
     hub.close();
-    cleanup();
   });
 
   test("the heartbeat ping is sequenced accounting, not a bare write", async () => {
@@ -1028,7 +1072,6 @@ describe("heartbeat", () => {
     expect(hub.stats().backpressuredFrames).toBeGreaterThan(0);
 
     hub.close();
-    cleanup();
   });
 });
 
@@ -1092,7 +1135,6 @@ describe("sequence accounting across coalescing", () => {
     expect(replayed).toBe("");
 
     hub.close();
-    cleanup();
   });
 
   test("a reconnect inside the coalescing window does not double-deliver", async () => {
@@ -1124,7 +1166,6 @@ describe("sequence accounting across coalescing", () => {
     expect(all).toHaveLength(fromReplay.length);
 
     hub.close();
-    cleanup();
   });
 
   test("a control event does not overtake a buffered delta", async () => {
@@ -1166,7 +1207,6 @@ describe("sequence accounting across coalescing", () => {
     expect(seqs).toEqual([7, 8]);
 
     hub.close();
-    cleanup();
   });
 });
 
@@ -1203,7 +1243,6 @@ describe("coalescing correctness", () => {
     );
 
     hub.close();
-    cleanup();
   });
 
   test("a skipped coalescible event is not stepped over by a later control event", async () => {
@@ -1256,7 +1295,6 @@ describe("coalescing correctness", () => {
     expect(delivered[0]?.fromSeq).toBeGreaterThan(1);
 
     hub.close();
-    cleanup();
   });
 });
 
@@ -1292,7 +1330,6 @@ describe("telemetry and liveness are not commands", () => {
     expect(hub.clientCount()).toBe(2);
 
     hub.close();
-    cleanup();
   });
 
   test("pong is never charged against the command budget", async () => {
@@ -1314,7 +1351,6 @@ describe("telemetry and liveness are not commands", () => {
     expect(hub.clientCount()).toBe(1);
 
     hub.close();
-    cleanup();
   });
 
   test("a repeated hello is refused rather than replaying again", async () => {
@@ -1336,7 +1372,6 @@ describe("telemetry and liveness are not commands", () => {
     expect(socket.messages[0]?.type).toBe("error");
 
     hub.close();
-    cleanup();
   });
 
   test("resync before hello is refused", async () => {
@@ -1352,7 +1387,6 @@ describe("telemetry and liveness are not commands", () => {
     expect(socket.messages.map((m) => m.type)).toEqual(["error"]);
 
     hub.close();
-    cleanup();
   });
 
   test("a peer discarding frames is closed rather than ignored", async () => {
@@ -1384,7 +1418,6 @@ describe("telemetry and liveness are not commands", () => {
     expect(hub.clientCount()).toBe(0);
 
     hub.close();
-    cleanup();
   });
 
   test("close flushes the coalescing window instead of discarding it", async () => {
@@ -1414,8 +1447,6 @@ describe("telemetry and liveness are not commands", () => {
     expect((socket.messages[0]?.event as { delta: string }).delta).toBe(
       "pending"
     );
-
-    cleanup();
   });
 
   test("a throwing commit listener cannot fail a durable write", async () => {
@@ -1446,7 +1477,5 @@ describe("telemetry and liveness are not commands", () => {
 
     expect(calls).toBe(1);
     expect(commit?.lastSeq).toBe(1);
-
-    cleanup();
   });
 });

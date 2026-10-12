@@ -268,6 +268,8 @@ interface Client {
   commandWindowStart: number;
   consecutiveDrops: number;
   criticalOnly: boolean;
+  /** Signed device identity verified before the socket was registered. */
+  deviceId?: string;
   /** Frames the transport discarded outright (`send()` returned 0). */
   droppedFrames: number;
   id: string;
@@ -336,7 +338,7 @@ export class WorkspaceHub {
 
   // ── registry ──────────────────────────────────────────────────────────────
 
-  register(socket: HubSocket): Client {
+  register(socket: HubSocket, deviceId?: string): Client {
     // An id can outlive its socket if a connection is replaced in place. Without
     // this, the new client shadows the old one in the id map while the old stays
     // in the set — still receiving events and pings into a dead socket, and
@@ -353,6 +355,7 @@ export class WorkspaceHub {
       commandsThisMinute: 0,
       consecutiveDrops: 0,
       droppedFrames: 0,
+      ...(deviceId ? { deviceId } : {}),
       commandWindowStart: this.#now(),
       telemetryThisMinute: 0,
       telemetryWindowStart: this.#now(),
@@ -379,8 +382,31 @@ export class WorkspaceHub {
     }
   }
 
+  /** Closes every authenticated mirror for a device during explicit logout. */
+  disconnectDevice(deviceId: string): number {
+    const clients = [...this.#clients].filter(
+      (client) => client.deviceId === deviceId
+    );
+    for (const client of clients) {
+      client.socket.close?.(1000, "signed out");
+      this.#drop(client);
+    }
+    return clients.length;
+  }
+
   clientCount(): number {
     return this.#clients.size;
+  }
+
+  hasReadyConnectionForDevice(deviceId: string): boolean {
+    const healthyWithinMs = this.#pingIntervalMs + PONG_TIMEOUT_MS;
+    const now = this.#now();
+    return [...this.#clients].some(
+      (client) =>
+        client.deviceId === deviceId &&
+        client.ready &&
+        now - client.lastPongAt <= healthyWithinMs
+    );
   }
 
   stats(): HubStats {
@@ -741,22 +767,24 @@ export class WorkspaceHub {
     this.#mergeIndex.clear();
     this.#pendingDepth = 0;
 
-    for (const [, records] of entries) {
-      // Merging can leave a buffer whose entries are not in sequence order
-      // (a merge extends an earlier entry's range past a later one). Deliver
-      // ascending so a client's contiguous-run tracking stays meaningful.
-      const ordered = [...records].sort((a, b) => a.fromSeq - b.fromSeq);
-      for (const record of ordered) {
-        // One unserialisable record must not discard the rest of the window:
-        // the records were already removed from the buffers above, so a throw
-        // here would drop them silently, and on the synchronous path it would
-        // escape into the store's commit and fail a write that is already
-        // durable.
-        try {
-          this.#deliver(record);
-        } catch (error) {
-          console.error("[ws] delivery failed:", error);
-        }
+    // Sequences are workspace-wide, not board-local. Sorting each board
+    // independently and then sending whole board buffers can deliver 1, 3, 2
+    // when events from two boards were interleaved. Merge only consumes
+    // contiguous ranges, so a global ordering preserves the cursor invariant.
+    const ordered = entries
+      .flatMap(([, records]) => records)
+      .sort((a, b) => a.fromSeq - b.fromSeq);
+
+    for (const record of ordered) {
+      // One unserialisable record must not discard the rest of the window:
+      // the records were already removed from the buffers above, so a throw
+      // here would drop them silently, and on the synchronous path it would
+      // escape into the store's commit and fail a write that is already
+      // durable.
+      try {
+        this.#deliver(record);
+      } catch (error) {
+        console.error("[ws] delivery failed:", error);
       }
     }
   }

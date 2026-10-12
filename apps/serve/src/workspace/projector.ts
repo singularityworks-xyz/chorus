@@ -23,6 +23,10 @@ import type { NormalizedAgentEvent } from "@chorus/oc-adapter";
 
 const SUMMARY_MAX = 72;
 
+function summaryOr(text: string | undefined, fallback: string): string {
+  return text?.trim().slice(0, SUMMARY_MAX) || fallback;
+}
+
 function stepIdFor(event: NormalizedAgentEvent): string {
   if (event.partID) {
     const prefix = event.messageID ? `msg-${event.messageID}-` : "";
@@ -36,7 +40,10 @@ function makeToolStep(event: NormalizedAgentEvent): AgentStep {
     id: stepIdFor(event),
     kind: "tool_call",
     status: event.activity === "error" ? "error" : "done",
-    summary: `${event.toolName}${event.toolState ? ` · ${event.toolState}` : ""}`,
+    summary: summaryOr(
+      `${event.toolName}${event.toolState ? ` · ${event.toolState}` : ""}`,
+      "Tool call"
+    ),
     content: event.text,
   };
 
@@ -62,7 +69,7 @@ function buildStep(event: NormalizedAgentEvent): AgentStep | null {
       id: stepIdFor(event),
       kind: "thinking",
       status: "running",
-      summary: event.text?.slice(0, SUMMARY_MAX) ?? "Thinking",
+      summary: summaryOr(event.text, "Thinking"),
       content: event.text,
     };
   }
@@ -72,7 +79,7 @@ function buildStep(event: NormalizedAgentEvent): AgentStep | null {
       id: stepIdFor(event),
       kind: "response",
       status: "running",
-      summary: event.text?.slice(0, SUMMARY_MAX) ?? "Streaming response",
+      summary: summaryOr(event.text, "Streaming response"),
       content: event.text,
     };
   }
@@ -92,7 +99,7 @@ function buildStep(event: NormalizedAgentEvent): AgentStep | null {
       id: stepIdFor(event),
       kind: "response",
       status: "running",
-      summary: event.questions?.[0]?.header ?? "Question",
+      summary: summaryOr(event.questions?.[0]?.header, "Question"),
       content: event.questionID,
     };
   }
@@ -102,7 +109,7 @@ function buildStep(event: NormalizedAgentEvent): AgentStep | null {
       id: stepIdFor(event),
       kind: "response",
       status: "error",
-      summary: event.error ?? "Session error",
+      summary: summaryOr(event.error, "Session error"),
       content: event.error,
     };
   }
@@ -179,6 +186,11 @@ export function toWorkspaceEvents(
         taskId: scope.taskId,
         ts,
         kind: "permission",
+        pendingApproval: {
+          kind: "permission",
+          permission: event.permission,
+          requestId: event.permissionID,
+        },
         requestId: event.permissionID,
       });
       break;
@@ -190,6 +202,11 @@ export function toWorkspaceEvents(
         taskId: scope.taskId,
         ts,
         kind: "question",
+        pendingApproval: {
+          kind: "question",
+          questions: event.questions ?? [],
+          requestId: event.questionID,
+        },
         requestId: event.questionID,
       });
       break;

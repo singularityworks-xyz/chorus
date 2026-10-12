@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2";
-import { normalizeEvent, resetMessageTracking } from "./event-stream";
+import {
+  normalizeEvent,
+  normalizeSessionHistory,
+  resetMessageTracking,
+  type SessionMessageWithParts,
+} from "./event-stream";
 
 // Real opencode streams deliver message.updated (role=assistant) before any
 // of that message's part events; the normalizer relies on it to classify
@@ -43,6 +48,7 @@ describe("normalizeEvent", () => {
     const result = normalizeEvent(raw);
 
     expect(result.type).toBe("message.part.updated");
+    expect(result.sourceEventId).toBe("evt-0");
     expect(result.sessionID).toBe("sess-1");
     expect(result.activity).toBe("writing");
     expect(result.text).toBe("hello world");
@@ -218,6 +224,7 @@ describe("normalizeEvent", () => {
     expect(result.activity).toBe("waiting_for_approval");
     expect(result.permissionID).toBe("perm-1");
     expect(result.sessionID).toBe("sess-1");
+    expect(result.sourceEventId).toBe("permission.asked:perm-1");
   });
 
   test("normalizes session.error as error", () => {
@@ -338,6 +345,65 @@ describe("normalizeEvent", () => {
     } as unknown as OpencodeEvent;
 
     expect(normalizeEvent(raw).activity).toBe("waiting_for_question");
+    expect(normalizeEvent(raw).sourceEventId).toBe("question.asked:q-1");
+  });
+
+  test("rebuilds stable assistant part upserts from session history", () => {
+    const messages = [
+      {
+        info: {
+          id: "msg-history",
+          role: "assistant",
+          time: { created: 1234 },
+        },
+        parts: [
+          {
+            id: "part-history",
+            messageID: "msg-history",
+            sessionID: "sess-history",
+            text: "Recovered answer",
+            type: "text",
+          },
+        ],
+      },
+    ] as unknown as SessionMessageWithParts[];
+
+    const [event] = normalizeSessionHistory(
+      "sess-history",
+      messages,
+      "engine-a"
+    );
+
+    expect(event).toMatchObject({
+      activity: "writing",
+      messageID: "msg-history",
+      partID: "part-history",
+      sessionID: "sess-history",
+      sourceEventId: "history:msg-history:part-history",
+      text: "Recovered answer",
+      type: "message.part.updated",
+    });
+  });
+
+  test("scopes assistant message tracking to the engine and session", () => {
+    const sessionID = "sess-shared-id";
+    const parent = assistantMessageUpdated(sessionID, "msg-scoped");
+    const delta = {
+      id: "evt-scoped-delta",
+      properties: {
+        delta: "recognized",
+        field: "text",
+        messageID: "msg-scoped",
+        partID: "part-scoped",
+        sessionID,
+      },
+      type: "message.part.delta",
+    } as OpencodeEvent;
+
+    normalizeEvent(parent, "engine-a");
+
+    expect(normalizeEvent(delta, "engine-a").delta).toBe("recognized");
+    expect(normalizeEvent(delta, "engine-b").delta).toBeUndefined();
   });
 
   test("an unrecorded parent message drops part content instead of guessing", () => {

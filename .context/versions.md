@@ -30,12 +30,21 @@ assertion would fail on a fresh install.
 | @opencode-ai/sdk | **1.18.29** (exact pin, no caret) | `packages/opencode-adapter/package.json` |
 | opencode CLI | **1.18.29** | `/global/health` on the running engine, read by `process-manager.ts` |
 
-The binary version is no longer taken from `opencode --version` on PATH. It is
-read from the engine that is actually serving, which is not necessarily the one
-we would have spawned — serve adopts an already-running engine when it finds one.
+The binary version is read from the engine that is actually serving, which is
+not necessarily the one we would have spawned — serve adopts an already-running
+engine when it finds one. Managed startup resolves the binary from the pinned
+`opencode-ai` dependency rather than searching PATH.
 `opencode serve` answers 200 with an HTML shell for *any* unknown path, so
 `/global/health` is the only endpoint that distinguishes a live engine from a
 squatter; it returns `{"healthy":true,"version":"..."}`.
+
+## Current dev runtime — 2026-10-12
+
+The local engine reported version **1.19.0** while the SDK remained pinned to
+1.18.29, causing the intentional boot lockstep check to stop Serve. The SDK and
+the locally managed CLI package are now both pinned to exact version **1.19.0**.
+Future engine or SDK updates must change both sides together and repeat the
+adapter compatibility checks.
 
 ### What changed between 1.3.15 and 1.18.29
 
@@ -60,16 +69,22 @@ Diffed against the published types before upgrading (read-only, in `/tmp`):
 
 ## Known drift
 
-None outstanding. The SDK ↔ binary mismatch recorded at baseline is resolved: see
-the Phase 6 lockstep section above. The adapter remains the only place allowed to
-touch SDK types, so a future bump is contained to `packages/opencode-adapter`.
+No SDK ↔ binary mismatch is outstanding in the current dev runtime: both report
+**1.19.0**. The Phase 6 table above records the earlier **1.18.29** pairing; the
+2026-10-12 entry is the current pairing. The adapter remains the only place
+allowed to touch SDK types, so a future bump is contained to
+`packages/opencode-adapter` and must update this ledger with the observed engine
+version.
 
-Resolution: Phase 6, task 5. Bump `@opencode-ai/sdk` via `bun add`, pin the
-spawned binary to the same version, diff the changelog, update the normalization
-layer, and record the new pair here.
+Resolution: the SDK pin and `opencode-ai` CLI package are both exact 1.19.0
+dependencies. The boot assertion still detects a mismatch when an adopted
+external engine differs from the SDK. Managed startup launches the local package
+binary, not a globally installed executable.
 
 ## Update log
 
 | Date | Phase | Change |
 |---|---|---|
 | 2026-10-01 | P0 | Baseline recorded; `packageManager` aligned to runtime 1.4.0 |
+| 2026-10-12 | P6 | SDK exact pin advanced from 1.18.29 to 1.19.0 to restore lockstep with the running engine |
+| 2026-10-12 | P6 | Added the exact `opencode-ai` 1.19.0 CLI dependency; managed engine startup now uses that binary |

@@ -3,6 +3,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "./index";
 
+const INVALID_ENGINE_URL_MESSAGE = /Invalid OPENCODE_BASE_URL/;
+const INVALID_PER_WORKTREE_MESSAGE = /Invalid OPENCODE_PER_WORKTREE/;
+const REQUIRES_LOCAL_MANAGED_ENGINE_MESSAGE =
+  /requires a local, managed OpenCode engine/;
+
 describe("loadConfig", () => {
   const originalEnv = process.env;
 
@@ -18,6 +23,9 @@ describe("loadConfig", () => {
     process.env.PORT = undefined as unknown as string;
     process.env.HOSTNAME = undefined as unknown as string;
     process.env.OPENCODE_BASE_URL = undefined as unknown as string;
+    process.env.OPENCODE_AUTO_START = undefined as unknown as string;
+    process.env.OPENCODE_USERNAME = undefined as unknown as string;
+    process.env.OPENCODE_PASSWORD = undefined as unknown as string;
     process.env.OPENCODE_DIRECTORY = undefined as unknown as string;
     process.env.DATA_DIR = undefined as unknown as string;
     process.env.RETENTION_DAYS = undefined as unknown as string;
@@ -29,7 +37,7 @@ describe("loadConfig", () => {
 
     expect(config.port).toBe(2000);
     expect(config.hostname).toBe("localhost");
-    expect(config.opencodeBaseUrl).toBe("http://localhost:4096");
+    expect(config.opencodeBaseUrl).toBe("http://127.0.0.1:4096");
     expect(config.opencodeDirectory).toBe(process.cwd());
     // Parity with where the pre-Phase-2 JSON store kept its state.
     expect(config.dataDir).toBe(join(homedir(), ".chorus"));
@@ -37,6 +45,7 @@ describe("loadConfig", () => {
     expect(config.dbSizeCapMb).toBe(512);
     expect(config.snapshotInterval).toBe(1000);
     expect(config.coalesceMs).toBe(100);
+    expect(config.opencodePerWorktree).toBe(false);
     // Off by default so the legacy import path can be deleted once migrated.
     expect(config.enableLegacyWorkspaceImport).toBe(false);
   });
@@ -63,6 +72,25 @@ describe("loadConfig", () => {
     const config = loadConfig();
 
     expect(config.opencodeBaseUrl).toBe("http://example.com:9999");
+    expect(config.autoStartOpencode).toBe(false);
+  });
+
+  test("rejects engine URLs with credentials or paths", () => {
+    process.env.OPENCODE_BASE_URL = "https://user:secret@example.com/api";
+    expect(() => loadConfig()).toThrow(INVALID_ENGINE_URL_MESSAGE);
+  });
+
+  test("uses configured engine Basic auth without exposing it in the URL", () => {
+    process.env.OPENCODE_USERNAME = "chorus";
+    process.env.OPENCODE_PASSWORD = "secret";
+    process.env.OPENCODE_BASE_URL = "https://engine.example.com";
+
+    const config = loadConfig();
+
+    expect(config.opencodeBaseUrl).toBe("https://engine.example.com");
+    expect(config.opencodeUsername).toBe("chorus");
+    expect(config.opencodePassword).toBe("secret");
+    expect(config.autoStartOpencode).toBe(false);
   });
 
   test("reads OPENCODE_DIRECTORY from env", () => {
@@ -71,6 +99,21 @@ describe("loadConfig", () => {
     const config = loadConfig();
 
     expect(config.opencodeDirectory).toBe("/tmp/test-dir");
+  });
+
+  test("enables the local per-worktree engine pool only when explicitly requested", () => {
+    process.env.OPENCODE_PER_WORKTREE = "true";
+
+    expect(loadConfig().opencodePerWorktree).toBe(true);
+  });
+
+  test("rejects invalid or externally managed per-worktree engine settings", () => {
+    process.env.OPENCODE_PER_WORKTREE = "yes";
+    expect(() => loadConfig()).toThrow(INVALID_PER_WORKTREE_MESSAGE);
+
+    process.env.OPENCODE_PER_WORKTREE = "true";
+    process.env.OPENCODE_BASE_URL = "https://engine.example.test";
+    expect(() => loadConfig()).toThrow(REQUIRES_LOCAL_MANAGED_ENGINE_MESSAGE);
   });
 
   test("parses PORT as a number", () => {
@@ -99,16 +142,24 @@ describe("loadConfig", () => {
     expect(config).toEqual({
       port: 5000,
       hostname: "127.0.0.1",
+      opencodePerWorktree: false,
       opencodeBaseUrl: "http://opencode:4096",
       opencodePort: 4096,
       opencodeDirectory: "/workspace",
-      autoStartOpencode: true,
+      autoStartOpencode: false,
+      opencodeUsername: undefined,
+      opencodePassword: undefined,
       coalesceMs: 75,
       dataDir: "/data",
       retentionDays: 7,
       dbSizeCapMb: 256,
       snapshotInterval: 500,
       enableLegacyWorkspaceImport: true,
+      pushAllowedHosts: [],
+      pushEnabled: undefined,
+      vapidPrivateKey: undefined,
+      vapidPublicKey: undefined,
+      vapidSubject: undefined,
     });
   });
 

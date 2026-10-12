@@ -59,6 +59,36 @@ describe("WebSocket upgrade tickets (spec §6.2, plan P4.3)", () => {
     expect(consumeTicket(ticket, options)).toBe("unknown");
   });
 
+  test("device-bound tickets reject a different device and accept the owner", () => {
+    const clock = 1_700_000_000_000;
+    const store = makeStore();
+    const ticket = issueTicket({
+      deviceId: "a".repeat(32),
+      now: () => clock,
+      store,
+    });
+
+    expect(
+      consumeTicket(ticket, {
+        deviceId: "b".repeat(32),
+        now: () => clock,
+        store,
+      })
+    ).toBe("unknown");
+    expect(store.rows.size).toBe(0);
+  });
+
+  test("a device-bound ticket is consumable only by its signed device", () => {
+    const clock = 1_700_000_000_000;
+    const store = makeStore();
+    const deviceId = "c".repeat(32);
+    const ticket = issueTicket({ deviceId, now: () => clock, store });
+
+    expect(consumeTicket(ticket, { deviceId, now: () => clock, store })).toBe(
+      "consumed"
+    );
+  });
+
   test("a consumed ticket leaves no row behind", () => {
     const store = makeStore();
     const options = { now: () => Date.now(), store };

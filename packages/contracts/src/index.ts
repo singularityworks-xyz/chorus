@@ -15,8 +15,11 @@
  */
 
 // biome-ignore lint/performance/noBarrelFile: package entry point from package.json `exports` — both apps import `@chorus/contracts` as one specifier by design.
+export * from "./auth";
 export * from "./base";
 export * from "./events";
 export * from "./mutation-map";
+export * from "./notifications";
 export * from "./projector";
 export * from "./protocol";
+export * from "./session-diff";

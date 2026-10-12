@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import type {
   BoardSeed,
   OpencodeConfiguredProviderCatalog,
@@ -18,6 +19,7 @@ import { AuthLoginLauncher } from "./auth-login";
 import { OpenCodeConfigStore } from "./config-store";
 import { OpenCodeCredentialStore } from "./credential-store";
 import type { FolderPicker } from "./folder-picker";
+import type { RepositoryRegistry } from "./repository-registry";
 
 const logger = createLogger(
   {
@@ -30,8 +32,7 @@ function toBoardSeed(
   repo: Awaited<ReturnType<ProjectService["inspectDirectory"]>>
 ) {
   return {
-    title:
-      repo.projectName ?? repo.directory.split("/").pop() ?? repo.directory,
+    title: repo.projectName ?? basename(repo.directory),
     repo: {
       directory: repo.directory,
       worktree: repo.worktree,
@@ -46,29 +47,55 @@ function toBoardSeed(
 export class ProjectService {
   readonly #baseUrl: string;
   readonly #defaultDirectory: string;
+  readonly #auth: { password: string; username: string } | undefined;
+  readonly #repositoryRegistry: RepositoryRegistry | undefined;
   readonly #folderPicker: FolderPicker;
+  readonly #registerPickedRepository: (directory: string) => Promise<string>;
   readonly #authLoginLauncher = new AuthLoginLauncher();
   readonly #credentialStore = new OpenCodeCredentialStore();
   readonly #configStore = new OpenCodeConfigStore();
+  readonly #engineAdapterForDirectory:
+    | ((directory: string) => Promise<OpenCodeAdapter>)
+    | undefined;
+  readonly #prepareEngineDirectory:
+    | ((directory: string) => Promise<void>)
+    | undefined;
 
   constructor(
     baseUrl: string,
     defaultDirectory: string,
-    folderPicker: FolderPicker
+    folderPicker: FolderPicker,
+    registerPickedRepository: (directory: string) => Promise<string>,
+    auth?: { password: string; username: string },
+    repositoryRegistry?: RepositoryRegistry,
+    engineAdapterForDirectory?: (directory: string) => Promise<OpenCodeAdapter>,
+    prepareEngineDirectory?: (directory: string) => Promise<void>
   ) {
     this.#baseUrl = baseUrl;
     this.#defaultDirectory = defaultDirectory;
+    this.#auth = auth;
+    this.#repositoryRegistry = repositoryRegistry;
+    this.#engineAdapterForDirectory = engineAdapterForDirectory;
+    this.#prepareEngineDirectory = prepareEngineDirectory;
     this.#folderPicker = folderPicker;
+    this.#registerPickedRepository = registerPickedRepository;
   }
 
   async listProjects(): Promise<ProjectListResponse> {
+    if (this.#repositoryRegistry) {
+      const projects = this.#repositoryRegistry.roots.map((directory) => ({
+        directory,
+        projectName: basename(directory),
+        sandboxes: [],
+        worktree: directory,
+      }));
+      return { projects };
+    }
+
     logger.debug("list-projects:start", {
       directory: this.#defaultDirectory,
     });
-    const adapter = OpenCodeAdapter.from({
-      baseUrl: this.#baseUrl,
-      directory: this.#defaultDirectory,
-    });
+    const adapter = await this.#adapterForDirectory(this.#defaultDirectory);
 
     const projects = await adapter.projects.list({
       directory: this.#defaultDirectory,
@@ -117,11 +144,9 @@ export class ProjectService {
   }
 
   async reloadInstance(directory: string): Promise<boolean> {
+    await this.#validateDirectory(directory);
     logger.info("instance-reload:start", { directory });
-    const adapter = OpenCodeAdapter.from({
-      baseUrl: this.#baseUrl,
-      directory,
-    });
+    const adapter = await this.#adapterForDirectory(directory);
 
     const disposed = await adapter.instances.dispose({ directory });
 
@@ -136,15 +161,17 @@ export class ProjectService {
   async configureProvider(
     input: OpencodeConfigureProviderInput
   ): Promise<boolean> {
+    if (input.directory) {
+      await this.#validateDirectory(input.directory);
+    }
     logger.info("configure-provider:start", {
       directory: input.directory ?? null,
       providerID: input.providerID,
     });
 
-    const adapter = OpenCodeAdapter.from({
-      baseUrl: this.#baseUrl,
-      directory: input.directory,
-    });
+    const adapter = await this.#adapterForDirectory(
+      input.directory ?? this.#defaultDirectory
+    );
 
     await adapter.config.configureGlobalProvider(input.providerID);
 
@@ -163,12 +190,12 @@ export class ProjectService {
     return true;
   }
 
-  listModelsForDirectory(_directory: string): Promise<OpencodeModelCatalog> {
-    logger.debug("list-models:start", { directory: _directory });
-    const adapter = OpenCodeAdapter.from({
-      baseUrl: this.#baseUrl,
-      directory: this.#defaultDirectory,
-    });
+  async listModelsForDirectory(
+    directory: string
+  ): Promise<OpencodeModelCatalog> {
+    await this.#validateDirectory(directory);
+    logger.debug("list-models:start", { directory });
+    const adapter = await this.#adapterForDirectory(directory);
 
     return adapter.providers.listModels().then((catalog) => {
       logger.info("list-models:done", {
@@ -186,14 +213,12 @@ export class ProjectService {
     return this.listProvidersForDirectory(this.#defaultDirectory);
   }
 
-  listProvidersForDirectory(
+  async listProvidersForDirectory(
     directory: string
   ): Promise<OpencodeProviderCatalog> {
+    await this.#validateDirectory(directory);
     logger.debug("list-providers:start", { directory });
-    const adapter = OpenCodeAdapter.from({
-      baseUrl: this.#baseUrl,
-      directory,
-    });
+    const adapter = await this.#adapterForDirectory(directory);
 
     return adapter.providers
       .listProviders({
@@ -212,18 +237,16 @@ export class ProjectService {
       });
   }
 
-  getProviderAuthMethods(
+  async getProviderAuthMethods(
     directory: string,
     providerID: string
   ): Promise<OpencodeProviderAuthCatalog> {
+    await this.#validateDirectory(directory);
     logger.info("provider-auth-methods:start", {
       directory,
       providerID,
     });
-    const adapter = OpenCodeAdapter.from({
-      baseUrl: this.#baseUrl,
-      directory,
-    });
+    const adapter = await this.#adapterForDirectory(directory);
 
     return adapter.providers
       .getAuthMethods({
@@ -240,18 +263,16 @@ export class ProjectService {
       });
   }
 
-  authorizeProviderOauth(
+  async authorizeProviderOauth(
     input: OpencodeProviderOauthAuthorizeInput
   ): Promise<OpencodeProviderOauthAuthorization> {
+    await this.#validateDirectory(input.directory);
     logger.info("provider-oauth-authorize:start", {
       directory: input.directory,
       method: input.method,
       providerID: input.providerID,
     });
-    const adapter = OpenCodeAdapter.from({
-      baseUrl: this.#baseUrl,
-      directory: input.directory,
-    });
+    const adapter = await this.#adapterForDirectory(input.directory);
 
     return adapter.providers
       .authorizeOauth({
@@ -271,18 +292,16 @@ export class ProjectService {
       });
   }
 
-  completeProviderOauth(
+  async completeProviderOauth(
     input: OpencodeProviderOauthCallbackInput
   ): Promise<boolean> {
+    await this.#validateDirectory(input.directory);
     logger.info("provider-oauth-callback:start", {
       directory: input.directory,
       method: input.method,
       providerID: input.providerID,
     });
-    const adapter = OpenCodeAdapter.from({
-      baseUrl: this.#baseUrl,
-      directory: input.directory,
-    });
+    const adapter = await this.#adapterForDirectory(input.directory);
 
     return adapter.providers
       .completeOauth({
@@ -306,15 +325,15 @@ export class ProjectService {
       });
   }
 
-  setProviderApiAuth(input: OpencodeProviderApiAuthInput): Promise<boolean> {
+  async setProviderApiAuth(
+    input: OpencodeProviderApiAuthInput
+  ): Promise<boolean> {
+    await this.#validateDirectory(input.directory);
     logger.info("provider-api-auth:start", {
       directory: input.directory,
       providerID: input.providerID,
     });
-    const adapter = OpenCodeAdapter.from({
-      baseUrl: this.#baseUrl,
-      directory: input.directory,
-    });
+    const adapter = await this.#adapterForDirectory(input.directory);
 
     return adapter.providers
       .setApiAuth({
@@ -336,12 +355,10 @@ export class ProjectService {
       });
   }
 
-  openModels(directory: string): Promise<boolean> {
+  async openModels(directory: string): Promise<boolean> {
+    await this.#validateDirectory(directory);
     logger.info("open-models:start", { directory });
-    const adapter = OpenCodeAdapter.from({
-      baseUrl: this.#baseUrl,
-      directory,
-    });
+    const adapter = await this.#adapterForDirectory(directory);
 
     return adapter.tui.openModels({ directory }).then((opened) => {
       if (opened) {
@@ -354,12 +371,10 @@ export class ProjectService {
     });
   }
 
-  runConnect(directory: string): Promise<boolean> {
+  async runConnect(directory: string): Promise<boolean> {
+    await this.#validateDirectory(directory);
     logger.info("run-connect:start", { directory });
-    const adapter = OpenCodeAdapter.from({
-      baseUrl: this.#baseUrl,
-      directory,
-    });
+    const adapter = await this.#adapterForDirectory(directory);
 
     return adapter.tui.runConnect({ directory }).then((opened) => {
       if (opened) {
@@ -373,6 +388,7 @@ export class ProjectService {
   }
 
   async launchAuthLogin(directory: string): Promise<boolean> {
+    await this.#validateDirectory(directory);
     logger.info("auth-login:start", { directory });
     const before = await this.#credentialStore.listCredentials();
     const launched = await this.#authLoginLauncher.launch(directory);
@@ -404,13 +420,27 @@ export class ProjectService {
     return launched;
   }
 
-  inspectDirectory(directory: string) {
-    const adapter = OpenCodeAdapter.from({
+  async inspectDirectory(directory: string) {
+    await this.#validateDirectory(directory);
+    const adapter = await this.#adapterForDirectory(directory);
+
+    return adapter.projects.inspect({ directory });
+  }
+
+  async #validateDirectory(directory: string): Promise<void> {
+    await this.#repositoryRegistry?.validateAuthorizedCheckout(directory);
+  }
+
+  async #adapterForDirectory(directory: string): Promise<OpenCodeAdapter> {
+    await this.#prepareEngineDirectory?.(directory);
+    if (this.#engineAdapterForDirectory) {
+      return this.#engineAdapterForDirectory(directory);
+    }
+    return OpenCodeAdapter.from({
+      auth: this.#auth,
       baseUrl: this.#baseUrl,
       directory,
     });
-
-    return adapter.projects.inspect({ directory });
   }
 
   async openFolder(): Promise<BoardSeed | null> {
@@ -421,7 +451,8 @@ export class ProjectService {
       return null;
     }
 
-    const repo = await this.inspectDirectory(directory);
+    const registeredDirectory = await this.#registerPickedRepository(directory);
+    const repo = await this.inspectDirectory(registeredDirectory);
     const seed = toBoardSeed(repo);
     logger.info("open-folder:done", {
       directory,
@@ -432,10 +463,7 @@ export class ProjectService {
 
   createBoardSeedFromProject(project: ProjectListResponse["projects"][number]) {
     return {
-      title:
-        project.projectName ??
-        project.directory.split("/").pop() ??
-        project.directory,
+      title: project.projectName ?? basename(project.directory),
       repo: {
         ...project,
       },

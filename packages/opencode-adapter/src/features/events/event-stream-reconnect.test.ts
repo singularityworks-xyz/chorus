@@ -30,6 +30,7 @@ function fakeClient() {
   let subscribeCalls = 0;
   /** One outcome per subscribe attempt; defaults to `"hold"`. */
   const outcomes: Outcome[] = [];
+  const eventBatches: unknown[][] = [];
 
   return {
     client: {
@@ -42,7 +43,7 @@ function fakeClient() {
             return Promise.reject(new Error("subscribe refused"));
           }
 
-          const delivered: unknown[] = [];
+          const delivered = eventBatches.shift() ?? [];
           const cleanup: (() => void)[] = [];
 
           const stream = {
@@ -84,6 +85,7 @@ function fakeClient() {
       return subscribeCalls;
     },
     outcomes,
+    eventBatches,
   };
 }
 
@@ -132,6 +134,38 @@ describe("EventStream reconnection", () => {
     // Previously this stayed at one: the stream ended, `#consume` returned, and
     // the subscription went quiet for the rest of the process's life.
     expect(fake.subscribeCalls).toBeGreaterThan(1);
+
+    stream.stop();
+  });
+
+  test("a transient reopen failure is retried until a stream is restored", async () => {
+    const fake = fakeClient();
+    fake.outcomes.push("end", "fail", "hold");
+    const stream = new EventStream(fake.client as never);
+
+    await stream.subscribe(() => undefined, { directory: "/repo" });
+    await new Promise((resolve) => setTimeout(resolve, 900));
+
+    expect(fake.subscribeCalls).toBe(3);
+
+    stream.stop();
+  });
+
+  test("stable SDK event IDs are deduplicated across stream reconnects", async () => {
+    const fake = fakeClient();
+    fake.outcomes.push("end", "hold");
+    const duplicate = { id: "engine-event-1", type: "session.idle" };
+    fake.eventBatches.push([duplicate], [duplicate]);
+    const stream = new EventStream(fake.client as never);
+    const seen: unknown[] = [];
+
+    await stream.subscribe((event) => seen.push(event), {
+      directory: "/repo",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(fake.subscribeCalls).toBe(2);
+    expect(seen).toEqual([duplicate]);
 
     stream.stop();
   });

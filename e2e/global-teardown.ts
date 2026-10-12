@@ -18,6 +18,6 @@ export default async function globalTeardown(): Promise<void> {
   } finally {
     // In `finally`: a serve shutdown that times out would otherwise leave the
     // engine running for the next run to inherit, along with its warm state.
-    await stop(OPENCODE_PORT, ENGINE_PID_FILE);
+    await stop(OPENCODE_PORT, ENGINE_PID_FILE, "engine");
   }
 }

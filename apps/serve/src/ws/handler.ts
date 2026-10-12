@@ -145,6 +145,10 @@ export interface WsHandlerOptions {
 export function createWsHandler(options: WsHandlerOptions) {
   const { bridge, boardTasks, hub, workspaceStore, ticketOptions, token } =
     options;
+  const registrations = new Map<
+    string,
+    { closed: boolean; ready: Promise<boolean> }
+  >();
 
   /**
    * Authenticates the upgrade.
@@ -161,16 +165,27 @@ export function createWsHandler(options: WsHandlerOptions) {
    */
   // The credential verify is an async HMAC check, and the socket must not be
   // registered before it resolves.
-  // biome-ignore lint/suspicious/useAwait: awaits the credential verify
   const authorizeUpgrade = async (
     ws: unknown
-  ): Promise<{ ok: true } | { ok: false; reason: string }> => {
+  ): Promise<
+    { deviceId: string; ok: true } | { ok: false; reason: string }
+  > => {
     const data = (ws as { data?: { request?: Request } }).data;
     if (!data?.request) {
       return { ok: false, reason: "no upgrade request" };
     }
 
-    return verifyRequestCredential(data.request, { ticketOptions, token });
+    const result = await verifyRequestCredential(data.request, {
+      requireDevice: true,
+      ticketOptions,
+      token,
+    });
+    return result.ok && result.deviceId
+      ? { deviceId: result.deviceId, ok: true }
+      : {
+          ok: false,
+          reason: result.ok ? "device identity missing" : result.reason,
+        };
   };
   return new Elysia().ws("/ws", {
     // Transport shape only: "an object with a string type, and optionally a
@@ -190,57 +205,65 @@ export function createWsHandler(options: WsHandlerOptions) {
     }),
 
     async open(ws) {
-      const auth = await authorizeUpgrade(ws);
-      if (!auth.ok) {
-        console.warn("[ws] upgrade rejected:", auth.reason);
-        ws.close(WS_CLOSE_UNAUTHORIZED, "unauthorized");
-        return;
-      }
+      const socket = toHubSocket(ws);
+      const registration = {
+        closed: false,
+        ready: Promise.resolve(false),
+      };
+      registrations.set(socket.id, registration);
 
-      hub.register(toHubSocket(ws));
+      registration.ready = Promise.resolve()
+        .then(() => authorizeUpgrade(ws))
+        .then((auth) => {
+          if (registration.closed) {
+            return false;
+          }
+          if (!auth.ok) {
+            console.warn("[ws] upgrade rejected:", auth.reason);
+            ws.close(WS_CLOSE_UNAUTHORIZED, "unauthorized");
+            return false;
+          }
+
+          hub.register(socket, auth.deviceId);
+          return true;
+        })
+        .catch(() => {
+          if (!registration.closed) {
+            console.error("[ws] socket upgrade check failed");
+            ws.close(1011, "authorization failed");
+          }
+          return false;
+        });
+
+      await registration.ready;
     },
 
     message(ws, message) {
-      // Elysia has already parsed and validated the frame against `body`, so the
-      // hub gets the re-serialized form. It re-validates with the contracts
-      // schemas, which is deliberate: the transport shape and the protocol shape
-      // are allowed to disagree, and the protocol wins.
-      const rawMessage = JSON.stringify(message);
-
-      // State-channel traffic goes to the hub and nothing else touches the
-      // socket. Command replies go through the same socket but are produced
-      // here, because the hub has no knowledge of task commands.
-      if (rawTypeIs(rawMessage)) {
-        hub
-          .handleRawMessage(toHubSocket(ws), rawMessage)
-          .catch((error: unknown) => {
-            console.error("[ws] hub message error:", error);
-          });
+      const registration = registrations.get(toHubSocket(ws).id);
+      if (!registration) {
         return;
       }
 
-      handleCommand(
-        ws,
-        message,
-        bridge,
-        boardTasks,
-        workspaceStore,
-        hub.clientCount(),
-        hub.reply.bind(hub)
-      ).catch((error: unknown) => {
-        console.error("[ws] handler error:", error);
-        hub.reply(ws, {
-          payload: {
-            message: error instanceof Error ? error.message : "unknown error",
-          },
-          timestamp: Date.now(),
-          type: WS_RESPONSE_TYPE.ERROR,
-        });
+      // The WebSocket upgrade is visible to the browser before the async HMAC
+      // and single-use ticket checks finish. Queue early frames behind that
+      // verification; otherwise a fast client's first `hello` can arrive before
+      // hub.register and disappear, leaving it connected but never hydrated.
+      registration.ready.then((registered) => {
+        if (!registered || registration.closed) {
+          return;
+        }
+        handleMessage(ws, message);
       });
     },
 
     close(ws) {
-      hub.unregister(toHubSocket(ws));
+      const socket = toHubSocket(ws);
+      const registration = registrations.get(socket.id);
+      if (registration) {
+        registration.closed = true;
+        registrations.delete(socket.id);
+      }
+      hub.unregister(socket);
     },
 
     drain() {
@@ -249,6 +272,48 @@ export function createWsHandler(options: WsHandlerOptions) {
       // at the top of ws/hub.ts.
     },
   });
+
+  function handleMessage(
+    ws: unknown,
+    message: { type: string; payload?: unknown; since?: number }
+  ) {
+    // Elysia has already parsed and validated the frame against `body`, so the
+    // hub gets the re-serialized form. It re-validates with the contracts
+    // schemas, which is deliberate: the transport shape and the protocol shape
+    // are allowed to disagree, and the protocol wins.
+    const rawMessage = JSON.stringify(message);
+
+    // State-channel traffic goes to the hub and nothing else touches the
+    // socket. Command replies go through the same socket but are produced
+    // here, because the hub has no knowledge of task commands.
+    if (rawTypeIs(rawMessage)) {
+      hub
+        .handleRawMessage(toHubSocket(ws), rawMessage)
+        .catch((error: unknown) => {
+          console.error("[ws] hub message error:", error);
+        });
+      return;
+    }
+
+    handleCommand(
+      ws,
+      message,
+      bridge,
+      boardTasks,
+      workspaceStore,
+      hub.clientCount(),
+      hub.reply.bind(hub)
+    ).catch((error: unknown) => {
+      console.error("[ws] handler error:", error);
+      hub.reply(toHubSocket(ws), {
+        payload: {
+          message: error instanceof Error ? error.message : "unknown error",
+        },
+        timestamp: Date.now(),
+        type: WS_RESPONSE_TYPE.ERROR,
+      });
+    });
+  }
 }
 
 /** True when the hub, not the command handler, owns this frame. */
@@ -291,8 +356,15 @@ async function handleCommand(
   };
 
   /** The checkout a session belongs to; throws for a session we cannot place. */
-  const directoryFor = (sessionID: string): string =>
-    resolveSessionDirectory(workspaceStore, sessionID);
+  const directoryFor = async (sessionID: string): Promise<string> => {
+    const board = workspaceStore.getBoardBySessionId(sessionID);
+    if (board) {
+      boardTasks.assertBoardOpen(board.boardId);
+    }
+    const directory = resolveSessionDirectory(workspaceStore, sessionID);
+    await boardTasks.assertCheckoutAuthorized(directory);
+    return directory;
+  };
 
   const msg = message as WsMessage;
 
@@ -325,12 +397,18 @@ async function handleCommand(
       const payload = validate(WS_MESSAGE_TYPE.TASK_APPROVE, msg.payload);
 
       const result = await bridge.replyPermission({
-        directory: directoryFor(payload.sessionID),
+        directory: await directoryFor(payload.sessionID),
         requestID: payload.requestID,
         sessionID: payload.sessionID,
         reply: "once",
         message: payload.message,
       });
+      if (result) {
+        await workspaceStore.resolvePendingApproval(
+          payload.sessionID,
+          payload.requestID
+        );
+      }
 
       wsSend({
         type: WS_RESPONSE_TYPE.TASK_APPROVED,
@@ -347,12 +425,18 @@ async function handleCommand(
       const payload = validate(WS_MESSAGE_TYPE.TASK_REJECT, msg.payload);
 
       const result = await bridge.replyPermission({
-        directory: directoryFor(payload.sessionID),
+        directory: await directoryFor(payload.sessionID),
         requestID: payload.requestID,
         sessionID: payload.sessionID,
         reply: "reject",
         message: payload.message,
       });
+      if (result) {
+        await workspaceStore.resolvePendingApproval(
+          payload.sessionID,
+          payload.requestID
+        );
+      }
 
       wsSend({
         type: WS_RESPONSE_TYPE.TASK_REJECTED,
@@ -370,7 +454,7 @@ async function handleCommand(
 
       const result = await bridge.abortSession(
         payload.sessionID,
-        directoryFor(payload.sessionID)
+        await directoryFor(payload.sessionID)
       );
 
       wsSend({
@@ -389,7 +473,7 @@ async function handleCommand(
 
       if (payload.mode === "soft") {
         await bridge.promptSession({
-          directory: directoryFor(payload.sessionID),
+          directory: await directoryFor(payload.sessionID),
           sessionID: payload.sessionID,
           text: `Redirect instruction: ${payload.text}`,
         });
@@ -405,7 +489,7 @@ async function handleCommand(
         break;
       }
 
-      const directory = directoryFor(payload.sessionID);
+      const directory = await directoryFor(payload.sessionID);
 
       const forked = await bridge.forkSession({
         sessionID: payload.sessionID,
@@ -440,10 +524,14 @@ async function handleCommand(
       );
 
       await bridge.replyQuestion({
-        directory: directoryFor(payload.sessionID),
+        directory: await directoryFor(payload.sessionID),
         requestID: payload.requestID,
         answers: payload.answers,
       });
+      await workspaceStore.resolvePendingApproval(
+        payload.sessionID,
+        payload.requestID
+      );
 
       wsSend({
         type: WS_RESPONSE_TYPE.TASK_QUESTION_REPLIED,
@@ -464,7 +552,11 @@ async function handleCommand(
 
       await bridge.rejectQuestion(
         payload.requestID,
-        directoryFor(payload.sessionID)
+        await directoryFor(payload.sessionID)
+      );
+      await workspaceStore.resolvePendingApproval(
+        payload.sessionID,
+        payload.requestID
       );
 
       wsSend({
@@ -519,7 +611,7 @@ async function handleCommand(
           // back where the worktree bug was: the agent prompted in serve's own
           // checkout instead of the board's. A client that cannot name a board is
           // told so.
-          directory: directoryFor(payload.sessionId),
+          directory: await directoryFor(payload.sessionId),
           sessionID: payload.sessionId,
           text: `[Mobile prompt] ${payload.text}`,
         });

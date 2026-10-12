@@ -4,13 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkspaceBoard } from "@chorus/contracts";
 import { WorkspaceStore } from "../workspace/store";
-import { BoardTaskService } from "./board-task-service";
+import { BoardTaskService, SessionOwnershipError } from "./board-task-service";
 
 function makeMockBridge() {
   return {
     createSession: mock(async () => ({ id: "sess-123" })),
     forkSession: mock(async () => ({ id: "sess-forked" })),
     getSession: mock(async () => ({ directory: "/tmp/repo", id: "sess-123" })),
+    abortSession: mock(async () => true),
+    waitForSessionIdle: mock(
+      async (_sessionId: string, _directory: string, timeoutMs: number) =>
+        timeoutMs > 0
+    ),
     promptSession: mock(async () => undefined),
     promptSessionAsync: mock(async () => undefined),
     subscribeDirectory: mock(async () => undefined),
@@ -61,8 +66,111 @@ async function seedBoard(
 }
 
 const NO_SUCH_BOARD = /no such board/;
+const BOARD_IS_CLOSING = /board is closing/;
 
 describe("BoardTaskService", () => {
+  test("aborts the board session before committing removal", async () => {
+    const bridge = makeMockBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-board-remove-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      sessionId: "sess-123",
+      state: "active",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    await service.removeBoard({
+      baseRevision: null,
+      clientId: "remove-test",
+      mutationId: crypto.randomUUID(),
+      payload: { boardId },
+      type: "board.remove",
+    });
+
+    expect(bridge.abortSession).toHaveBeenCalledWith("sess-123", "/tmp/repo");
+    expect(bridge.waitForSessionIdle).toHaveBeenCalledTimes(2);
+    expect(workspaceStore.getBoard(boardId)).toBeUndefined();
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("concurrent removals share one abort and one durable operation", async () => {
+    const bridge = makeMockBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-board-remove-concurrent-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      sessionId: "sess-123",
+      state: "active",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+    let startAbort: () => void = () => undefined;
+    let finishAbort: () => void = () => undefined;
+    const abortStarted = new Promise<void>((resolvePromise) => {
+      startAbort = resolvePromise;
+    });
+    const abortGate = new Promise<void>((resolvePromise) => {
+      finishAbort = resolvePromise;
+    });
+    bridge.abortSession.mockImplementation(async () => {
+      startAbort();
+      await abortGate;
+      return true;
+    });
+    const firstMutation = {
+      baseRevision: null,
+      clientId: "remove-test",
+      mutationId: crypto.randomUUID(),
+      payload: { boardId },
+      type: "board.remove" as const,
+    };
+    const first = service.removeBoard(firstMutation);
+    await abortStarted;
+    const second = service.removeBoard({
+      ...firstMutation,
+      mutationId: crypto.randomUUID(),
+    });
+
+    expect(() => service.assertBoardOpen(boardId)).toThrow(BOARD_IS_CLOSING);
+    finishAbort();
+    const [firstCommit, secondCommit] = await Promise.all([first, second]);
+    expect(firstCommit).toBe(secondCommit);
+    expect(bridge.abortSession).toHaveBeenCalledTimes(1);
+    expect(workspaceStore.getBoard(boardId)).toBeUndefined();
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("keeps the board when the engine cannot confirm abort", async () => {
+    const bridge = makeMockBridge();
+    bridge.abortSession.mockResolvedValue(false);
+    const dir = mkdtempSync(join(tmpdir(), "chorus-board-remove-failed-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      sessionId: "sess-123",
+      state: "active",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    await expect(
+      service.removeBoard({
+        baseRevision: null,
+        clientId: "remove-test",
+        mutationId: crypto.randomUUID(),
+        payload: { boardId },
+        type: "board.remove",
+      })
+    ).rejects.toMatchObject({ code: "board_abort_failed" });
+    expect(workspaceStore.getBoard(boardId)).toBeDefined();
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
   test("creates a session for the first prompt", async () => {
     const bridge = makeMockBridge();
     const dir = mkdtempSync(join(tmpdir(), "chorus-board-task-create-"));
@@ -346,9 +454,7 @@ describe("BoardTaskService", () => {
       rmSync(dir, { force: true, recursive: true });
     });
 
-    test("an engine lookup failure reuses rather than forking", async () => {
-      // Forking on a transient error would strand a session that was fine; the
-      // cost of being wrong here is one extra session, not lost work.
+    test("an engine lookup failure refuses unverified session reuse", async () => {
       const bridge = makeMockBridge();
       bridge.getSession.mockRejectedValue(new Error("engine unreachable"));
       const dir = mkdtempSync(join(tmpdir(), "chorus-reuse-unreachable-"));
@@ -361,15 +467,17 @@ describe("BoardTaskService", () => {
       );
       const service = new BoardTaskService(bridge as never, workspaceStore);
 
-      const result = await service.queuePrompt({
-        boardId,
-        directory: "/tmp/repo",
-        text: "carry on",
-        reviewMode: "auto",
-      });
+      await expect(
+        service.queuePrompt({
+          boardId,
+          directory: "/tmp/repo",
+          text: "carry on",
+          reviewMode: "auto",
+        })
+      ).rejects.toBeInstanceOf(SessionOwnershipError);
 
       expect(bridge.forkSession).not.toHaveBeenCalled();
-      expect(result.sessionId).toBe("sess-123");
+      expect(bridge.promptSessionAsync).not.toHaveBeenCalled();
 
       await workspaceStore.close();
       rmSync(dir, { force: true, recursive: true });
@@ -434,6 +542,33 @@ describe("BoardTaskService", () => {
       // The board's own checkout wins over whatever the caller asked for.
       expect(bridge.subscribeDirectory).toHaveBeenCalledWith("/tmp/repo");
       expect(bridge.forkSession).not.toHaveBeenCalled();
+
+      await workspaceStore.close();
+      rmSync(dir, { force: true, recursive: true });
+    });
+
+    test("a client cannot bind an unrelated session to the board", async () => {
+      const bridge = makeMockBridge();
+      const dir = mkdtempSync(join(tmpdir(), "chorus-session-ownership-"));
+      const workspaceStore = new WorkspaceStore(dir);
+      await workspaceStore.load();
+      const boardId = await seedBoard(workspaceStore, {
+        sessionId: "sess-123",
+        state: "active",
+      });
+      const service = new BoardTaskService(bridge as never, workspaceStore);
+
+      await expect(
+        service.queuePrompt({
+          boardId,
+          directory: "/tmp/repo",
+          sessionId: "sess-unrelated",
+          text: "do not steal another session",
+          reviewMode: "auto",
+        })
+      ).rejects.toMatchObject({ code: "session_ownership_conflict" });
+      expect(bridge.getSession).not.toHaveBeenCalled();
+      expect(bridge.promptSessionAsync).not.toHaveBeenCalled();
 
       await workspaceStore.close();
       rmSync(dir, { force: true, recursive: true });

@@ -15,6 +15,16 @@ const HEX_64 = /^[0-9a-f]{64}$/;
 /** File-mode mask: keeps the permission bits and drops the file-type bits. */
 const MODE_MASK = 0o777;
 
+function expectPrivateFile(path: string): void {
+  expect(statSync(path).isFile()).toBe(true);
+  if (process.platform === "win32") {
+    return;
+  }
+  // Windows does not expose POSIX permission bits; Linux CI enforces 0600.
+  // biome-ignore lint/suspicious/noBitwiseOperators: reading POSIX mode bits
+  expect(statSync(path).mode & MODE_MASK).toBe(0o600);
+}
+
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "chorus-token-"));
 }
@@ -43,8 +53,7 @@ describe("CHORUS_TOKEN lifecycle (spec §6.1, decision #4)", () => {
     try {
       const path = await persistToken(dir, generateToken());
 
-      // biome-ignore lint/suspicious/noBitwiseOperators: reading POSIX mode bits
-      expect(statSync(path).mode & MODE_MASK).toBe(0o600);
+      expectPrivateFile(path);
       expect(path.endsWith(TOKEN_FILE_NAME)).toBe(true);
     } finally {
       rmSync(dir, { force: true, recursive: true });
@@ -113,8 +122,7 @@ describe("CHORUS_TOKEN lifecycle (spec §6.1, decision #4)", () => {
 
       expect(first.source).toBe("generated");
       expect(first.token).toHaveLength(64);
-      // biome-ignore lint/suspicious/noBitwiseOperators: reading POSIX mode bits
-      expect(statSync(first.tokenPath).mode & MODE_MASK).toBe(0o600);
+      expectPrivateFile(first.tokenPath);
 
       // A restart must not orphan the token the operator already copied out.
       const second = await resolveToken({ dataDir: dir, isProduction: false });
