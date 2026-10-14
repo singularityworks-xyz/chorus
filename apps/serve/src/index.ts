@@ -8,6 +8,7 @@ import { Elysia } from "elysia";
 import { LoginRateLimiter } from "./auth/brute-force";
 import { corsOptionsFor, resolveCorsPolicy } from "./auth/cors";
 import { authGuardHandler, isPublicFrontendPath } from "./auth/guard";
+import { DevicePairingTokenStore } from "./auth/pairing";
 import { UnregisteredRootError } from "./auth/roots";
 import { createAuthRoutes } from "./auth/routes";
 import { pruneExpiredTickets, type TicketStore } from "./auth/ticket";
@@ -54,13 +55,13 @@ const logger = createLogger(
 await mkdir(config.dataDir, { recursive: true });
 
 /**
- * Token lifecycle (spec §6.1, decision #4).
+ * Internal session-signing token lifecycle (spec §6.1, decision #4).
  *
  * Resolved before anything is constructed so a production boot without
  * `CHORUS_TOKEN` fails immediately and loudly, rather than after the engine is
- * spawned and a port is bound. The token value is never logged. Local operators
- * get the credential file path on first boot and later restarts; an
- * environment-provided credential is identified without implying a file exists.
+ * spawned and a port is bound. The token value and its file path are never
+ * logged. Local browsers sign in through the loopback-only bootstrap route;
+ * production still requires an operator-supplied CHORUS_TOKEN.
  */
 let token: string;
 try {
@@ -70,17 +71,7 @@ try {
     isProduction,
   });
   token = resolved.token;
-  if (resolved.source === "environment") {
-    logger.info("auth-configured", { source: resolved.source });
-  } else {
-    // The value is never logged — only where to find it. Keep the sensitive
-    // value out of the structured fields as well as the message.
-    const { tokenPath: credentialFile } = resolved;
-    logger.info("auth-credential-file", {
-      filePath: credentialFile,
-      source: resolved.source,
-    });
-  }
+  logger.info("auth-configured", { source: resolved.source });
 } catch (error) {
   if (error instanceof MissingTokenError) {
     // Actionable and specific, and it names the file the operator already has.
@@ -327,6 +318,7 @@ const ticketStore: TicketStore = workspaceStore.meta;
 pruneExpiredTickets(ticketStore);
 
 const loginRateLimiter = new LoginRateLimiter();
+const pairingTokenStore = new DevicePairingTokenStore();
 const ticketOptions = { now: Date.now, store: ticketStore };
 
 workspaceStore.onCommit((commit) => {
@@ -335,10 +327,12 @@ workspaceStore.onCommit((commit) => {
 
 const authRoutes = createAuthRoutes({
   isProduction,
+  localOrigins: corsPolicy.allowedOrigins,
   onLogoutDevice: async (deviceId) => {
     hub.disconnectDevice(deviceId);
     await workspaceStore.deleteDevicePushSubscriptions(deviceId);
   },
+  pairingTokenStore,
   rateLimiter: loginRateLimiter,
   ticketStore,
   token,

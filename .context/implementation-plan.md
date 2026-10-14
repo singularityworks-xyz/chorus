@@ -6,7 +6,7 @@
 > Last reviewed: 2026-10 (amendment pass: Phase 0 added, RCE hotfix pulled forward,
 > SDK upgrade mandated, per-phase deliverables + unit/integration tests, voice/auth clarified).
 > Remaining Phase 6 and Phase 7 execution detail: [phase-6-7-completion-plan.md](./phase-6-7-completion-plan.md).
-> UX improvement workstream: [ux-flow-plan.md](./ux-flow-plan.md) (UX1 code implemented; browser acceptance pending; VPS execution handoff deferred).
+> UX improvement workstream: [ux-flow-plan.md](./ux-flow-plan.md) (local-first access and device pairing are implemented; browser acceptance remains deferred; VPS execution handoff is out of scope).
 
 ---
 
@@ -39,9 +39,9 @@ These affect API shapes defined in Phase 1. Record answers in this section befor
 
 3. **Session cookie expiry**: 30 days, `Max-Age=2592000`, `Secure` (enforced in production), `HttpOnly`, `SameSite=Strict`. A `POST /auth/logout` clears the cookie. Re-login after expiry shows the login screen — not a silent redirect loop.
 
-4. **`CHORUS_TOKEN` boot behavior**: two modes, no shared code path.
-   - **Laptop/dev** (`NODE_ENV !== "production"`): auto-generate 32-byte hex token, write to `<DATA_DIR>/chorus.token` (mode `0600`), log the file path only.
-   - **Production** (`NODE_ENV=production`): if `CHORUS_TOKEN` env is unset or empty, print an actionable error (`CHORUS_TOKEN must be set in production. See .env.example.`) and `process.exit(1)`. Never auto-generate silently in prod.
+4. **`CHORUS_TOKEN` boot behavior**: two modes, no shared user-facing login path.
+   - **Laptop/dev** (`NODE_ENV !== "production"`): auto-generate and persist a 32-byte internal session-signing secret with mode `0600`; never print its value or path. The first browser session is issued only through the guarded loopback bootstrap in the UX workstream.
+   - **Production** (`NODE_ENV=production`): if `CHORUS_TOKEN` env is unset or empty, print an actionable error (`CHORUS_TOKEN must be set in production. See .env.example.`) and `process.exit(1)`. Never auto-generate silently in prod. Existing signed-in operators issue short-lived pairing codes through the UI for additional devices.
 
 5. **OpenCode version lockstep**: the `@opencode-ai/sdk` version in `packages/opencode-adapter/package.json` and the `opencode` binary version spawned by `process-manager.ts` must be identical (record both in `.context/versions.md`, new in Phase 0, updated by Phase 6). SDK-before-binary or binary-before-SDK skew is a release-blocking mismatch — the Phase 6 integration test asserts version equality at boot.
 
@@ -147,8 +147,8 @@ Done when: `rg 'ws\.send\|broadcastRaw' apps/serve/src` finds zero hits outside 
 **Goal:** spec §6 completely enforced. The RCE class already died in Phase 0; this phase completes auth, transport, and abuse guards. **No network exposure beyond localhost until this phase is green.**
 
 Tasks
-1. **Token generation**: `CHORUS_TOKEN` auto-generation (laptop mode only, per pre-implementation decision #4) uses `crypto.getRandomValues(new Uint8Array(32))` encoded as hex — 256 bits of entropy. UUID v4 (122 bits) and `Math.random` are banned for this purpose. Write to `<DATA_DIR>/chorus.token` with `fs.chmod(path, 0o600)` immediately after write. Log the file path only, never the token value.
-2. Auth middleware: `POST /auth/login` validates `CHORUS_TOKEN` body field → issues HttpOnly, SameSite=Strict, **Secure** (in production), `Max-Age=2592000` (30 days) signed cookie. Signing uses Web Crypto HMAC-SHA256; the signing key is derived from `CHORUS_TOKEN` via `HKDF-SHA256` with label `"chorus-session"`. **All routes except `GET /health` and `POST /auth/login` require a valid cookie — including `/voice/*`, `/projects/*`, `/workspace`, `/tasks/*`, `/snapshots/*`, `/git/*`.** `POST /auth/logout` clears the cookie.
+1. **Internal signing secret**: laptop/dev auto-generation uses `crypto.getRandomValues(new Uint8Array(32))` encoded as hex — 256 bits of entropy — and persists it with mode `0600`. UUID v4 (122 bits) and `Math.random` are banned. Never log the value or path; local users do not retrieve it.
+2. Auth middleware: `POST /auth/login` validates the production/operator `CHORUS_TOKEN` or consumes a five-minute single-use device-pairing code → issues HttpOnly, SameSite=Strict, **Secure** (in production), `Max-Age=2592000` (30 days) signed cookie. Signing uses Web Crypto HMAC-SHA256; the signing key is derived from the internal secret via `HKDF-SHA256` with label `"chorus-session"`. Local development permits `POST /auth/local-session` only for an exact allowlisted Origin and a direct loopback peer; it is rejected in production and never trusts proxy headers. An authenticated device may issue a pairing code through `POST /auth/device-pairing`. All other routes except `GET /health` require a valid cookie — including `/voice/*`, `/projects/*`, `/workspace`, `/tasks/*`, `/snapshots/*`, `/git/*`. `POST /auth/logout` clears the cookie.
 3. **WS ticket single-use enforcement**: `GET /auth/ws-ticket` (authenticated) generates a random 16-byte hex token, stores it in the `meta` table as `wst:<ticket>` with a 5-minute expiry timestamp. On WS upgrade, the ticket is looked up, verified not-expired, and immediately deleted (single-use). Unauthenticated or already-used tickets close the socket with code 4401.
 4. **Content-Security-Policy header**: add `Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:` to the static-file serving middleware in `web-frontend.ts`. Adjust `unsafe-inline` only as needed by Next.js build output — do not use `unsafe-eval`.
 5. CORS: production = same-origin only. Dev allowlist via `CORS_ALLOWED_ORIGINS=http://localhost:3000` (comma-separated). Add this var to `.env.example` with a note that it is dev-only and must not be set in production.
@@ -253,7 +253,7 @@ Tasks
 2. `compose.yaml` profiles: `prod` (chorus + caddy w/ LE TLS, volume `./data`), `dev` (chorus only). Root `.env.example` (started in Phase 0) completed here to match the spec env list exactly, each var annotated **required** or **optional** with the consequence of omitting it:
    `PORT` (optional, default 2000) · `CHORUS_TOKEN` (**required in prod** — hard boot failure if unset; laptop/dev auto-generates) · `DATA_DIR` (optional, default `/data`) · `OPENCODE_DIRECTORY` (optional) · `OPENCODE_PER_WORKTREE` (optional, default false) · `RETENTION_DAYS` (optional, default 30) · `DB_SIZE_CAP_MB` (optional, default 512) · `COALESCE_MS` (optional, default 100) · `CORS_ALLOWED_ORIGINS` (dev-only, must not be set in prod) · `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` (optional — push disabled if absent) · `GROQ_API_KEY` (optional — voice STT/TTS 503 if absent). Delete the stale `ARMORIQ_*` lines (Phase 0 if not already done).
 3. Graceful shutdown flush verified inside container: `docker stop` sends SIGTERM → serve drains queue, writes final snapshot, checkpoints WAL, exits within 5s. Test by running `docker stop --time=10 <container>` and verifying state is intact on restart.
-4. Docs: laptop mode (`bun dev`) + VPS quickstart in README. Include a one-liner for generating `CHORUS_TOKEN`: `openssl rand -hex 32`.
+4. Docs: laptop mode (`bun dev`) opens straight into the workspace; device pairing is explained in the UI and README. VPS quickstart still documents the operator-supplied `CHORUS_TOKEN` requirement.
 
 Verify: fresh-clone `docker compose --profile prod up` on a VPS → HTTPS URL, login gate, prompt round-trip; container restart → state intact; `chorus.db` and `chorus.token` owned by `chorus` user, mode `0600`; SIGTERM → clean exit ≤5s.
 Files: `Dockerfile` (new), `compose.yaml` (new, profiles `prod`/`dev`), `Caddyfile` (new, via caddy service), `docker/entrypoint.sh` (new), `.env.example` (completed), `README.md` (quickstarts)

@@ -14,6 +14,7 @@ import {
 } from "@chorus/contracts";
 import { Elysia } from "elysia";
 import { authGuardHandler } from "../src/auth/guard";
+import { DevicePairingTokenStore } from "../src/auth/pairing";
 import { createAuthRoutes } from "../src/auth/routes";
 import { OpenCodeBridge } from "../src/bridge/opencode/bridge";
 import { RepositoryRegistry } from "../src/projects/repository-registry";
@@ -231,6 +232,8 @@ export async function startPhase6Harness() {
           token,
           ticketStore: workspace.meta,
           isProduction: false,
+          localOrigins: [],
+          pairingTokenStore: new DevicePairingTokenStore(),
         })
       )
       .use(createWorkspaceRoutes(workspace, boardTasks))

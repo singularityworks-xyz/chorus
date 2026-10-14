@@ -1,7 +1,7 @@
 # Chorus UX flow improvement plan
 
-Status: UX1 code is implemented; browser acceptance remains outstanding.
-UX2–UX5 remain planned.
+Status: UX1 access-flow correction is implemented; browser/device acceptance
+remains outstanding. UX2–UX5 remain planned.
 Created: 2026-10-14.
 Sources: `specsheet.md`, `implementation-plan.md`, `agent-context.md`, and the
 current Web and Serve implementation. This is a companion UX workstream; it
@@ -9,14 +9,17 @@ does not renumber or replace the existing engineering phases.
 
 ## 1. Goal and scope
 
-Make the existing single-operator application understandable from first login
-through repository selection, task execution, human decisions, and result review.
-Keep the desktop canvas and responsive phone lanes as the core workspace.
+Make the existing single-operator application understandable from opening the
+workspace through repository selection, task execution, human decisions, and
+result review. Keep the desktop canvas and responsive phone lanes as the core
+workspace.
 
 Target journey:
 
 ```text
-Start Chorus locally -> find access token -> sign in
+Open Chorus locally -> workspace loads immediately
+  -> Settings > Devices -> generate one-time device code
+  -> open the same instance on another device -> enter code
   -> start first board -> select repository and ready model -> submit first task
   -> watch progress -> answer requests / review result -> continue on the board
 ```
@@ -29,47 +32,36 @@ and continuation while the laptop is shut down are deferred. A later backend
 design must define those capabilities before runtime-switch controls are added.
 Existing VPS deployment work remains tracked in engineering Phase 8.
 
-## 2. Access token: current behavior and onboarding gap
+## 2. Local access and pairing model
 
-Token resolution happens in `apps/serve/src/auth/token.ts`, called at startup by
-`apps/serve/src/index.ts`:
+Serve still resolves a session-signing secret in `apps/serve/src/auth/token.ts`,
+called at startup by `apps/serve/src/index.ts`:
 
-1. A nonempty `CHORUS_TOKEN` environment variable wins. Serve does not write that
-   value into a token file.
-2. In development, with no environment token, Serve reuses a nonempty
-   `<DATA_DIR>/chorus.token` file.
-3. Otherwise development generates 32 random bytes, encodes them as 64 hex
-   characters, and saves the token to that file. Restarts reuse it.
-4. Production requires `CHORUS_TOKEN`; missing configuration stops startup.
+1. Production uses the operator-supplied `CHORUS_TOKEN`; missing configuration
+   stops startup.
+2. Development reuses its persisted internal signing secret or generates a new
+   256-bit one. The value and file path are not shown to the user.
 
 The actual bare-runtime default for `DATA_DIR` is `~/.chorus`, from
-`apps/serve/src/config/index.ts`. On this Windows machine the default token file
-is `C:\Users\amana\.chorus\chorus.token`; its existence was confirmed without
-reading or displaying the credential. A `DATA_DIR` override changes the path.
+`apps/serve/src/config/index.ts`. A local browser gets a session only when Serve
+sees a direct loopback peer, a development-mode request, and an exact allowlisted
+Origin. This path does not trust forwarded addresses and is disabled in
+production. An authenticated user creates a five-minute, single-use pairing
+code in **Settings → Devices**. Serve stores only its digest in memory; the
+login endpoint consumes it and issues the usual HttpOnly session cookie.
 
-The owner retrieves the generated token locally, enters it at `/login`, and
-receives an HttpOnly session cookie. The instance has one operator across
-devices; it has no account-registration or per-user token-generation flow.
-
-Current gaps:
-
-- `/login` asks for a token without explaining where the owner gets it.
-- Startup reports the file path only when it generates a token, so later boots
-  provide no credential-discovery guidance.
-- `.env.example` presents `/data` as the default although bare Serve defaults
-  to `~/.chorus`; its production settings need a clear distinction from local
-  development instructions.
-- A first unauthenticated workspace visit can show “Session expired.”
-
-Keep token retrieval local. Public login/help screens can explain the default
-location and configuration, but must never return or generate an instance token.
-Do not place credentials in URLs, application logs, browser storage, or events.
+On the phone, the user opens the same reachable Chorus instance and enters the
+code. For local development, a loopback WebSocket setting is rebound to the
+host used to open the app so another device does not try connecting to its own
+`localhost`. VPS first-access provisioning remains deferred; production still
+requires its operator-configured token. Credentials must not appear in URLs,
+logs, durable browser storage, events, or WebSocket traffic.
 
 ## 3. Current UX findings
 
-These findings describe the baseline before UX1. The UX1 implementation below
-addresses token discovery, startup guidance, environment-example defaults, and
-the first-visit sign-in/loading states.
+These findings describe the baseline before the UX corrections. The previously
+implemented token-before-workspace UX1 has been superseded. The correction below
+removes that first-visit barrier and adds in-app device pairing.
 
 - Desktop has no primary empty-workspace action; phone has guidance text without
   a creation action. The persistent composer requires a selected board.
@@ -118,30 +110,41 @@ still required during implementation.
 
 Changes:
 
-- Route an unauthenticated first visit into an understandable sign-in flow.
-  Use neutral sign-in wording for any rejected session: Serve intentionally
-  collapses missing, expired, and invalid credentials into the same 401, so the
-  browser cannot safely claim that a session expired.
+- Open a local development browser directly into the workspace. Issue its
+  session only after Serve verifies a non-production request from a direct
+  loopback peer, an exact allowlisted Origin, and the expected custom header.
+- Do not trust `X-Forwarded-For` or route local bootstrap through the Next proxy.
+  Keep the local bootstrap unavailable in production.
+- Add **Settings → Devices → Generate device code**. Codes have 256 bits of
+  entropy, expire after five minutes, work once, and are held as hashes in
+  memory. Require an authenticated session to issue one and accept it at login.
+- Make the other-device flow clear: open the same reachable Chorus instance,
+  paste the generated code at sign-in, and receive a normal HttpOnly session.
+- Keep production's operator-configured `CHORUS_TOKEN` login as the remote
+  bootstrap path until VPS provisioning is designed separately.
+- Remove file-path, PowerShell, and shell-command instructions for finding a
+  local token. Do not show the internal session-signing secret.
 - Preserve safe board/card return destinations and the existing 401 retry stop.
-- Add “Where do I find my access token?” guidance to login, covering generated
-  files, `DATA_DIR` overrides, and an operator-configured environment token.
-- Provide useful credential-source/path guidance at startup on reused-token
-  boots too. Environment-token guidance must not claim a token file was written.
-- Align setup documentation and environment-example comments with actual defaults.
+- Update auth and setup documentation to distinguish local sessions, pairing
+  codes, and production operator tokens.
 - Show workspace loading until a saved or server snapshot is available; surface
   connection failures and a retry action instead of presenting them as an empty
   workspace.
+- In local development, let a phone opened through the laptop's LAN host reach
+  the matching local Serve WebSocket port when configuration points at loopback.
 
 Primary files: `components/auth-gate.tsx`, `app/login/page.tsx`, workspace/sync
 features, Serve startup/token modules, `.env.example`, and setup documentation.
 
-Acceptance: a fresh local installation can start, find its token, and sign in
-without prior knowledge of the codebase; existing-token restarts are equally
-clear; login preserves deep links and never reveals the credential publicly.
+Acceptance: a fresh local browser opens the workspace without credential entry;
+an authenticated browser can create a short-lived code; another browser can
+consume it once; an expired/reused code fails with neutral copy; the deep-link
+return destination and 401 retry stop remain intact. Production remote bootstrap
+still requires the operator token.
 
-Protect with focused auth/bootstrap tests, return-destination tests, and 401
-reconnect-stop regression tests. Manually check fresh, returning, expired,
-invalid-token, rate-limited, and unreachable-server states.
+Protect with focused auth/pairing/loopback policy tests, return-destination
+tests, and 401 reconnect-stop regression tests. Browser acceptance remains
+outstanding while E2E is paused; do not claim manual or browser validation.
 
 ### UX2 — First board and required setup
 
@@ -283,29 +286,45 @@ guards, draft preservation, recovery, and notification opt-in/support states.
 - Commit each completed implementation phase atomically in dependency order when
   implementation/commits are authorized, with the required subject and body.
 
-## 7. Planning validation and implementation prerequisite
+## 7. UX1 implementation and validation record
 
-Only this plan and its link in `implementation-plan.md` changed during planning.
-No application source was modified, no test runner was launched, and no credential
-value was read or displayed.
+Implemented on 2026-10-14:
+
+- A first local browser visit can obtain a session only through Serve's
+  development-only endpoint, which checks the direct loopback peer, exact
+  configured origin, and request marker. Production still requires the
+  operator-configured token for first access.
+- Signed-in users can issue a one-use, five-minute device code from
+  **Settings → Devices**. Serve keeps only its digest in memory; the sign-in
+  route exchanges the code for the normal HttpOnly session cookie.
+- Login and setup copy no longer instructs local users to find a token file or
+  run a shell command. README and `.env.example` reflect the local-first path.
+- In local development, a browser opened through the laptop's LAN address uses
+  that host for the local Serve WebSocket and the existing ticket proxy path.
+- The phase-6 harness auth fixture now supplies the required local-origin and
+  pairing-store options.
 
 Checks on 2026-10-14:
 
-- `bun run check`: passed; 272 files checked, no formatting fixes, log gate passed.
-- `git diff --check` and the new plan's trailing-whitespace check: passed.
-- `bun run check-types`: the root TypeScript step passed; Turbo then stopped
-  with an “Access is denied” filesystem error.
-- Invoking existing workspace type-check scripts directly passed for Web,
-  contracts, Monaco, and voice. Serve and the OpenCode adapter reported
-  `Request` / `Response` / `Headers` type errors; logger and Serve reported
-  `PostHog.shutdown` missing from the installed type. These are current code /
-  dependency-baseline issues; Markdown-only changes do not resolve them.
-- No unit/integration test execution or browser E2E was performed for this
-  documentation-only task.
+- `bun run check`: passed; 279 files checked and the log gate passed.
+- Focused in-process tests: 47 passed across seven auth, CORS, contract, and sync test files.
+- Web and shared-contract `check-types`: passed.
+- Root `bun run check-types`: root TypeScript passed; Turbo stopped with an
+  “Access is denied” filesystem error. Direct Serve type-check remains blocked
+  by package-wide Bun `Request`/`Response`/`Headers` typing errors and the
+  installed PostHog `shutdown` type mismatch; the added harness-options error
+  was corrected.
+- `git diff --check`: passed.
+- Browser E2E and manual desktop/phone acceptance were not run. The prior
+  repeated-terminal incident remains an explicit acceptance risk; no server,
+  browser, Playwright, or E2E process was started for this UX1 work.
 
-Before starting UX source changes, establish a green type-check baseline and
-resolve the Turbo filesystem failure. Keep any baseline repair separate from
-UX behavior changes and record its actual cause and verification.
+Still required before UX1 can be marked fully accepted: verify fresh local
+first-visit access, pairing on a second desktop/browser and a phone over LAN,
+expiry/replay behavior in the browser, production's operator-token gate, and
+the return destination after sign-in. Resume browser automation only after the
+operator explicitly reopens that paused gate and process launch/cleanup is
+understood.
 
 ## 8. Completion criteria
 

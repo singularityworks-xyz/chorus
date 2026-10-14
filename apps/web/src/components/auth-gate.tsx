@@ -49,7 +49,8 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           <div className="space-y-1">
             <h1 className="font-semibold text-lg">Sign in to Chorus</h1>
             <p className="text-sm text-white/60">
-              Sign in with this instance’s access token to continue.
+              Enter a device code from a signed-in Chorus device, or the server
+              access token supplied by its operator.
             </p>
           </div>
           <Link

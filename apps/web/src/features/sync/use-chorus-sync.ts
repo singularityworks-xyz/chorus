@@ -107,6 +107,9 @@ export function useChorusSync(
       (typeof window === "undefined"
         ? "ws://localhost:2000/ws"
         : resolveSocketUrl({
+            allowLocalHostRebinding: process.env.NODE_ENV !== "production",
+            developmentServePort:
+              process.env.NODE_ENV === "production" ? undefined : 2000,
             explicit: process.env.NEXT_PUBLIC_CHORUS_WS_URL,
             isSecure: window.location.protocol === "https:",
             origin: window.location.origin,
@@ -119,7 +122,10 @@ export function useChorusSync(
   // that instead of retrying an origin that will never answer.
   const urlIsExplicit =
     options.socketUrl !== undefined ||
-    process.env.NEXT_PUBLIC_CHORUS_WS_URL !== undefined;
+    process.env.NEXT_PUBLIC_CHORUS_WS_URL !== undefined ||
+    (typeof window !== "undefined" &&
+      process.env.NODE_ENV !== "production" &&
+      window.location.port === "3000");
 
   useEffect(() => {
     const sync = new ChorusSync(
@@ -134,6 +140,7 @@ export function useChorusSync(
               >,
         prepareSocketUrl: (target) =>
           prepareAuthenticatedSocketUrl(target, {
+            allowLocalBootstrap: process.env.NODE_ENV !== "production",
             pageOrigin: window.location.origin,
           }),
         url,

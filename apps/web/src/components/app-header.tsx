@@ -48,6 +48,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { DeviceAccessPanel } from "@/features/auth/device-access-panel";
 import { PushSettings } from "@/features/notifications/push-settings";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 import { useVoiceConfig } from "@/hooks/use-voice-config";
@@ -1066,9 +1067,9 @@ function MobileMenuDrawer({
 }
 
 function SettingsMenu() {
-  const [settingsTab, setSettingsTab] = useState<"providers" | "voice">(
-    "providers"
-  );
+  const [settingsTab, setSettingsTab] = useState<
+    "devices" | "providers" | "voice"
+  >("providers");
 
   const { preferences, selectedBoard, setSpeechVoiceId } = useWorkspace();
   const {
@@ -1102,11 +1103,48 @@ function SettingsMenu() {
     voices.find((voice) => voice.id === defaultVoiceId)?.name ??
     selectedSpeechVoiceId ??
     "System default";
-  const settingsDescription =
-    settingsTab === "providers"
-      ? (selectedBoard?.repo.directory ??
-        "Select a board to manage provider tools")
-      : "Microphone and speech preferences";
+  const settingsDescriptionByTab = {
+    devices: "Connect a phone or another browser",
+    providers:
+      selectedBoard?.repo.directory ??
+      "Select a board to manage provider tools",
+    voice: "Microphone and speech preferences",
+  };
+  const settingsTitleByTab = {
+    devices: "Device access",
+    providers: "Provider settings",
+    voice: "Voice & Speech",
+  };
+  let settingsContent: React.ReactNode;
+  if (settingsTab === "providers") {
+    settingsContent = (
+      <ProviderSettingsPanel
+        authLoginNotice={authLoginNotice}
+        configuredProviderIDs={configuredProviderIDs}
+        connectedProviderCount={connectedProviderCount}
+        onConfigureCredentialProvider={configureCredentialProvider}
+        onOpenOpencodeAuthLogin={openOpencodeAuthLogin}
+        onOpenOpencodeModels={openOpencodeModels}
+        onRefreshProviderStatus={refreshProviderStatus}
+        providerStatus={providerStatus}
+        selectedDirectory={selectedDirectory}
+        storedCredentials={storedCredentials}
+      />
+    );
+  } else if (settingsTab === "voice") {
+    settingsContent = (
+      <VoiceSettingsPanel
+        defaultModelId={defaultModelId}
+        isLoadingVoiceConfig={isLoadingVoiceConfig}
+        resolvedSpeechVoiceValue={resolvedSpeechVoiceValue}
+        selectedSpeechVoiceLabel={selectedSpeechVoiceLabel}
+        setSpeechVoiceId={setSpeechVoiceId}
+        voices={voices}
+      />
+    );
+  } else {
+    settingsContent = <DeviceAccessPanel />;
+  }
 
   return (
     <DropdownMenu>
@@ -1126,19 +1164,17 @@ function SettingsMenu() {
                   Settings
                 </DropdownMenuLabel>
                 <div className="mt-1 font-medium text-[13px] text-white/95">
-                  {settingsTab === "providers"
-                    ? "Provider settings"
-                    : "Voice & Speech"}
+                  {settingsTitleByTab[settingsTab]}
                 </div>
                 <div className="mt-1 truncate text-[10px] text-white/42">
-                  {settingsDescription}
+                  {settingsDescriptionByTab[settingsTab]}
                 </div>
               </div>
               <span className="flex h-8 w-8 shrink-0 items-center justify-center border border-white/8 bg-white/[0.03] text-white/72">
                 <Settings className="size-3.5" />
               </span>
             </div>
-            <div className="mt-2 grid grid-cols-2 gap-1.5">
+            <div className="mt-2 grid grid-cols-3 gap-1.5">
               <SettingsTabButton
                 active={settingsTab === "providers"}
                 onClick={() => setSettingsTab("providers")}
@@ -1150,6 +1186,12 @@ function SettingsMenu() {
                 onClick={() => setSettingsTab("voice")}
               >
                 Voice & Speech
+              </SettingsTabButton>
+              <SettingsTabButton
+                active={settingsTab === "devices"}
+                onClick={() => setSettingsTab("devices")}
+              >
+                Devices
               </SettingsTabButton>
             </div>
             {settingsTab === "providers" ? (
@@ -1167,29 +1209,7 @@ function SettingsMenu() {
             ) : null}
           </div>
 
-          {settingsTab === "providers" ? (
-            <ProviderSettingsPanel
-              authLoginNotice={authLoginNotice}
-              configuredProviderIDs={configuredProviderIDs}
-              connectedProviderCount={connectedProviderCount}
-              onConfigureCredentialProvider={configureCredentialProvider}
-              onOpenOpencodeAuthLogin={openOpencodeAuthLogin}
-              onOpenOpencodeModels={openOpencodeModels}
-              onRefreshProviderStatus={refreshProviderStatus}
-              providerStatus={providerStatus}
-              selectedDirectory={selectedDirectory}
-              storedCredentials={storedCredentials}
-            />
-          ) : (
-            <VoiceSettingsPanel
-              defaultModelId={defaultModelId}
-              isLoadingVoiceConfig={isLoadingVoiceConfig}
-              resolvedSpeechVoiceValue={resolvedSpeechVoiceValue}
-              selectedSpeechVoiceLabel={selectedSpeechVoiceLabel}
-              setSpeechVoiceId={setSpeechVoiceId}
-              voices={voices}
-            />
-          )}
+          {settingsContent}
         </DropdownMenuGroup>
       </DropdownMenuContent>
     </DropdownMenu>

@@ -13,7 +13,7 @@ export interface ResolvedToken {
   source: TokenSource;
   /** The token value. Never log this. */
   token: string;
-  /** Absolute path to the token file, for the bootstrap message. */
+  /** Absolute storage path for internal persistence; never show it to users. */
   tokenPath: string;
 }
 
@@ -78,8 +78,9 @@ export class MissingTokenError extends Error {
  * Resolves the token for this boot.
  *
  * Order: production requires the env var outright; otherwise the env var wins,
- * then an already-persisted file is reused (so restarts do not orphan the token
- * the operator already has), and only then is one generated.
+ * then an already-persisted internal secret is reused, and only then is one
+ * generated. Local browser sessions use the guarded loopback bootstrap instead
+ * of exposing this value to the operator.
  */
 export async function resolveToken(
   env: TokenEnvironment

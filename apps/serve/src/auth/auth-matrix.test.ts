@@ -93,6 +93,12 @@ const GATED_ROUTES = [
   },
   { label: "GET /auth/ws-ticket", method: "GET", path: "/auth/ws-ticket" },
   { label: "POST /auth/device", method: "POST", path: "/auth/device" },
+  {
+    label: "POST /auth/device-pairing",
+    method: "POST",
+    path: "/auth/device-pairing",
+    body: {},
+  },
 ];
 
 interface ServerHandle {

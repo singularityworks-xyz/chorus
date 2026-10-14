@@ -41,6 +41,7 @@ export interface AuthGuardOptions {
 }
 
 const ALWAYS_OPEN = new Set(["/health"]);
+const LOCAL_SESSION_PATH = "/auth/local-session";
 
 const DEFAULT_WS_PATH = "/ws";
 
@@ -77,6 +78,9 @@ export function isPathAllowedUnauthenticated(
     return true;
   }
   if (isLoginPath(pathname)) {
+    return true;
+  }
+  if (pathname === LOCAL_SESSION_PATH && method.toUpperCase() === "POST") {
     return true;
   }
   return isStaticAsset(pathname);

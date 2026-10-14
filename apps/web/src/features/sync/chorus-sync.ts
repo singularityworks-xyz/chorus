@@ -32,6 +32,7 @@ export const WS_CLOSE_UNAUTHORIZED = 4401;
 
 /** The code a browser reports when a handshake fails outright, e.g. a 404. */
 export const WS_CLOSE_ABNORMAL = 1006;
+const IPV4_OCTET_PATTERN = /^\d{1,3}$/;
 
 /**
  * Turns a close event into something worth showing a person.
@@ -720,6 +721,8 @@ function defaultCancel(handle: unknown): void {
  * concern to wire up.
  */
 export function resolveSocketUrl(env: {
+  allowLocalHostRebinding?: boolean;
+  developmentServePort?: number;
   explicit?: string | undefined;
   isSecure: boolean;
   origin: string;
@@ -730,6 +733,24 @@ export function resolveSocketUrl(env: {
   // during render, taking the whole workspace tree down.
   const explicit = env.explicit?.trim();
   const url = new URL(explicit ? explicit : env.origin);
+
+  if (!explicit && env.developmentServePort && url.port === "3000") {
+    url.port = String(env.developmentServePort);
+  }
+
+  if (
+    explicit &&
+    env.allowLocalHostRebinding &&
+    isLoopbackHostname(url.hostname)
+  ) {
+    const page = new URL(env.origin);
+    if (url.hostname !== page.hostname) {
+      // In development the web app may be opened from another device on the
+      // LAN. Keep the configured serve port, but target the host that served
+      // this page instead of making the other device connect to itself.
+      url.hostname = page.hostname;
+    }
+  }
 
   // An explicitly configured address keeps its own scheme. Overriding it with
   // the page's would turn `https://serve.example` into `ws://` when opened from
@@ -742,4 +763,20 @@ export function resolveSocketUrl(env: {
   url.pathname = "/ws";
   url.search = "";
   return url.toString();
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (normalized === "localhost" || normalized === "::1") {
+    return true;
+  }
+
+  const octets = normalized.split(".");
+  return (
+    octets.length === 4 &&
+    octets[0] === "127" &&
+    octets.every(
+      (octet) => IPV4_OCTET_PATTERN.test(octet) && Number(octet) <= 255
+    )
+  );
 }

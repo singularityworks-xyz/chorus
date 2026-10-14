@@ -26,6 +26,50 @@ describe("authenticated WebSocket URL preparation", () => {
     });
   });
 
+  test("bootstraps a local browser before registering it as a device", async () => {
+    const requests: { input: string | URL | Request; init?: RequestInit }[] =
+      [];
+    await prepareAuthenticatedSocketUrl("ws://localhost:2000/ws", {
+      allowLocalBootstrap: true,
+      fetcher: (input, init) => {
+        requests.push({ input, init });
+        if (String(input).endsWith("/ws-ticket")) {
+          return Promise.resolve(Response.json({ ticket: "ab".repeat(16) }));
+        }
+        return Promise.resolve(Response.json({ authenticated: true }));
+      },
+      pageOrigin: "http://localhost:3000",
+    });
+
+    expect(requests.map((request) => String(request.input))).toEqual([
+      "http://localhost:2000/auth/local-session",
+      "/api/auth/device",
+      "/api/auth/ws-ticket",
+    ]);
+    expect(requests[0]?.init).toMatchObject({
+      credentials: "include",
+      headers: { "x-chorus-local-bootstrap": "1" },
+      method: "POST",
+    });
+  });
+
+  test("does not attempt local bootstrap from a LAN or remote browser", async () => {
+    const paths: string[] = [];
+    await prepareAuthenticatedSocketUrl("ws://192.168.1.8:2000/ws", {
+      allowLocalBootstrap: true,
+      fetcher: (input) => {
+        paths.push(String(input));
+        if (String(input).endsWith("/ws-ticket")) {
+          return Promise.resolve(Response.json({ ticket: "ab".repeat(16) }));
+        }
+        return Promise.resolve(Response.json({ deviceId: "device-1" }));
+      },
+      pageOrigin: "http://192.168.1.8:3000",
+    });
+
+    expect(paths).toEqual(["/api/auth/device", "/api/auth/ws-ticket"]);
+  });
+
   test("obtains a ticket for cross-origin sockets", async () => {
     const paths: string[] = [];
     const url = await prepareAuthenticatedSocketUrl(

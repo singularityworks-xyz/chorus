@@ -144,9 +144,9 @@ Explicitly fixed by this design (from the 2026 audit): silent-wipe-on-corrupt (#
 
 The threat model is real: a public URL that spawns shell-executing agents on your machine.
 
-1. **Token gate**: `CHORUS_TOKEN` (env, or generated on first start if absent). All HTTP routes except `GET /health` require it; a successful `POST /auth/login` exchanges it for an HttpOnly, SameSite=Strict session cookie. A newly generated token is **never emitted through the application logger** (§6.7): it is persisted to `<DATA_DIR>/chorus.token` with `0600` permissions and the bootstrap message only points the operator at that file path.
+1. **Session gate and first visit**: production requires an operator-supplied `CHORUS_TOKEN`; a successful `POST /auth/login` exchanges either that value or a valid device-pairing code for an HttpOnly, SameSite=Strict session cookie. Local development generates and persists an internal session-signing secret with `0600` permissions, but never shows it or its file path to users. On a first local visit, the browser may obtain a session from `POST /auth/local-session` only when Serve is non-production, the direct socket peer is loopback, the exact browser Origin is in the local CORS allowlist, and the request carries the expected custom header. This route is not a remote bootstrap path and never trusts forwarded IP headers. An authenticated device can create one short-lived, single-use pairing code through `POST /auth/device-pairing`; only its SHA-256 digest is held in memory, it expires after five minutes, and a restart invalidates it. The local workspace opens without asking the user for an access token or a shell command.
 2. **WebSocket auth**: the WS upgrade is authenticated with the **same HttpOnly session cookie** (browsers attach it to same-origin upgrade requests automatically) or, for clients behind proxies that strip cookies, a short-lived single-use ticket obtained from an authenticated HTTP endpoint and presented once at upgrade. Connections failing auth are closed immediately. The server never accepts an unauthenticated socket, and browser JavaScript never needs to read or transmit `CHORUS_TOKEN` itself.
-3. **CORS locked down**: same-origin only in production; explicit allowlist env for local dev ports.
+3. **CORS locked down**: same-origin only in production; local development uses only the loopback frontend origins by default, or the explicit `CORS_ALLOWED_ORIGINS` allowlist. The local session route additionally checks the direct peer and exact Origin.
 4. **Path sandboxing**: every filesystem-touching operation (snapshots, diffs, worktrees, prompt file-parts) resolves against the board's registered root and rejects escapes. Absolute paths from clients are rejected unless inside a registered repo/worktree.
 5. **No shell interpolation**: all git/exec invocations go through argument arrays (`execFile`-style). The current string-built `git ${args}` pattern is banned and must be removed.
 6. **Rate limits**: per-IP token brute-force guard on `/auth/login`; per-client WS command rate cap.
@@ -170,7 +170,7 @@ Volumes: `./data:/data` (SQLite db, snapshots, config). Env (all documented in `
 
 ```
 PORT=2000                 # listen port (inside container)
-CHORUS_TOKEN=             # required in production; generate if missing and log once
+CHORUS_TOKEN=             # required in production; set by the operator
 DATA_DIR=/data
 OPENCODE_DIRECTORY=/workspaces
 RETENTION_DAYS=30

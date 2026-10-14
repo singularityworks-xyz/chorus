@@ -79,6 +79,37 @@ describe("resolveSocketUrl", () => {
     ).toBe("ws://app.test/ws");
   });
 
+  test("uses the local Serve port when Next dev is opened directly", () => {
+    expect(
+      resolveSocketUrl({
+        developmentServePort: 2000,
+        isSecure: false,
+        origin: "http://localhost:3000",
+      })
+    ).toBe("ws://localhost:2000/ws");
+  });
+
+  test("rebinds a local dev serve host to the host used by a LAN browser", () => {
+    expect(
+      resolveSocketUrl({
+        allowLocalHostRebinding: true,
+        explicit: "http://localhost:2000",
+        isSecure: false,
+        origin: "http://192.168.1.8:3000",
+      })
+    ).toBe("ws://192.168.1.8:2000/ws");
+  });
+
+  test("does not rebind a configured serve URL outside development", () => {
+    expect(
+      resolveSocketUrl({
+        explicit: "http://localhost:2000",
+        isSecure: false,
+        origin: "http://192.168.1.8:3000",
+      })
+    ).toBe("ws://localhost:2000/ws");
+  });
+
   test("a whitespace-only variable falls back to the origin", () => {
     expect(
       resolveSocketUrl({

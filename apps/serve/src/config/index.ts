@@ -5,7 +5,7 @@ export interface ServerConfig {
   autoStartOpencode: boolean;
   /** Delta coalescing window in ms (spec §7). */
   coalesceMs: number;
-  /** Where chorus.db, snapshots, and chorus.token live. */
+  /** Where chorus.db, snapshots, and the internal session secret live. */
   dataDir: string;
   /** Hard ceiling on chorus.db before the log compacts itself (spec §5). */
   dbSizeCapMb: number;

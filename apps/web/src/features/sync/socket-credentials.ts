@@ -1,6 +1,7 @@
 import { webSocketTicketResponseSchema } from "@chorus/contracts";
 
 const CREDENTIAL_REQUEST_TIMEOUT_MS = 5000;
+const IPV4_OCTET_PATTERN = /^\d{1,3}$/;
 
 export class SocketAuthenticationExpiredError extends Error {
   constructor() {
@@ -15,6 +16,8 @@ export type SocketCredentialFetcher = (
 ) => Promise<Response>;
 
 export interface SocketCredentialOptions {
+  /** Enable local-first browser bootstrap in development only. */
+  allowLocalBootstrap?: boolean;
   fetcher?: SocketCredentialFetcher;
   /** Browser origin, injectable so URL/auth behavior can be tested without DOM. */
   pageOrigin: string;
@@ -32,6 +35,29 @@ export async function prepareAuthenticatedSocketUrl(
   options: SocketCredentialOptions
 ): Promise<string> {
   const fetcher = options.fetcher ?? fetch;
+  const socketUrl = new URL(baseUrl);
+
+  if (
+    options.allowLocalBootstrap &&
+    isLoopbackHostname(new URL(options.pageOrigin).hostname) &&
+    isLoopbackHostname(socketUrl.hostname)
+  ) {
+    const bootstrapUrl = new URL(
+      "/auth/local-session",
+      httpOriginForSocket(socketUrl)
+    );
+    const bootstrapResponse = await fetchCredentialEndpoint(
+      fetcher,
+      bootstrapUrl,
+      {
+        credentials: "include",
+        headers: { "x-chorus-local-bootstrap": "1" },
+        method: "POST",
+      }
+    );
+    assertCredentialResponse(bootstrapResponse, "local sign-in");
+  }
+
   const deviceResponse = await fetchCredentialEndpoint(
     fetcher,
     "/api/auth/device",
@@ -39,7 +65,6 @@ export async function prepareAuthenticatedSocketUrl(
   );
   assertCredentialResponse(deviceResponse, "device registration");
 
-  const socketUrl = new URL(baseUrl);
   if (httpOriginForSocket(socketUrl) === new URL(options.pageOrigin).origin) {
     return socketUrl.toString();
   }
@@ -69,7 +94,7 @@ export async function prepareAuthenticatedSocketUrl(
 
 async function fetchCredentialEndpoint(
   fetcher: SocketCredentialFetcher,
-  path: string,
+  path: string | URL,
   init: RequestInit
 ): Promise<Response> {
   try {
@@ -104,4 +129,20 @@ function httpOriginForSocket(socketUrl: URL): string {
     throw new Error("WebSocket URL must use ws: or wss:");
   }
   return pageEquivalent.origin;
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (normalized === "localhost" || normalized === "::1") {
+    return true;
+  }
+
+  const octets = normalized.split(".");
+  return (
+    octets.length === 4 &&
+    octets[0] === "127" &&
+    octets.every(
+      (octet) => IPV4_OCTET_PATTERN.test(octet) && Number(octet) <= 255
+    )
+  );
 }

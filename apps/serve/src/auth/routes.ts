@@ -5,6 +5,8 @@ import {
   deviceIdFromHeader,
   issueDeviceCookie,
 } from "./device";
+import { canCreateLocalSession } from "./local-access";
+import type { DevicePairingTokenStore } from "./pairing";
 import {
   buildClearedCookieHeader,
   buildSessionCookieHeader,
@@ -19,16 +21,19 @@ import { issueTicket, type TicketStore } from "./ticket";
 /**
  * Authentication routes (spec §6.1, plan P4.2/P4.3).
  *
- * `POST /auth/login` is the only way in, and it is the only unauthenticated
- * route that can *do* anything: it exchanges the operator's token for a
- * session cookie so the raw token never has to be carried by browser code on
- * every subsequent request (spec §6.2).
+ * `POST /auth/login` accepts an operator token or a single-use device code.
+ * Local development also has a loopback-only session bootstrap; it cannot be
+ * used from a remote device or in production. Successful entry points issue
+ * the same HttpOnly session cookie so raw credentials do not travel with later
+ * browser requests (spec §6.2).
  */
 
 export interface AuthRouteOptions {
   isProduction: boolean;
+  localOrigins: readonly string[];
   now?: () => number;
   onLogoutDevice?: (deviceId: string) => Promise<void>;
+  pairingTokenStore: DevicePairingTokenStore;
   rateLimiter?: LoginRateLimiter;
   ticketStore: TicketStore;
   token: string;
@@ -65,6 +70,56 @@ export function createAuthRoutes(options: AuthRouteOptions) {
   const limiter = options.rateLimiter ?? new LoginRateLimiter({ now });
 
   return new Elysia()
+    .post("/auth/local-session", async ({ request, set, server }) => {
+      set.headers["cache-control"] = "no-store";
+
+      if (
+        !canCreateLocalSession({
+          isProduction: options.isProduction,
+          localOrigins: options.localOrigins,
+          origin: request.headers.get("origin"),
+          peerAddress: clientIp(server ?? null, request),
+          requestMarker: request.headers.get("x-chorus-local-bootstrap"),
+        })
+      ) {
+        set.status = 403;
+        return { code: "local_sign_in_unavailable" };
+      }
+
+      const existing = await verifySessionCookie(
+        readSessionCookie(request.headers.get("cookie")),
+        { now, token: options.token }
+      );
+      if (existing.ok) {
+        return { authenticated: true, expiresAt: existing.expiresAt };
+      }
+
+      const session = await issueSessionCookie(
+        { now, token: options.token },
+        SESSION_TTL_SECONDS
+      );
+      set.headers["set-cookie"] = buildSessionCookieHeader(
+        session.cookie,
+        session.expiresAt,
+        options.isProduction
+      );
+      return { authenticated: true, expiresAt: session.expiresAt };
+    })
+
+    .post("/auth/device-pairing", async ({ request, set }) => {
+      set.headers["cache-control"] = "no-store";
+      const session = await verifySessionCookie(
+        readSessionCookie(request.headers.get("cookie")),
+        { now, token: options.token }
+      );
+      if (!session.ok) {
+        set.status = 401;
+        return { code: "unauthorized", message: "authentication required" };
+      }
+
+      return options.pairingTokenStore.issue();
+    })
+
     .post(
       "/auth/login",
       async ({ body, request, set, server }) => {
@@ -81,10 +136,14 @@ export function createAuthRoutes(options: AuthRouteOptions) {
           return tooManyRequests(600);
         }
 
-        if (
-          candidate.length === 0 ||
-          !timingSafeEqualStrings(candidate, options.token)
-        ) {
+        const matchesInstanceToken =
+          candidate.length > 0 &&
+          timingSafeEqualStrings(candidate, options.token);
+        const matchesPairingToken =
+          !matchesInstanceToken &&
+          (await options.pairingTokenStore.consume(candidate));
+
+        if (!(matchesInstanceToken || matchesPairingToken)) {
           if (limiter.recordFailure(key) === "rate-limited") {
             return tooManyRequests(600);
           }
