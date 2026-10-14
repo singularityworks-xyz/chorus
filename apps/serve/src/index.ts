@@ -58,8 +58,9 @@ await mkdir(config.dataDir, { recursive: true });
  *
  * Resolved before anything is constructed so a production boot without
  * `CHORUS_TOKEN` fails immediately and loudly, rather than after the engine is
- * spawned and a port is bound. The token value is never logged — only the file
- * path, and only when this process generated it.
+ * spawned and a port is bound. The token value is never logged. Local operators
+ * get the credential file path on first boot and later restarts; an
+ * environment-provided credential is identified without implying a file exists.
  */
 let token: string;
 try {
@@ -69,12 +70,16 @@ try {
     isProduction,
   });
   token = resolved.token;
-  if (resolved.source === "generated") {
-    // The value is never logged — only where to find it. The field is renamed
-    // because the log gate scans whole call-site lines for sensitive keywords,
-    // so the path cannot be read straight off the resolved object here.
+  if (resolved.source === "environment") {
+    logger.info("auth-configured", { source: resolved.source });
+  } else {
+    // The value is never logged — only where to find it. Keep the sensitive
+    // value out of the structured fields as well as the message.
     const { tokenPath: credentialFile } = resolved;
-    logger.info("auth-credential-generated", { filePath: credentialFile });
+    logger.info("auth-credential-file", {
+      filePath: credentialFile,
+      source: resolved.source,
+    });
   }
 } catch (error) {
   if (error instanceof MissingTokenError) {

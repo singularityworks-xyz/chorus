@@ -69,11 +69,47 @@ export default function LoginPage() {
         onSubmit={submit}
       >
         <div className="space-y-1">
-          <h1 className="font-semibold text-lg">Chorus</h1>
+          <h1 className="font-semibold text-lg">Sign in to Chorus</h1>
           <p className="text-sm text-white/60">
-            Enter your access token to continue.
+            Enter the access token for this Chorus instance.
           </p>
         </div>
+
+        <details className="rounded border border-white/10 bg-black/20 px-3 py-2 text-sm">
+          <summary className="cursor-pointer font-medium text-white/80">
+            Where do I find my access token?
+          </summary>
+          <div className="mt-3 space-y-3 text-white/60">
+            <p>
+              On a local development install, Chorus prints the token file path
+              when it starts. By default, the file is{" "}
+              <code className="break-all text-white/80">
+                ~/.chorus/chorus.token
+              </code>
+              .
+            </p>
+            <p>On Windows PowerShell, read the default file with:</p>
+            <code className="block break-all rounded bg-black/40 p-2 text-white/80 text-xs">
+              {
+                "Get-Content -LiteralPath (Join-Path $env:USERPROFILE '.chorus\\chorus.token')"
+              }
+            </code>
+            <p>On macOS or Linux, use:</p>
+            <code className="block break-all rounded bg-black/40 p-2 text-white/80 text-xs">
+              cat ~/.chorus/chorus.token
+            </code>
+            <p>
+              If <code>DATA_DIR</code> is set, the file is inside that directory
+              instead. If the instance operator configured{" "}
+              <code>CHORUS_TOKEN</code>, use that configured value; the server
+              does not write it to a file. For an instance on another computer,
+              ask its operator for access.
+            </p>
+            <p>
+              Keep the token private. Chorus will not store it in your browser.
+            </p>
+          </div>
+        </details>
 
         <label className="block space-y-1 text-sm">
           <span className="text-white/70">Access token</span>
