@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { Task, WorkspaceBoard } from "@chorus/contracts";
-import { applyEventToBoard, workspaceBoardSchema } from "@chorus/contracts";
+import {
+  applyEventToBoard,
+  workspaceBoardSchema,
+  workspaceEventSchema,
+} from "@chorus/contracts";
 import type { NormalizedAgentEvent } from "@chorus/oc-adapter";
 import {
   applyAgentEventToBoard,
@@ -72,6 +76,26 @@ describe("agent event normalization", () => {
       "step.upserted",
       "card.started",
     ]);
+  });
+
+  test("empty engine text produces valid non-empty step summaries", () => {
+    const emptyThinking = toWorkspaceEvents(
+      agentEvent({ activity: "thinking", partID: "thinking", text: "" }),
+      { boardId: BOARD, taskId: TASK }
+    );
+    const whitespaceWriting = toWorkspaceEvents(
+      agentEvent({ activity: "writing", partID: "response", text: "   " }),
+      { boardId: BOARD, taskId: TASK }
+    );
+
+    for (const event of [...emptyThinking, ...whitespaceWriting]) {
+      expect(workspaceEventSchema.safeParse(event).success).toBe(true);
+    }
+
+    const step = emptyThinking.find((event) => event.type === "step.upserted");
+    expect(step?.type === "step.upserted" && step.step.summary).toBe(
+      "Thinking"
+    );
   });
 
   test("a tool event becomes a tool_call step", () => {

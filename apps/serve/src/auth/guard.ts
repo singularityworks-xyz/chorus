@@ -1,6 +1,8 @@
 import { status } from "elysia";
+import { deviceIdFromHeader } from "./device";
 import { readSessionCookie, verifySessionCookie } from "./session";
-import { consumeTicket, type TicketOptions } from "./ticket";
+import type { SessionRegistry } from "./session-registry";
+import { consumeTicketIdentity, type TicketOptions } from "./ticket";
 
 /**
  * Request authentication (spec §6.1/§6.2, plan P4.2/P4.3).
@@ -40,8 +42,24 @@ export interface AuthGuardOptions {
 }
 
 const ALWAYS_OPEN = new Set(["/health"]);
+const LOCAL_SESSION_PATH = "/auth/local-session";
 
 const DEFAULT_WS_PATH = "/ws";
+
+const PUBLIC_FRONTEND_PATHS = new Set([
+  "/",
+  "/login",
+  "/help",
+  "/favicon.ico",
+  "/chorus.svg",
+  "/sw.js",
+  "/manifest.webmanifest",
+]);
+
+/** Explicit assets prevent a newly mounted API from inheriting a public exemption. */
+export function isPublicFrontendPath(pathname: string): boolean {
+  return PUBLIC_FRONTEND_PATHS.has(pathname) || pathname.startsWith("/_next/");
+}
 
 export function isLoginPath(pathname: string): boolean {
   return pathname === "/auth/login";
@@ -61,6 +79,9 @@ export function isPathAllowedUnauthenticated(
     return true;
   }
   if (isLoginPath(pathname)) {
+    return true;
+  }
+  if (pathname === LOCAL_SESSION_PATH && method.toUpperCase() === "POST") {
     return true;
   }
   return isStaticAsset(pathname);
@@ -89,34 +110,120 @@ export function unauthorizedResponse(): Response {
  */
 export async function verifyRequestCredential(
   request: Request,
-  options: { ticketOptions: TicketOptions; token: string }
+  options: {
+    sessionRegistry?: SessionRegistry;
+    allowTicket?: boolean;
+    requireDevice?: boolean;
+    ticketOptions: TicketOptions;
+    token: string;
+  }
 ): Promise<
-  { ok: true; via: "cookie" | "ticket" } | { ok: false; reason: string }
+  | { deviceId?: string; ok: true; via: "cookie" | "ticket" }
+  | { ok: false; reason: string }
 > {
+  // An explicitly presented single-use ticket is the credential for proxy
+  // upgrades. Consume and verify it even when a session cookie is also present;
+  // otherwise a ticket bound to another device could be ignored in favor of the
+  // cookie and appear to have authenticated successfully.
+  if (
+    options.allowTicket !== false &&
+    new URL(request.url).searchParams.has("ticket")
+  ) {
+    const ticketResult = consumeRequestTicket(
+      request,
+      await deviceIdFromHeader(request.headers.get("cookie"), options.token),
+      options
+    );
+    if (ticketResult) {
+      return ticketResult;
+    }
+  }
+
+  const device = await deviceIdFromHeader(
+    request.headers.get("cookie"),
+    options.token
+  );
   const cookie = readSessionCookie(request.headers.get("cookie"));
 
   if (cookie) {
-    const session = await verifySessionCookie(cookie, {
-      token: options.token,
-    });
-    if (session.ok) {
-      return { ok: true, via: "cookie" };
+    const sessionResult = await verifySessionCredential(
+      cookie,
+      device,
+      options
+    );
+    if (sessionResult) {
+      return sessionResult;
     }
-  }
-
-  const url = new URL(request.url);
-  const ticket = url.searchParams.get("ticket");
-
-  if (ticket) {
-    // `consumeTicket` deletes before it decides, so a replay cannot win a race.
-    const result = consumeTicket(ticket, options.ticketOptions);
-    if (result === "consumed") {
-      return { ok: true, via: "ticket" };
-    }
-    return { ok: false, reason: `ticket ${result}` };
   }
 
   return { ok: false, reason: cookie ? "session invalid" : "no credential" };
+}
+
+interface CredentialOptions {
+  requireDevice?: boolean;
+  sessionRegistry?: SessionRegistry;
+  ticketOptions: TicketOptions;
+  token: string;
+}
+
+async function verifySessionCredential(
+  cookie: string,
+  device: Awaited<ReturnType<typeof deviceIdFromHeader>>,
+  options: CredentialOptions
+) {
+  const session = await verifySessionCookie(cookie, {
+    token: options.token,
+    registry: options.sessionRegistry,
+  });
+  if (!session.ok) {
+    return null;
+  }
+  const deviceId =
+    session.deviceId ?? (device.ok ? device.deviceId : undefined);
+  if (options.requireDevice && !deviceId) {
+    return { ok: false as const, reason: "device identity missing or invalid" };
+  }
+  return {
+    ...(deviceId ? { deviceId } : {}),
+    ok: true as const,
+    via: "cookie" as const,
+  };
+}
+
+function consumeRequestTicket(
+  request: Request,
+  device: Awaited<ReturnType<typeof deviceIdFromHeader>>,
+  options: CredentialOptions
+) {
+  const ticket = new URL(request.url).searchParams.get("ticket");
+  if (ticket === null) {
+    return null;
+  }
+  // Consumption deletes before deciding, so a replay cannot win a race.
+  const outcome = consumeTicketIdentity(
+    ticket,
+    device.ok
+      ? { ...options.ticketOptions, deviceId: device.deviceId }
+      : options.ticketOptions
+  );
+  if (outcome.result !== "consumed") {
+    return { ok: false as const, reason: `ticket ${outcome.result}` };
+  }
+  const deviceId = device.ok ? device.deviceId : outcome.deviceId;
+  if (
+    options.sessionRegistry &&
+    !(deviceId && options.sessionRegistry.deviceAllowed(deviceId))
+  ) {
+    return { ok: false as const, reason: "device session revoked or expired" };
+  }
+  if (options.requireDevice && !deviceId) {
+    return { ok: false as const, reason: "ticket device identity missing" };
+  }
+  return {
+    ...(deviceId ? { deviceId } : {}),
+    ok: true as const,
+    via: "ticket" as const,
+  };
 }
 
 /**
@@ -155,6 +262,7 @@ export async function verifyRequestCredential(
  * all look like a working guard in code review.
  */
 export function authGuardHandler(options: {
+  sessionRegistry?: SessionRegistry;
   isStaticAsset?: (pathname: string) => boolean;
   ticketOptions: TicketOptions;
   token: string;
@@ -177,6 +285,8 @@ export function authGuardHandler(options: {
     }
 
     const result = await verifyRequestCredential(request, {
+      allowTicket: false,
+      sessionRegistry: options.sessionRegistry,
       ticketOptions: options.ticketOptions,
       token: options.token,
     });

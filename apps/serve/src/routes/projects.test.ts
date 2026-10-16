@@ -249,6 +249,25 @@ describe("project routes", () => {
     });
   });
 
+  test("disables the host folder picker in production", async () => {
+    const projectService = makeProjectService();
+    const app = new Elysia().use(
+      createProjectRoutes(projectService as never, true)
+    );
+
+    const response = await app.handle(
+      new Request("http://localhost/projects/open-folder", { method: "POST" })
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      code: "host_folder_picker_disabled",
+      message:
+        "Configure CHORUS_REPOSITORY_ROOTS to add repositories on this server",
+    });
+    expect(projectService.openFolder).not.toHaveBeenCalled();
+  });
+
   test("opens the OpenCode model dialog", async () => {
     const projectService = makeProjectService();
     const app = new Elysia().use(createProjectRoutes(projectService as never));

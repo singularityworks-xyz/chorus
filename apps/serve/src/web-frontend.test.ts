@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { InvalidPathError, SandboxEscapeError } from "./paths/sandbox";
 import { resolveStaticPath, setStaticRoot } from "./web-frontend";
 
@@ -100,7 +100,11 @@ describe("resolveStaticPath", () => {
     const outside = mkdtempSync(join(tmpdir(), "chorus-outside-"));
     roots.push(outside);
     writeFileSync(join(outside, "secret.txt"), "secret");
-    symlinkSync(outside, join(root, "escape"));
+    symlinkSync(
+      outside,
+      join(root, "escape"),
+      process.platform === "win32" ? "junction" : "dir"
+    );
 
     // Lexical containment passes this: the path is under the root and uses no
     // `..`. Only realpath resolution catches it.
@@ -114,10 +118,9 @@ describe("resolveStaticPath", () => {
 
     // `root` and `root-sibling` share a string prefix but are distinct trees.
     // A naive `startsWith(root)` check would accept the sibling.
-    const sibling = `${root}-sibling`;
-    roots.push(sibling);
+    const siblingName = `${basename(root)}-sibling`;
 
-    expect(() => resolveStaticPath(`../${sibling}`)).toThrow(
+    expect(() => resolveStaticPath(`/../${siblingName}`)).toThrow(
       SandboxEscapeError
     );
   });

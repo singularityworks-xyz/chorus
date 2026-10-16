@@ -1,5 +1,37 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  createWriteStream,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { z } from "zod";
+
+const packageManifestSchema = z.object({
+  bin: z.union([z.string(), z.record(z.string(), z.string())]),
+});
+const serveRequire = createRequire(
+  join(process.cwd(), "apps/serve/package.json")
+);
+
+function resolveOpenCodeBinary(): string {
+  const manifestPath = serveRequire.resolve("opencode-ai/package.json");
+  const parsed: unknown = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const manifest = packageManifestSchema.safeParse(parsed);
+  if (!manifest.success) {
+    throw new Error("The pinned opencode-ai package has no CLI entrypoint");
+  }
+  const binary =
+    typeof manifest.data.bin === "string"
+      ? manifest.data.bin
+      : manifest.data.bin.opencode;
+  if (!binary) {
+    throw new Error("The pinned opencode-ai package has no opencode binary");
+  }
+  return join(dirname(manifestPath), binary);
+}
 
 /**
  * Owns the serve process so a test can actually restart it.
@@ -52,25 +84,45 @@ export async function start(options: ServeProcessOptions): Promise<number> {
       ...process.env,
       CHORUS_TOKEN: options.token,
       DATA_DIR: options.dataDir,
-      NODE_ENV: "production",
+      // The browser suite runs on insecure loopback HTTP/WS. A Secure cookie
+      // can authenticate the HTTP proxy on localhost but is not sent on the
+      // `ws://` upgrade; production Secure-cookie behavior is covered by the
+      // auth tests, while this harness exercises the real cookie flow over its
+      // deliberately local, non-TLS transport.
+      NODE_ENV: "development",
       OPENCODE_AUTO_START: "false",
       PORT: String(options.port),
       // Spread last so a caller can point serve at an engine it did not spawn.
       ...options.env,
     },
+    // Serve is restarted from inside a Playwright worker. Keep it independent
+    // of that worker so a test failure cannot take the server down before later
+    // tests report their own failures. `windowsHide` keeps the detached process
+    // from opening a visible console on Windows.
+    detached: true,
     stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
   });
 
   // Without a consumer the pipe fills and the child blocks on write, which
   // shows up as a health check that times out for no visible reason.
-  const log = spawn("tee", ["-a", options.logFile], { stdio: "pipe" });
-  child.stdout?.pipe(log.stdin);
-  child.stderr?.pipe(log.stdin);
+  const log = createWriteStream(options.logFile, { flags: "a" });
+  child.stdout?.pipe(log, { end: false });
+  child.stderr?.pipe(log, { end: false });
+  child.once("close", (code, signal) => {
+    log.write(
+      `[e2e] serve exited: code=${String(code)} signal=${String(signal)}\n`
+    );
+    log.end();
+  });
 
   child.unref();
   recordPid(options.pidFile, child.pid ?? -1);
 
-  await waitForHealth(options.port, 30_000);
+  // Serve waits for the engine's event stream to attach before opening its
+  // HTTP listener. On a cold Windows engine this handshake can take longer
+  // than the browser server's usual 30-second readiness window.
+  await waitForChildHealth(child, options.port, 120_000, "serve");
   return child.pid ?? -1;
 }
 
@@ -80,7 +132,11 @@ export async function start(options: ServeProcessOptions): Promise<number> {
  * Resolves even if the process is already gone: a restart test may have been
  * retried after a partial run, and "it was not running" is not a failure.
  */
-export async function stop(port: number, pidFile: string): Promise<void> {
+export async function stop(
+  port: number,
+  pidFile: string,
+  kind: "engine" | "serve" = "serve"
+): Promise<void> {
   const pid = readPid(pidFile);
 
   if (pid !== null) {
@@ -91,7 +147,7 @@ export async function stop(port: number, pidFile: string): Promise<void> {
     }
   }
 
-  await waitForPortFree(port, 15_000);
+  await waitForPortFree(port, 15_000, kind);
 }
 
 /**
@@ -124,17 +180,21 @@ async function waitForHealth(
   throw new Error(`${kind} did not become healthy on port ${String(port)}`);
 }
 
-async function waitForPortFree(port: number, timeoutMs: number): Promise<void> {
+async function waitForPortFree(
+  port: number,
+  timeoutMs: number,
+  kind: "engine" | "serve"
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    if (!(await healthOnce(port, "serve"))) {
+    if (!(await healthOnce(port, kind))) {
       return;
     }
     await delay(200);
   }
 
-  throw new Error(`serve is still listening on port ${String(port)}`);
+  throw new Error(`${kind} is still listening on port ${String(port)}`);
 }
 
 async function healthOnce(
@@ -193,21 +253,48 @@ export async function startEngine(options: {
   port: number;
 }): Promise<number> {
   const child = spawn(
-    "opencode",
+    resolveOpenCodeBinary(),
     ["serve", "--port", String(options.port), "--hostname", "127.0.0.1"],
     {
       cwd: options.cwd,
       env: { ...process.env },
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     }
   );
 
-  const log = spawn("tee", ["-a", options.logFile], { stdio: "pipe" });
-  child.stdout?.pipe(log.stdin);
-  child.stderr?.pipe(log.stdin);
+  const log = createWriteStream(options.logFile, { flags: "a" });
+  child.stdout?.pipe(log, { end: false });
+  child.stderr?.pipe(log, { end: false });
+  child.once("close", () => log.end());
   child.unref();
   recordPid(options.pidFile, child.pid ?? -1);
 
-  await waitForHealth(options.port, 120_000, "engine");
+  await waitForChildHealth(child, options.port, 120_000, "engine");
   return child.pid ?? -1;
+}
+
+async function waitForChildHealth(
+  child: ReturnType<typeof spawn>,
+  port: number,
+  timeoutMs: number,
+  kind: "engine" | "serve"
+): Promise<void> {
+  const startupError = new Promise<never>((_resolve, reject) => {
+    child.once("error", reject);
+  });
+  try {
+    await Promise.race([waitForHealth(port, timeoutMs, kind), startupError]);
+  } catch (error) {
+    if (child.pid) {
+      try {
+        process.kill(child.pid, "SIGTERM");
+      } catch {
+        // Startup may have failed before a process was created.
+      }
+    }
+    throw new Error(
+      `${kind} process failed to start: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
 }

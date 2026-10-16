@@ -159,15 +159,26 @@ export async function serveWebFrontend(pathname: string): Promise<Response> {
   try {
     const content = await readFile(filePath);
     const contentType = getContentType(path.extname(filePath));
+    const serviceWorkerHeaders =
+      pathname === "/sw.js" ? { "Service-Worker-Allowed": "/" } : {};
     return withSecurityHeaders(
       new Response(content, {
         headers: {
           "Cache-Control": "no-store",
           "Content-Type": contentType,
+          ...serviceWorkerHeaders,
         },
       })
     );
   } catch {
+    if (pathname === "/sw.js") {
+      return withSecurityHeaders(
+        new Response("service worker not found", {
+          headers: { "Content-Type": "text/plain" },
+          status: 404,
+        })
+      );
+    }
     // If file not found, try serving index.html (SPA fallback)
     try {
       const indexPath = resolveStaticPath("/");

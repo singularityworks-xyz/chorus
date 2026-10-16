@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 /**
  * Single-use WebSocket upgrade tickets (spec §6.2, plan P4.3).
  *
@@ -24,6 +26,7 @@ const TICKET_KEY_PREFIX = "wst:";
 
 /** 16 bytes hex-encoded: 32 lowercase hex chars. */
 const TICKET_SHAPE = /^[0-9a-f]{32}$/;
+const LEGACY_TICKET_EXPIRY = /^\d+$/;
 
 /**
  * The slice of database surface a ticket store needs.
@@ -40,9 +43,33 @@ export interface TicketStore {
 }
 
 export interface TicketOptions {
+  deviceId?: string;
   now?: () => number;
   store: TicketStore;
   ttlMs?: number;
+}
+
+const ticketValueSchema = z.union([
+  z.number().finite(),
+  z.object({
+    deviceId: z.string().regex(/^[0-9a-f]{32}$/),
+    expiresAt: z.number().finite(),
+  }),
+]);
+
+type TicketValue = z.infer<typeof ticketValueSchema>;
+
+function parseTicketValue(raw: string): TicketValue | null {
+  if (LEGACY_TICKET_EXPIRY.test(raw)) {
+    const expiresAt = Number(raw);
+    return Number.isFinite(expiresAt) ? expiresAt : null;
+  }
+  try {
+    const parsed = ticketValueSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }
 
 export function generateTicket(): string {
@@ -64,16 +91,24 @@ export function ticketMetaKey(ticket: string): string {
 export function issueTicket(options: TicketOptions): string {
   const now = options.now ?? Date.now;
   const ticket = generateTicket();
+  const expiresAt = now() + (options.ttlMs ?? TICKET_TTL_MS);
 
   options.store.setMeta(
     ticketMetaKey(ticket),
-    String(now() + (options.ttlMs ?? TICKET_TTL_MS))
+    options.deviceId
+      ? JSON.stringify({ deviceId: options.deviceId, expiresAt })
+      : String(expiresAt)
   );
 
   return ticket;
 }
 
 export type ConsumeResult = "consumed" | "expired" | "unknown";
+
+export interface TicketConsumeOutcome {
+  deviceId?: string;
+  result: ConsumeResult;
+}
 
 /**
  * Consumes a ticket exactly once.
@@ -87,8 +122,16 @@ export function consumeTicket(
   ticket: string | undefined | null,
   options: TicketOptions
 ): ConsumeResult {
+  return consumeTicketIdentity(ticket, options).result;
+}
+
+/** Consumes a ticket and returns its server-recorded device binding, if any. */
+export function consumeTicketIdentity(
+  ticket: string | undefined | null,
+  options: TicketOptions
+): TicketConsumeOutcome {
   if (!(ticket && TICKET_SHAPE.test(ticket))) {
-    return "unknown";
+    return { result: "unknown" };
   }
 
   const key = ticketMetaKey(ticket);
@@ -96,16 +139,34 @@ export function consumeTicket(
   options.store.deleteMeta(key);
 
   if (raw === null) {
-    return "unknown";
+    return { result: "unknown" };
   }
 
-  const expiresAt = Number.parseInt(raw, 10);
+  const value = parseTicketValue(raw);
+  const expiresAt = ticketExpiry(value);
   if (!Number.isFinite(expiresAt)) {
-    return "unknown";
+    return { result: "unknown" };
+  }
+
+  if (
+    options.deviceId &&
+    (value === null ||
+      typeof value === "number" ||
+      value.deviceId !== options.deviceId)
+  ) {
+    return { result: "unknown" };
   }
 
   const now = options.now ?? Date.now;
-  return now() < expiresAt ? "consumed" : "expired";
+  if (now() >= expiresAt) {
+    return { result: "expired" };
+  }
+  return {
+    ...(value !== null && typeof value === "object"
+      ? { deviceId: value.deviceId }
+      : {}),
+    result: "consumed",
+  };
 }
 
 /**
@@ -122,7 +183,8 @@ export function pruneExpiredTickets(
   let pruned = 0;
 
   for (const [key, value] of store.entriesWithPrefix(TICKET_KEY_PREFIX)) {
-    const expiresAt = Number.parseInt(value, 10);
+    const parsed = parseTicketValue(value);
+    const expiresAt = ticketExpiry(parsed);
     if (!Number.isFinite(expiresAt) || expiresAt <= now) {
       store.deleteMeta(key);
       pruned += 1;
@@ -130,4 +192,11 @@ export function pruneExpiredTickets(
   }
 
   return pruned;
+}
+
+function ticketExpiry(value: TicketValue | null): number {
+  if (value === null) {
+    return Number.NaN;
+  }
+  return typeof value === "number" ? value : value.expiresAt;
 }

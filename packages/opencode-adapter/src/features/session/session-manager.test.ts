@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import { SessionManager } from "./session-manager";
 
 /**
@@ -67,5 +67,46 @@ describe("SessionManager error surfacing", () => {
       clientReturning({ error: { code: "Nope" } })
     );
     await expect(manager.create({ title: "x" })).rejects.toThrow(CREATE_FAILED);
+  });
+});
+
+describe("SessionManager session diff", () => {
+  test("reads diff patches and file content from the requested checkout", async () => {
+    const diff = mock(async () => ({
+      data: [
+        {
+          additions: 1,
+          deletions: 1,
+          file: "src/main.ts",
+          patch: "@@ -1 +1 @@\n-old\n+new\n",
+          status: "modified" as const,
+        },
+      ],
+    }));
+    const read = mock(async () => ({
+      data: { content: "new\n", type: "text" as const },
+    }));
+    const manager = new SessionManager({
+      session: { diff },
+      file: { read },
+    } as never);
+
+    await expect(manager.diff("session-1", "/repo/worktree")).resolves.toEqual([
+      {
+        additions: 1,
+        after: "new\n",
+        before: "old\n",
+        deletions: 1,
+        file: "src/main.ts",
+      },
+    ]);
+    expect(diff).toHaveBeenCalledWith({
+      sessionID: "session-1",
+      directory: "/repo/worktree",
+    });
+    expect(read).toHaveBeenCalledWith({
+      path: "src/main.ts",
+      directory: "/repo/worktree",
+    });
   });
 });

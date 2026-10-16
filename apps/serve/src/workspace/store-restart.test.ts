@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChorusDatabase, resolveDbPath, restoreDatabaseFile } from "./db";
@@ -88,6 +88,7 @@ describe("crash recovery", () => {
     const killer = Bun.spawn(["bun", "run", workerPath, dataDir, "kill", "5"], {
       stdout: "pipe",
       stderr: "pipe",
+      windowsHide: true,
     });
     const killerOut = await new Response(killer.stdout).text();
     await killer.exited;
@@ -120,6 +121,7 @@ describe("crash recovery", () => {
       {
         stdout: "pipe",
         stderr: "pipe",
+        windowsHide: true,
       }
     );
     const out = await new Response(worker.stdout).text();
@@ -137,7 +139,7 @@ describe("crash recovery", () => {
     // first, so the copy carries state in `snapshots` and only the final event
     // row survives; the sequence head lives in `meta`.
     const copyPath = join(dataDir, "cold-copy.db");
-    Bun.spawnSync(["cp", join(dataDir, "chorus.db"), copyPath]);
+    copyFileSync(join(dataDir, "chorus.db"), copyPath);
 
     const probe = new Database(copyPath);
     expect(probe.query("PRAGMA integrity_check").get()).toEqual({
@@ -346,8 +348,11 @@ describe("restore and export cycle", () => {
     const restoreDir = tempDir();
     const result = restoreDatabaseFile(restoreDir, resolveDbPath(sourceDir));
 
-    // biome-ignore lint/suspicious/noBitwiseOperators: mode is a bitfield
-    expect(statSync(result.path).mode & 0o777).toBe(0o600);
+    expect(statSync(result.path).isFile()).toBe(true);
+    if (process.platform !== "win32") {
+      // biome-ignore lint/suspicious/noBitwiseOperators: mode is a bitfield
+      expect(statSync(result.path).mode & 0o777).toBe(0o600);
+    }
 
     // A restored database must accept new writes, not just reads.
     const reopened = new WorkspaceStore(restoreDir);

@@ -38,15 +38,27 @@ CREATE TABLE IF NOT EXISTS snapshots (
 );
 
 CREATE TABLE IF NOT EXISTS push_subs (
-  endpoint   TEXT PRIMARY KEY,
-  keys       TEXT NOT NULL,
-  created_at INTEGER
+  endpoint      TEXT PRIMARY KEY,
+  keys          TEXT NOT NULL,
+  device_id     TEXT,
+  created_at    INTEGER,
+  updated_at    INTEGER,
+  expiration_at INTEGER,
+  key_id        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS agent_receipts (
+  receipt_id  TEXT PRIMARY KEY,
+  received_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS agent_receipts_time_idx
+  ON agent_receipts(received_at);
 `;
 
 export interface StoredEvent {
@@ -71,6 +83,61 @@ export interface EventToAppend {
   type: string;
 }
 
+export interface MetaChange {
+  key: string;
+  value: string | null;
+}
+
+export interface StoredPushSubscription {
+  createdAt: number | null;
+  deviceId: string | null;
+  endpoint: string;
+  expirationAt: number | null;
+  keyId: string | null;
+  keys: string;
+  updatedAt: number | null;
+}
+
+export interface PushSubscriptionRow {
+  createdAt: number;
+  deviceId: string;
+  endpoint: string;
+  expirationAt: number | null;
+  keyId: string;
+  keys: string;
+  updatedAt: number;
+}
+
+interface PushSubscriptionSqlRow {
+  created_at: number | null;
+  device_id: string | null;
+  endpoint: string;
+  expiration_at: number | null;
+  key_id: string | null;
+  keys: string;
+  updated_at: number | null;
+}
+
+function migratePushSubscriptions(db: Database): void {
+  const columns = new Set(
+    db
+      .query<{ name: string }, []>("PRAGMA table_info(push_subs)")
+      .all()
+      .map((column) => column.name)
+  );
+  const additions: [string, string][] = [
+    ["device_id", "TEXT"],
+    ["updated_at", "INTEGER"],
+    ["expiration_at", "INTEGER"],
+    ["key_id", "TEXT"],
+  ];
+  for (const [name, type] of additions) {
+    if (!columns.has(name)) {
+      db.exec(`ALTER TABLE push_subs ADD COLUMN ${name} ${type}`);
+    }
+  }
+}
+
 export function resolveDbPath(dataDir: string): string {
   return join(dataDir, CHORUS_DB_FILENAME);
 }
@@ -92,6 +159,7 @@ export function openChorusDatabase(dataDir: string): Database {
   db.exec("PRAGMA synchronous = NORMAL");
   db.exec("PRAGMA foreign_keys = ON");
   db.exec(SCHEMA);
+  migratePushSubscriptions(db);
 
   chmodSync(dbPath, 0o600);
 
@@ -102,6 +170,7 @@ export class ChorusDatabase {
   readonly dataDir: string;
   readonly path: string;
   readonly #db: Database;
+  #closed = false;
 
   constructor(dataDir: string) {
     this.dataDir = dataDir;
@@ -120,10 +189,190 @@ export class ChorusDatabase {
     return row?.value ?? null;
   }
 
+  hasAgentReceipt(receiptId: string): boolean {
+    return (
+      this.#db
+        .query<{ present: number }, [string]>(
+          "SELECT 1 AS present FROM agent_receipts WHERE receipt_id = ?"
+        )
+        .get(receiptId)?.present === 1
+    );
+  }
+
+  pruneAgentReceipts(before: number, maxRows: number): void {
+    this.#db
+      .query("DELETE FROM agent_receipts WHERE received_at < ?")
+      .run(before);
+    this.#db
+      .query(
+        `DELETE FROM agent_receipts WHERE receipt_id IN (
+          SELECT receipt_id FROM agent_receipts
+          ORDER BY received_at DESC, receipt_id DESC
+          LIMIT -1 OFFSET ?
+        )`
+      )
+      .run(maxRows);
+  }
+
   setMeta(key: string, value: string): void {
     this.#db
       .query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
       .run(key, value);
+  }
+
+  writeMetaChanges(changes: MetaChange[]): void {
+    if (changes.length === 0) {
+      return;
+    }
+    this.#db
+      .transaction(() => {
+        for (const change of changes) {
+          if (change.value === null) {
+            this.deleteMeta(change.key);
+          } else {
+            this.setMeta(change.key, change.value);
+          }
+        }
+      })
+      .immediate();
+  }
+
+  upsertPushSubscription(
+    subscription: PushSubscriptionRow,
+    maxPerDevice = 4
+  ): "stored" | "owned-by-another-device" | "limit-reached" {
+    return this.#db
+      .transaction(() => {
+        const current = this.#db
+          .query<{ device_id: string | null }, [string]>(
+            "SELECT device_id FROM push_subs WHERE endpoint = ?"
+          )
+          .get(subscription.endpoint);
+        if (current?.device_id && current.device_id !== subscription.deviceId) {
+          return "owned-by-another-device" as const;
+        }
+        if (!current) {
+          const count =
+            this.#db
+              .query<{ total: number }, [string]>(
+                "SELECT COUNT(*) AS total FROM push_subs WHERE device_id = ?"
+              )
+              .get(subscription.deviceId)?.total ?? 0;
+          if (count >= maxPerDevice) {
+            return "limit-reached" as const;
+          }
+        }
+
+        this.#db
+          .query(
+            `INSERT INTO push_subs
+              (endpoint, keys, device_id, created_at, updated_at, expiration_at, key_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(endpoint) DO UPDATE SET
+               keys = excluded.keys,
+               device_id = excluded.device_id,
+               updated_at = CASE
+                 WHEN push_subs.keys = excluded.keys
+                  AND push_subs.device_id = excluded.device_id
+                  AND push_subs.key_id = excluded.key_id
+                 THEN push_subs.updated_at ELSE excluded.updated_at END,
+               expiration_at = excluded.expiration_at,
+               key_id = excluded.key_id`
+          )
+          .run(
+            subscription.endpoint,
+            subscription.keys,
+            subscription.deviceId,
+            subscription.createdAt,
+            subscription.updatedAt,
+            subscription.expirationAt,
+            subscription.keyId
+          );
+        return "stored" as const;
+      })
+      .immediate();
+  }
+
+  listPushSubscriptions(deviceId?: string): StoredPushSubscription[] {
+    const rows = deviceId
+      ? this.#db
+          .query<PushSubscriptionSqlRow, [string]>(
+            `SELECT endpoint, keys, device_id, created_at, updated_at, expiration_at, key_id
+             FROM push_subs WHERE device_id = ? ORDER BY created_at ASC`
+          )
+          .all(deviceId)
+      : this.#db
+          .query<PushSubscriptionSqlRow, []>(
+            `SELECT endpoint, keys, device_id, created_at, updated_at, expiration_at, key_id
+             FROM push_subs ORDER BY created_at ASC`
+          )
+          .all();
+    return rows.map((row) => ({
+      createdAt: row.created_at,
+      deviceId: row.device_id,
+      endpoint: row.endpoint,
+      expirationAt: row.expiration_at,
+      keyId: row.key_id,
+      keys: row.keys,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  pushSubscription(endpoint: string): StoredPushSubscription | null {
+    const row = this.#db
+      .query<PushSubscriptionSqlRow, [string]>(
+        `SELECT endpoint, keys, device_id, created_at, updated_at, expiration_at, key_id
+         FROM push_subs WHERE endpoint = ?`
+      )
+      .get(endpoint);
+    return row
+      ? {
+          createdAt: row.created_at,
+          deviceId: row.device_id,
+          endpoint: row.endpoint,
+          expirationAt: row.expiration_at,
+          keyId: row.key_id,
+          keys: row.keys,
+          updatedAt: row.updated_at,
+        }
+      : null;
+  }
+
+  deletePushSubscription(endpoint: string, deviceId?: string): boolean {
+    const result = deviceId
+      ? this.#db
+          .query("DELETE FROM push_subs WHERE endpoint = ? AND device_id = ?")
+          .run(endpoint, deviceId)
+      : this.#db
+          .query("DELETE FROM push_subs WHERE endpoint = ?")
+          .run(endpoint);
+    return result.changes > 0;
+  }
+
+  deletePushSubscriptionIfMatches(
+    subscription: StoredPushSubscription
+  ): boolean {
+    const result = this.#db
+      .query(
+        `DELETE FROM push_subs
+         WHERE endpoint = ? AND device_id = ? AND key_id IS ?
+           AND keys = ? AND updated_at IS ?`
+      )
+      .run(
+        subscription.endpoint,
+        subscription.deviceId,
+        subscription.keyId,
+        subscription.keys,
+        subscription.updatedAt
+      );
+    return result.changes > 0;
+  }
+
+  deleteDevicePushSubscriptions(deviceId: string): number {
+    const result = this.#db
+      .query("DELETE FROM push_subs WHERE device_id = ?")
+      .run(deviceId);
+    return result.changes;
   }
 
   deleteMeta(key: string): void {
@@ -138,14 +387,12 @@ export class ChorusDatabase {
    * a ticket and never upgrades.
    */
   entriesWithPrefix(prefix: string): [string, string][] {
-    return this.#db
+    const rows = this.#db
       .query<{ key: string; value: string }, [string]>(
         "SELECT key, value FROM meta WHERE key LIKE ? ESCAPE '\\'"
       )
-      .all(`${prefix.replace(/[\\%_]/g, "\\$&")}%`) as unknown as [
-      string,
-      string,
-    ][];
+      .all(`${prefix.replace(/[\\%_]/g, "\\$&")}%`);
+    return rows.map((row) => [row.key, row.value]);
   }
 
   /** Highest sequence ever appended. Survives event pruning (meta is the truth). */
@@ -191,9 +438,11 @@ export class ChorusDatabase {
    */
   appendEvents(
     events: EventToAppend[],
-    mutationKey: { id: string; ts: number } | null
+    mutationKey: { id: string; ts: number } | null,
+    metaChanges: MetaChange[] = [],
+    agentReceipt?: { id: string; ts: number }
   ): { firstSeq: number; lastSeq: number } {
-    if (events.length === 0) {
+    if (events.length === 0 && !agentReceipt) {
       const head = this.headSeq();
       return { firstSeq: head + 1, lastSeq: head };
     }
@@ -201,6 +450,14 @@ export class ChorusDatabase {
     return this.#db
       .transaction(() => {
         let seq = this.headSeq();
+
+        if (agentReceipt) {
+          this.#db
+            .query(
+              "INSERT INTO agent_receipts (receipt_id, received_at) VALUES (?, ?)"
+            )
+            .run(agentReceipt.id, agentReceipt.ts);
+        }
 
         for (const event of events) {
           seq += 1;
@@ -217,7 +474,17 @@ export class ChorusDatabase {
           this.setMeta(`mut:${mutationKey.id}`, String(mutationKey.ts));
         }
 
-        return { firstSeq: seq - events.length + 1, lastSeq: seq };
+        for (const change of metaChanges) {
+          if (change.value === null) {
+            this.deleteMeta(change.key);
+          } else {
+            this.setMeta(change.key, change.value);
+          }
+        }
+
+        return events.length === 0
+          ? { firstSeq: seq + 1, lastSeq: seq }
+          : { firstSeq: seq - events.length + 1, lastSeq: seq };
       })
       .immediate();
   }
@@ -348,7 +615,11 @@ export class ChorusDatabase {
   }
 
   close(): void {
+    if (this.#closed) {
+      return;
+    }
     this.#db.close();
+    this.#closed = true;
   }
 }
 

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
+import { gunzipSync } from "node:zlib";
 import { ConsoleLogger } from "./console-logger";
 import { createLogger } from "./index";
 import { PostHogLogger } from "./posthog-logger";
@@ -202,32 +203,55 @@ describe("createLogger factory", () => {
 });
 
 describe("real-time PostHog integration", () => {
-  test("PostHogLogger sends events to real PostHog API", async () => {
-    const logger = new PostHogLogger({
-      env: "production",
-      postHogApiKey: "test-key-1",
-      postHogApiHost: "https://us.i.posthog.com",
-      releaseName: "chorus-integration-test",
-      releaseVersion: "0.0.16",
+  test("PostHogLogger sends events to a local collector", async () => {
+    const batches: { body: Uint8Array; encoding: string | null }[] = [];
+    const collector = Bun.serve({
+      fetch: async (request) => {
+        batches.push({
+          body: new Uint8Array(await request.arrayBuffer()),
+          encoding: request.headers.get("content-encoding"),
+        });
+        return Response.json({ status: "ok" });
+      },
+      hostname: "127.0.0.1",
+      port: 0,
     });
 
-    logger.captureEvent("integration_test_run", {
-      test: "posthog-real-time",
-      timestamp: new Date().toISOString(),
-      status: "running",
-    });
+    try {
+      const logger = new PostHogLogger({
+        env: "production",
+        postHogApiKey: "test-key-1",
+        postHogApiHost: `http://127.0.0.1:${collector.port}`,
+        releaseName: "chorus-integration-test",
+        releaseVersion: "0.0.16",
+      });
 
-    logger.info("integration test log", {
-      module: "logger",
-      test: "real-time",
-    });
+      logger.captureEvent("integration_test_run", {
+        test: "posthog-local-collector",
+        timestamp: new Date().toISOString(),
+        status: "running",
+      });
+      logger.info("integration test log", {
+        module: "logger",
+        test: "local-collector",
+      });
+      logger.captureException(new Error("integration test exception"), {
+        test: "posthog-exception-tracking",
+      });
 
-    logger.captureException(new Error("integration test exception"), {
-      test: "posthog-exception-tracking",
-    });
-
-    await logger.shutdown();
-    expect(logger).toBeDefined();
+      await logger.shutdown();
+      expect(batches.length).toBeGreaterThan(0);
+      const body = batches
+        .map(({ body: compressed, encoding }) =>
+          encoding === "gzip"
+            ? gunzipSync(compressed).toString("utf8")
+            : new TextDecoder().decode(compressed)
+        )
+        .join("\n");
+      expect(body).toContain("integration_test_run");
+    } finally {
+      collector.stop(true);
+    }
   });
 
   test("ConsoleLogger produces formatted output with timestamps", () => {

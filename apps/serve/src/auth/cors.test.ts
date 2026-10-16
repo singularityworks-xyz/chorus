@@ -68,14 +68,22 @@ describe("CORS policy (spec §6.3, plan P4.5)", () => {
     expect(options?.credentials).toBe(true);
   });
 
-  test("an unset or empty allowlist means no plugin in development too", () => {
-    expect(
-      corsOptionsFor(resolveCorsPolicy({ isProduction: false }))
-    ).toBeUndefined();
+  test("development defaults to the local browser origins needed for sign-in", () => {
+    const options = corsOptionsFor(resolveCorsPolicy({ isProduction: false }));
+
+    expect(options?.origin).toEqual([
+      "http://localhost:3000",
+      "http://127.0.0.1:3000",
+      "http://[::1]:3000",
+    ]);
+    expect(options?.credentials).toBe(true);
+  });
+
+  test("an explicitly empty allowlist disables development CORS", () => {
     expect(
       corsOptionsFor(
         resolveCorsPolicy({
-          corsAllowedOrigins: "  , ,",
+          corsAllowedOrigins: "",
           isProduction: false,
         })
       )

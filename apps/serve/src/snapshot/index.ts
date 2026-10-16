@@ -35,7 +35,7 @@ function execFileText(
     execFile(
       file,
       args,
-      { ...options, encoding: "utf8" },
+      { ...options, windowsHide: true, encoding: "utf8" },
       (error, stdout, stderr) => {
         if (error) {
           rejectPromise(error);

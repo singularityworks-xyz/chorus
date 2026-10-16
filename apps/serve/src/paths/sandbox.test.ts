@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { join, resolve } from "node:path";
 import {
   assertSafeGitRevision,
   InvalidPathError,
@@ -9,29 +10,32 @@ import {
 
 describe("resolveInside", () => {
   test("resolves a relative path under the root", () => {
-    expect(resolveInside("/data/repo", "src/index.ts")).toBe(
-      "/data/repo/src/index.ts"
+    const root = resolve("/data/repo");
+    expect(resolveInside(root, "src/index.ts")).toBe(
+      join(root, "src/index.ts")
     );
   });
 
   test("resolves a nested relative path that stays inside", () => {
-    expect(resolveInside("/data/repo", "a/b/../c/file.txt")).toBe(
-      "/data/repo/a/c/file.txt"
+    const root = resolve("/data/repo");
+    expect(resolveInside(root, "a/b/../c/file.txt")).toBe(
+      join(root, "a", "c", "file.txt")
     );
   });
 
   test("returns the root itself for an empty relative segment", () => {
-    expect(resolveInside("/data/repo", ".")).toBe("/data/repo");
+    const root = resolve("/data/repo");
+    expect(resolveInside(root, ".")).toBe(root);
   });
 
   test("accepts an absolute path already inside the root", () => {
-    expect(resolveInside("/data/repo", "/data/repo/src")).toBe(
-      "/data/repo/src"
-    );
+    const root = resolve("/data/repo");
+    expect(resolveInside(root, join(root, "src"))).toBe(join(root, "src"));
   });
 
   test("accepts the root as an absolute candidate", () => {
-    expect(resolveInside("/data/repo", "/data/repo")).toBe("/data/repo");
+    const root = resolve("/data/repo");
+    expect(resolveInside(root, root)).toBe(root);
   });
 
   test("rejects a relative traversal", () => {
@@ -59,7 +63,8 @@ describe("resolveInside", () => {
   });
 
   test("does not reject a child whose name merely starts with dots", () => {
-    expect(resolveInside("/data/repo", "..foo")).toBe("/data/repo/..foo");
+    const root = resolve("/data/repo");
+    expect(resolveInside(root, "..foo")).toBe(join(root, "..foo"));
   });
 
   test("rejects an empty candidate", () => {
@@ -79,7 +84,8 @@ describe("resolveInside", () => {
   });
 
   test("normalizes the root before comparing", () => {
-    expect(resolveInside("/data/./repo", "src")).toBe("/data/repo/src");
+    const root = resolve("/data/./repo");
+    expect(resolveInside("/data/./repo", "src")).toBe(join(root, "src"));
   });
 });
 

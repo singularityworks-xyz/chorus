@@ -1,23 +1,20 @@
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import path from "node:path";
 import type {
   OpencodeCredentialCatalog,
   OpencodeCredentialSummary,
 } from "@chorus/contracts";
+import { openCodeStoragePaths } from "../opencode/storage-paths";
 
 interface StoredCredentialRecord {
   type?: "api" | "oauth" | "wellknown";
 }
 
 export class OpenCodeCredentialStore {
-  readonly #authPath = path.join(
-    homedir(),
-    ".local",
-    "share",
-    "opencode",
-    "auth.json"
-  );
+  readonly #authPath: string;
+
+  constructor(authFile = openCodeStoragePaths().authFile) {
+    this.#authPath = authFile;
+  }
 
   async listCredentials(): Promise<OpencodeCredentialCatalog> {
     try {

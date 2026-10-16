@@ -1,27 +1,42 @@
 import { Elysia, t } from "elysia";
 import { LoginRateLimiter } from "./brute-force";
 import {
+  buildDeviceCookieHeader,
+  deviceIdFromHeader,
+  issueDeviceCookie,
+} from "./device";
+import { canCreateLocalSession } from "./local-access";
+import type { DevicePairingTokenStore } from "./pairing";
+import {
   buildClearedCookieHeader,
-  buildSessionCookieHeader,
   issueSessionCookie,
+  readSessionCookie,
   SESSION_TTL_SECONDS,
   timingSafeEqualStrings,
+  verifySessionCookie,
 } from "./session";
+import { sessionHeaders } from "./session-headers";
+import { DeviceLimitError, type SessionRegistry } from "./session-registry";
 import { issueTicket, type TicketStore } from "./ticket";
 
 /**
  * Authentication routes (spec §6.1, plan P4.2/P4.3).
  *
- * `POST /auth/login` is the only way in, and it is the only unauthenticated
- * route that can *do* anything: it exchanges the operator's token for a
- * session cookie so the raw token never has to be carried by browser code on
- * every subsequent request (spec §6.2).
+ * `POST /auth/login` accepts an operator token or a single-use device code.
+ * Local development also has a loopback-only session bootstrap; it cannot be
+ * used from a remote device or in production. Successful entry points issue
+ * the same HttpOnly session cookie so raw credentials do not travel with later
+ * browser requests (spec §6.2).
  */
 
 export interface AuthRouteOptions {
   isProduction: boolean;
+  localOrigins: readonly string[];
   now?: () => number;
+  onLogoutDevice?: (deviceId: string) => Promise<void>;
+  pairingTokenStore: DevicePairingTokenStore;
   rateLimiter?: LoginRateLimiter;
+  sessionRegistry?: SessionRegistry;
   ticketStore: TicketStore;
   token: string;
 }
@@ -55,8 +70,69 @@ function unauthorized(): Response {
 export function createAuthRoutes(options: AuthRouteOptions) {
   const now = options.now ?? Date.now;
   const limiter = options.rateLimiter ?? new LoginRateLimiter({ now });
+  const sessionOptions = {
+    now,
+    token: options.token,
+    registry: options.sessionRegistry,
+  };
 
   return new Elysia()
+    .onError(({ error, set }) => {
+      if (error instanceof DeviceLimitError) {
+        set.status = 409;
+        return { code: "device_limit_reached", message: error.message };
+      }
+    })
+    .post("/auth/local-session", async ({ request, set, server }) => {
+      set.headers["cache-control"] = "no-store";
+
+      if (
+        !canCreateLocalSession({
+          isProduction: options.isProduction,
+          localOrigins: options.localOrigins,
+          origin: request.headers.get("origin"),
+          peerAddress: clientIp(server ?? null, request),
+          requestMarker: request.headers.get("x-chorus-local-bootstrap"),
+        })
+      ) {
+        set.status = 403;
+        return { code: "local_sign_in_unavailable" };
+      }
+
+      const existing = await verifySessionCookie(
+        readSessionCookie(request.headers.get("cookie")),
+        sessionOptions
+      );
+      if (existing.ok) {
+        return { authenticated: true, expiresAt: existing.expiresAt };
+      }
+
+      const session = await issueSessionCookie(
+        sessionOptions,
+        SESSION_TTL_SECONDS
+      );
+      set.headers["set-cookie"] = await sessionHeaders(
+        session,
+        options.token,
+        options.isProduction
+      );
+      return { authenticated: true, expiresAt: session.expiresAt };
+    })
+
+    .post("/auth/device-pairing", async ({ request, set }) => {
+      set.headers["cache-control"] = "no-store";
+      const session = await verifySessionCookie(
+        readSessionCookie(request.headers.get("cookie")),
+        sessionOptions
+      );
+      if (!session.ok) {
+        set.status = 401;
+        return { code: "unauthorized", message: "authentication required" };
+      }
+
+      return options.pairingTokenStore.issue();
+    })
+
     .post(
       "/auth/login",
       async ({ body, request, set, server }) => {
@@ -73,10 +149,14 @@ export function createAuthRoutes(options: AuthRouteOptions) {
           return tooManyRequests(600);
         }
 
-        if (
-          candidate.length === 0 ||
-          !timingSafeEqualStrings(candidate, options.token)
-        ) {
+        const matchesInstanceToken =
+          candidate.length > 0 &&
+          timingSafeEqualStrings(candidate, options.token);
+        const matchesPairingToken =
+          !matchesInstanceToken &&
+          (await options.pairingTokenStore.consume(candidate));
+
+        if (!(matchesInstanceToken || matchesPairingToken)) {
           if (limiter.recordFailure(key) === "rate-limited") {
             return tooManyRequests(600);
           }
@@ -88,13 +168,13 @@ export function createAuthRoutes(options: AuthRouteOptions) {
         limiter.reset(key);
 
         const session = await issueSessionCookie(
-          { now, token: options.token },
+          sessionOptions,
           SESSION_TTL_SECONDS
         );
 
-        set.headers["set-cookie"] = buildSessionCookieHeader(
-          session.cookie,
-          session.expiresAt,
+        set.headers["set-cookie"] = await sessionHeaders(
+          session,
+          options.token,
           options.isProduction
         );
 
@@ -108,15 +188,99 @@ export function createAuthRoutes(options: AuthRouteOptions) {
       }
     )
 
-    .post("/auth/logout", ({ set }) => {
+    .post("/auth/logout", async ({ request, set }) => {
+      const session = await verifySessionCookie(
+        readSessionCookie(request.headers.get("cookie")),
+        sessionOptions
+      );
+      const device = await deviceIdFromHeader(
+        request.headers.get("cookie"),
+        options.token
+      );
+      let deviceId = device.ok ? device.deviceId : undefined;
+      if (options.sessionRegistry) {
+        deviceId = session.ok ? session.deviceId : undefined;
+      }
+      if (deviceId && options.sessionRegistry) {
+        options.sessionRegistry.revokeDevice(deviceId);
+      }
+      if (deviceId && options.onLogoutDevice) {
+        try {
+          await options.onLogoutDevice(deviceId);
+        } catch {
+          set.status = 503;
+          set.headers["set-cookie"] = buildClearedCookieHeader(
+            options.isProduction
+          );
+          return {
+            authenticated: false,
+            code: "logout_cleanup_failed",
+          };
+        }
+      }
       set.headers["set-cookie"] = buildClearedCookieHeader(
         options.isProduction
       );
       return { authenticated: false };
     })
 
-    .get("/auth/ws-ticket", () => {
+    .post("/auth/device", async ({ request, set }) => {
+      const session = await verifySessionCookie(
+        readSessionCookie(request.headers.get("cookie")),
+        sessionOptions
+      );
+      if (!session.ok) {
+        set.status = 401;
+        return { code: "unauthorized", message: "authentication required" };
+      }
+
+      const existing = await deviceIdFromHeader(
+        request.headers.get("cookie"),
+        options.token
+      );
+      if (
+        existing.ok &&
+        (!session.deviceId || session.deviceId === existing.deviceId)
+      ) {
+        return { deviceId: existing.deviceId };
+      }
+
+      const cookie = await issueDeviceCookie(options.token, session.deviceId);
+      const deviceId = cookie.split(".")[1];
+      if (!deviceId) {
+        set.status = 500;
+        return { code: "device_identity_failed" };
+      }
+      set.headers["set-cookie"] = buildDeviceCookieHeader(
+        cookie,
+        options.isProduction
+      );
+      return { deviceId };
+    })
+
+    .get("/auth/ws-ticket", async ({ request, set }) => {
+      const session = await verifySessionCookie(
+        readSessionCookie(request.headers.get("cookie")),
+        sessionOptions
+      );
+      const device = await deviceIdFromHeader(
+        request.headers.get("cookie"),
+        options.token
+      );
+      if (
+        !device.ok ||
+        (options.sessionRegistry &&
+          (!session.ok || session.deviceId !== device.deviceId))
+      ) {
+        set.status = 401;
+        set.headers["cache-control"] = "no-store";
+        return { code: "device_identity_required" };
+      }
+
+      set.headers["cache-control"] = "no-store";
+
       const ticket = issueTicket({
+        deviceId: device.deviceId,
         now,
         store: options.ticketStore,
       });

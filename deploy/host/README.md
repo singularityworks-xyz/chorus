@@ -1,0 +1,106 @@
+# User-owned host packaging
+
+The root Dockerfile has `web` and `serve` targets. Both run as UID/GID 10001
+under an init process. The web target runs Next's standalone server, including
+its server routes; Serve never has to pretend the Next build is a static SPA.
+
+These images, their Caddy proxy, repositories, and persistent state belong on
+the **user's laptop/VPS**, never the operator's relay VPS. The proxy accepts a
+host-specific `CHORUS_PUBLIC_HOST`, keeps TLS keys in host-owned storage, routes
+WS and voice to Serve and other requests to Next. Set the web container's
+`CHORUS_SERVE_URL=http://serve:2000`. Leave browser WS overrides unset.
+
+Persistent data must be owned by 10001:10001. Fresh named volumes inherit the
+image's private `/data` ownership. Serve uses `/data/home` as HOME, keeping
+snapshot storage inside the persistent volume, and `/data/xdg-data` /
+`/data/xdg-config` for engine state/config. Its provider readers honor those same
+XDG roots. Mount registered repositories
+separately. Unmanaged deployments supply `CHORUS_TOKEN` through a protected
+deployment secret. Managed native releases use the private entry described below.
+
+This is packaging groundwork, **not a deployable relay quickstart yet**. Enrollment,
+remote device sessions, routing configuration and settings are implemented;
+native transport, certificate and browser acceptance remain required.
+Do not publish engine ports or reuse a wildcard TLS private key across hosts.
+
+## Container qualification
+
+Both production targets build and boot on Linux amd64 through Docker Desktop.
+`bun scripts/check-host-container.ts serve chorus-host-serve:<local-tag>` and
+the corresponding `web` command use hidden Docker CLI children, private fixture
+configuration, fresh named storage and loopback-only random ports. They clean up
+only their own container, volume and temporary directory. No browser or agent
+server starts; the native engine is invoked only with `--version`.
+
+The checks pass with a read-only image filesystem and UID 10001: HTTP readiness,
+production authorization/bootstrap rejection, engine 1.19.0, SQLite 0600 mode,
+state preservation/integrity after restart, and SIGTERM shutdown under five
+seconds. The web image passes HTTP readiness and bounded SIGTERM cleanup too;
+installed Next exits 143 after cleanup, while Serve must exit 0. Forced kill/OOM
+are failures. CI now runs these checks after each target's image build.
+
+The paired frontend/API/TLS topology, certificate renewal, native connector and
+arm64/browser/mobile acceptance remain unqualified. Existing experimental
+containers must preserve any old `/home/chorus` state before migration to the
+new persistent `/data/home` layout; existing bind mounts still require owner
+10001:10001.
+
+## Native production connector contract
+
+For a native production installation, Serve and Next standalone must run on the
+same machine, on private loopback ports. The managed connector currently targets
+that topology; the separate container topology still needs its own qualification.
+The release installer sets `CHORUS_RELAY_INSTALLATION` to a trusted installation
+definition. This is not an end-user configuration screen:
+
+```json
+{
+  "operator": {
+    "accountOrigin": "https://accounts.operator.example",
+    "tunnelOrigin": "https://connect.operator.example",
+    "hostsDomain": "hosts.operator-example.net"
+  },
+  "binaryDirectory": "/opt/chorus/connectors",
+  "webPort": 3000,
+  "httpsPort": 2443,
+  "acmePort": 2080
+}
+```
+
+The binary directory contains the official `caddy`/`frpc` executables (`.exe` on
+Windows) and an installer-owned `manifest.json` with `platform`, `arch`, and
+`caddy: {version: "2.11.7", sha256: <reviewed digest>}` /
+`frpc: {version: "0.71.1", sha256: <reviewed digest>}`. The installer must verify
+release provenance and ship reviewed hashes; generating a manifest from arbitrary
+downloaded executables is not a trust mechanism. No runtime download occurs.
+
+The vault, wrapping key, journal and Caddy certificate storage stay under the
+user's private `DATA_DIR/host`. Active frpc configuration contains its scoped
+machine credential and is private; normal stop removes that file. Children get
+an allowlisted environment without provider credentials and start hidden on
+Windows. Shutdown cancels network work and stops/kills both children within the
+host's shutdown budget. Hidden configuration-only `caddy adapt`, `frpc verify`
+and `frps verify` commands passed with checksum-pinned official releases. No
+tunnel listener was started; real transport and certificate acceptance remain open.
+
+In Settings → Devices → Internet access, the user names and approves their
+computer with a Google/GitHub account, compares its signing fingerprint and waits
+for verified HTTPS readiness. They copy the public address to the phone and enter
+a one-time device code generated on the host. Pause/resume persists locally;
+individual browser access can be revoked independently. The laptop must stay
+awake. Moving the workspace to another host is not implemented yet.
+
+## Local entry in managed native releases
+
+The installer enables `CHORUS_LOCAL_ENTRY_ENABLED=true` and launches Next
+standalone privately at `http://localhost:3000`. Serve stores its internal signing
+root in the encrypted host vault; no root token or shell command is part of the
+user's first visit. A separate listener binds `127.0.0.1:2001` for that local
+browser only. Do not publish, proxy, or relay 2001. The normal production Serve
+listener rejects bootstrap even when its socket peer is a loopback proxy.
+
+The local browser uses that private entry, then ordinary authenticated Next
+routes and the Serve socket. Internet browsers use the public HTTPS address and
+a pairing code. The browser never receives the root signing secret. This behavior
+has real HTTP/SQLite coverage and a build-stage test through Next standalone;
+actual browser cookie handling and packaged launcher acceptance remain required.

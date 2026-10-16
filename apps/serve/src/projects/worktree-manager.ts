@@ -1,7 +1,15 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdir, realpath } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { lstat, mkdir, realpath } from "node:fs/promises";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { promisify } from "node:util";
 import { createLogger } from "@chorus/logger";
 import { resolveInside, SandboxEscapeError } from "../paths/sandbox";
@@ -15,6 +23,18 @@ const logger = createLogger(
 
 /** Container-relative directory holding per-board worktrees. */
 export const WORKTREE_CONTAINER = ".chorus-worktrees";
+
+export class WorktreeNotCleanError extends Error {
+  readonly boardId: string;
+
+  constructor(boardId: string) {
+    super(
+      `worktree for board ${boardId} contains uncommitted, untracked, or ignored files; it was preserved`
+    );
+    this.name = "WorktreeNotCleanError";
+    this.boardId = boardId;
+  }
+}
 
 /**
  * Worktree-per-board (spec §2 rule 1, plan P6 task 2).
@@ -56,8 +76,10 @@ export class WorktreeManager {
     boards: ReadonlyArray<{ repo: { directory: string } }>,
     repoDirectory: string
   ): boolean {
-    const target = resolve(repoDirectory);
-    return boards.some((board) => resolve(board.repo.directory) === target);
+    const target = canonicalSync(repoDirectory);
+    return boards.some(
+      (board) => canonicalSync(board.repo.directory) === target
+    );
   }
 
   /**
@@ -83,6 +105,7 @@ export class WorktreeManager {
     const path = this.worktreePath(repoRoot, boardId);
 
     assertRealRepo(repoRoot);
+    await assertContained(repoRoot, path);
 
     const registered = await this.#listWorktreePaths(repoRoot);
     if (registered.has(path)) {
@@ -91,6 +114,7 @@ export class WorktreeManager {
     }
 
     await mkdir(dirname(path), { recursive: true });
+    await assertContained(repoRoot, path);
 
     const args = ["worktree", "add", "--quiet"];
     if (branch) {
@@ -104,8 +128,7 @@ export class WorktreeManager {
     await this.#git(repoRoot, args);
 
     // A worktree path is handed to the engine as its working directory and can
-    // come back to us through a client, so confirm the real path is still inside
-    // the repo once symlinks are resolved. `resolveInside` is lexical only.
+    // come back to us through a client, so confirm its real path after creation.
     await assertContained(repoRoot, path);
 
     logger.info("worktree-created", { boardId, path });
@@ -117,8 +140,51 @@ export class WorktreeManager {
     const path = this.worktreePath(repoRoot, boardId);
 
     await assertContained(repoRoot, path);
-    await this.#git(repoRoot, ["worktree", "remove", "--force", path]);
+    const registered = await this.#listWorktreePaths(repoRoot);
+    if (!registered.has(path)) {
+      if (existsSync(path)) {
+        throw new Error(
+          `refusing to remove unregistered worktree path for board ${boardId}`
+        );
+      }
+      return;
+    }
+
+    await this.#assertClean(path, boardId);
+
+    // Git performs its own clean-worktree check here. Keep it as a second guard
+    // against edits arriving after the status probe; never use --force because
+    // that also removes ignored and untracked user files.
+    await this.#git(repoRoot, ["worktree", "remove", path]);
     logger.info("worktree-removed", { boardId, path });
+  }
+
+  async assertRemovable(repoDirectory: string, boardId: string): Promise<void> {
+    const repoRoot = await canonical(repoDirectory);
+    const path = this.worktreePath(repoRoot, boardId);
+
+    await assertContained(repoRoot, path);
+    if (!(await this.#listWorktreePaths(repoRoot)).has(path)) {
+      if (existsSync(path)) {
+        throw new Error(
+          `refusing to remove unregistered worktree path for board ${boardId}`
+        );
+      }
+      return;
+    }
+    await this.#assertClean(path, boardId);
+  }
+
+  async #assertClean(path: string, boardId: string): Promise<void> {
+    const status = await this.#git(path, [
+      "status",
+      "--porcelain",
+      "--untracked-files=all",
+      "--ignored=matching",
+    ]);
+    if (status.trim().length > 0) {
+      throw new WorktreeNotCleanError(boardId);
+    }
   }
 
   /**
@@ -158,9 +224,18 @@ export class WorktreeManager {
         continue;
       }
 
-      await this.#git(repoRoot, ["worktree", "remove", "--force", entry.path]);
-      logger.info("worktree-orphan-removed", { path: entry.path });
-      removed.push(entry.path);
+      const boardId = name;
+      try {
+        await this.removeWorktree(repoRoot, boardId);
+        logger.info("worktree-orphan-removed", { boardId });
+        removed.push(entry.path);
+      } catch (error) {
+        if (!(error instanceof WorktreeNotCleanError)) {
+          throw error;
+        }
+
+        logger.warn("worktree-orphan-preserved-dirty", { boardId });
+      }
     }
 
     return removed;
@@ -170,6 +245,7 @@ export class WorktreeManager {
     try {
       const { stdout } = await execFileAsync("git", args, {
         cwd,
+        windowsHide: true,
         maxBuffer: 8 * 1024 * 1024,
         timeout: this.#gitTimeoutMs,
       });
@@ -233,14 +309,55 @@ async function canonical(path: string): Promise<string> {
   return await realpath(path).catch(() => resolve(path));
 }
 
-async function assertContained(root: string, candidate: string): Promise<void> {
-  const realRoot = await realpath(root).catch(() => resolve(root));
-  const realCandidate = await realpath(candidate).catch(() =>
-    resolve(candidate)
-  );
+function canonicalSync(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
 
-  if (realCandidate !== realRoot && !realCandidate.startsWith(`${realRoot}/`)) {
+async function assertContained(root: string, candidate: string): Promise<void> {
+  const realRoot = await realpath(root);
+  const realCandidate = await realPathWithMissingSuffix(candidate);
+  const relativePath = relative(realRoot, realCandidate);
+
+  if (
+    relativePath === ".." ||
+    relativePath.startsWith(`..${sep}`) ||
+    isAbsolute(relativePath)
+  ) {
     throw new SandboxEscapeError(realRoot, candidate);
+  }
+}
+
+async function realPathWithMissingSuffix(candidate: string): Promise<string> {
+  const missing: string[] = [];
+  let current = resolve(candidate);
+
+  while (true) {
+    try {
+      await lstat(current);
+    } catch (error) {
+      const code =
+        error instanceof Error && "code" in error ? String(error.code) : "";
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        throw error;
+      }
+
+      const parent = dirname(current);
+      if (parent === current) {
+        throw error;
+      }
+      missing.push(basename(current));
+      current = parent;
+      continue;
+    }
+
+    // Resolving an existing symlink here catches a managed container redirected
+    // outside the repository before mkdir or git can touch its target.
+    const resolved = await realpath(current);
+    return resolve(resolved, ...missing.reverse());
   }
 }
 

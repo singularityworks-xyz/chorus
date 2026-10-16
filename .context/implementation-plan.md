@@ -5,6 +5,8 @@
 > Companion documents: `specsheet.md` (what/why), `cleanup-plan.md` (done), this file (how/when).
 > Last reviewed: 2026-10 (amendment pass: Phase 0 added, RCE hotfix pulled forward,
 > SDK upgrade mandated, per-phase deliverables + unit/integration tests, voice/auth clarified).
+> Remaining Phase 6 and Phase 7 execution detail: [phase-6-7-completion-plan.md](./phase-6-7-completion-plan.md).
+> UX improvement workstream: [ux-flow-plan.md](./ux-flow-plan.md) (local-first access and device pairing are implemented; browser acceptance remains deferred). Remote relay and VPS handoff now follow [remote-hosting-plan.md](./remote-hosting-plan.md), approved 2026-10-16; its standalone production frontend supersedes Phase 8's static-export assumption.
 
 ---
 
@@ -19,7 +21,7 @@
 | Zod | 4.3.6 | keep; all new schemas go through it |
 | SQLite | `bun:sqlite` (built-in) | `Database`, cached `db.query()`, `db.transaction(...).immediate`, `PRAGMA journal_mode = WAL` — confirmed current API |
 | Web Push | *(new dep)* | `web-push-neo` — TS/ESM, Web Crypto + fetch, works on Bun (classic `web-push` is Node-crypto-bound); aes128gcm only, fine for Safari 16+ |
-| OpenCode SDK | lockfile resolves **1.3.15** (`^1.3.13`); npm latest **1.18.x** | **mandatory upgrade in Phase 6 (task 5 rewritten)**: bump `@opencode-ai/sdk` to the current 1.18.x **in lockstep** with the spawned `opencode serve` binary (same version both sides). The adapter's direct re-export of SDK `Event`/`SessionStatus` types means any shape drift leaks into the projector — diff the SDK changelog, update the normalization layer, extend `event-stream.test.ts`. Never bump the SDK without pinning the binary to match |
+| OpenCode SDK | **1.19.0** exact pin; current engine also reports **1.19.0** | Keep `@opencode-ai/sdk` and the running `opencode serve` binary on the same exact version. The adapter's direct re-export of SDK `Event`/`SessionStatus` types means shape drift can leak into the projector — diff the SDK changelog, update the normalization layer, and extend `event-stream.test.ts` on each version change. Record both versions in `.context/versions.md`. |
 
 Standing rules per AGENTS.md: no `as any`, shared enums/unions over loose strings, validate cross-app payloads with schemas, `bun run check` + `check-types` + tests after every phase.
 
@@ -37,9 +39,9 @@ These affect API shapes defined in Phase 1. Record answers in this section befor
 
 3. **Session cookie expiry**: 30 days, `Max-Age=2592000`, `Secure` (enforced in production), `HttpOnly`, `SameSite=Strict`. A `POST /auth/logout` clears the cookie. Re-login after expiry shows the login screen — not a silent redirect loop.
 
-4. **`CHORUS_TOKEN` boot behavior**: two modes, no shared code path.
-   - **Laptop/dev** (`NODE_ENV !== "production"`): auto-generate 32-byte hex token, write to `<DATA_DIR>/chorus.token` (mode `0600`), log the file path only.
-   - **Production** (`NODE_ENV=production`): if `CHORUS_TOKEN` env is unset or empty, print an actionable error (`CHORUS_TOKEN must be set in production. See .env.example.`) and `process.exit(1)`. Never auto-generate silently in prod.
+4. **`CHORUS_TOKEN` boot behavior**: two modes, no shared user-facing login path.
+   - **Laptop/dev** (`NODE_ENV !== "production"`): auto-generate and persist a 32-byte internal session-signing secret with mode `0600`; never print its value or path. The first browser session is issued only through the guarded loopback bootstrap in the UX workstream.
+   - **Production** (`NODE_ENV=production`): if `CHORUS_TOKEN` env is unset or empty, print an actionable error (`CHORUS_TOKEN must be set in production. See .env.example.`) and `process.exit(1)`. Never auto-generate silently in prod. Existing signed-in operators issue short-lived pairing codes through the UI for additional devices.
 
 5. **OpenCode version lockstep**: the `@opencode-ai/sdk` version in `packages/opencode-adapter/package.json` and the `opencode` binary version spawned by `process-manager.ts` must be identical (record both in `.context/versions.md`, new in Phase 0, updated by Phase 6). SDK-before-binary or binary-before-SDK skew is a release-blocking mismatch — the Phase 6 integration test asserts version equality at boot.
 
@@ -145,8 +147,8 @@ Done when: `rg 'ws\.send\|broadcastRaw' apps/serve/src` finds zero hits outside 
 **Goal:** spec §6 completely enforced. The RCE class already died in Phase 0; this phase completes auth, transport, and abuse guards. **No network exposure beyond localhost until this phase is green.**
 
 Tasks
-1. **Token generation**: `CHORUS_TOKEN` auto-generation (laptop mode only, per pre-implementation decision #4) uses `crypto.getRandomValues(new Uint8Array(32))` encoded as hex — 256 bits of entropy. UUID v4 (122 bits) and `Math.random` are banned for this purpose. Write to `<DATA_DIR>/chorus.token` with `fs.chmod(path, 0o600)` immediately after write. Log the file path only, never the token value.
-2. Auth middleware: `POST /auth/login` validates `CHORUS_TOKEN` body field → issues HttpOnly, SameSite=Strict, **Secure** (in production), `Max-Age=2592000` (30 days) signed cookie. Signing uses Web Crypto HMAC-SHA256; the signing key is derived from `CHORUS_TOKEN` via `HKDF-SHA256` with label `"chorus-session"`. **All routes except `GET /health` and `POST /auth/login` require a valid cookie — including `/voice/*`, `/projects/*`, `/workspace`, `/tasks/*`, `/snapshots/*`, `/git/*`.** `POST /auth/logout` clears the cookie.
+1. **Internal signing secret**: laptop/dev auto-generation uses `crypto.getRandomValues(new Uint8Array(32))` encoded as hex — 256 bits of entropy — and persists it with mode `0600`. UUID v4 (122 bits) and `Math.random` are banned. Never log the value or path; local users do not retrieve it.
+2. Auth middleware: `POST /auth/login` validates the production/operator `CHORUS_TOKEN` or consumes a five-minute single-use device-pairing code → issues HttpOnly, SameSite=Strict, **Secure** (in production), `Max-Age=2592000` (30 days) signed cookie. Signing uses Web Crypto HMAC-SHA256; the signing key is derived from the internal secret via `HKDF-SHA256` with label `"chorus-session"`. Local development permits `POST /auth/local-session` only for an exact allowlisted Origin and a direct loopback peer; it is rejected in production and never trusts proxy headers. An authenticated device may issue a pairing code through `POST /auth/device-pairing`. All other routes except `GET /health` require a valid cookie — including `/voice/*`, `/projects/*`, `/workspace`, `/tasks/*`, `/snapshots/*`, `/git/*`. `POST /auth/logout` clears the cookie.
 3. **WS ticket single-use enforcement**: `GET /auth/ws-ticket` (authenticated) generates a random 16-byte hex token, stores it in the `meta` table as `wst:<ticket>` with a 5-minute expiry timestamp. On WS upgrade, the ticket is looked up, verified not-expired, and immediately deleted (single-use). Unauthenticated or already-used tickets close the socket with code 4401.
 4. **Content-Security-Policy header**: add `Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:` to the static-file serving middleware in `web-frontend.ts`. Adjust `unsafe-inline` only as needed by Next.js build output — do not use `unsafe-eval`.
 5. CORS: production = same-origin only. Dev allowlist via `CORS_ALLOWED_ORIGINS=http://localhost:3000` (comma-separated). Add this var to `.env.example` with a note that it is dev-only and must not be set in production.
@@ -187,16 +189,27 @@ Done when: old socket code deleted; no component fetches workspace over HTTP pol
 
 **Goal:** spec §2 topology rules; multi-repo concurrency that actually works; SDK/binary brought to current.
 
+**Implementation status (2026-10-12): partial.** Repository authorization,
+worktree provisioning/removal, session ownership, SDK/CLI lockstep, engine pooling,
+and stream recovery are implemented with focused tests. The eight-run scripted
+qualification now passes through approval, completion, ten WebSocket mirrors,
+and both diff paths. The ten-minute 200-event/second load gate also passed after
+the store began snapshotting at the configured event interval. Credentialed
+inference acceptance remains open; browser E2E and manual folder-picker
+acceptance are also unverified. See
+[`phase-6-7-completion-plan.md`](./phase-6-7-completion-plan.md) for the exact
+verification record.
+
 Tasks
 1. **Boot-time dangling worktree cleanup**: on serve start, enumerate `<repo>/.chorus-worktrees/` directories for all repos in the current snapshot. Remove any whose `boardId` subdirectory does not correspond to a board in the snapshot (orphans from crashed serve). Log each removal. Run before accepting any connections.
 2. Project manager: create/remove git worktrees (arg-array git only) at `<repo>/.chorus-worktrees/<boardId>`; idempotent (`git worktree list` check before create); **cleanup is always within the store's serial queue** — worktree creation is awaited inside the board-create mutation handler, not fired as an async side effect after. This prevents a race where two simultaneous board-creates for the same repo both try to create the same worktree path.
 3. Board-task-service: bind board → resolved directory (worktree-aware); **session-reuse fix**: reuse an existing opencode session only when `board.repo.directory === session.workingDirectory` (exact path match including worktree path). If the directory differs, fork a new session. Never reuse across directories.
 4. Process manager: port from env (kill hardcoded 4096), readiness gate poll on `/health`-equivalent before first use, real liveness check (verify opencode identity endpoint), optional per-worktree spawn behind `OPENCODE_PER_WORKTREE=true` config flag (spec §13 open question — implement flag, default `false` = shared). **Pin the spawned binary version and record it in `.context/versions.md` alongside the SDK version (pre-implementation decision #5).**
-5. **SDK upgrade (mandatory, replaces the old 1.3.x re-verify line):** bump `@opencode-ai/sdk` to current 1.18.x via `bun add` in `packages/opencode-adapter` (never hand-edit the dep list); diff `Event`/`SessionStatus`/permission/question payload shapes against the 1.3.x baseline and update the adapter normalization layer so only Chorus-owned types cross the boundary; add reconnect-with-cursor if the new SDK offers resume, else wrap with retry+backfill from the bridge (fixes audit #13); extend `event-stream.test.ts` for reconnect/resume. Record the new SDK + binary versions in `.context/versions.md`.
+5. **SDK upgrade (mandatory, replaces the old 1.3.x re-verify line):** pin `@opencode-ai/sdk` to the exact spawned binary version via `bun add` in `packages/opencode-adapter` (never hand-edit the dep list); diff `Event`/`SessionStatus`/permission/question payload shapes against the 1.3.x baseline and update the adapter normalization layer so only Chorus-owned types cross the boundary; add reconnect-with-cursor if the new SDK offers resume, else wrap with retry+backfill from the bridge (fixes audit #13); extend `event-stream.test.ts` for reconnect/resume. Record the SDK + binary versions in `.context/versions.md`.
 
 Verify: two boards same repo → isolated worktrees visible in `git worktree list`; parallel prompts run without index lock errors; process restart mid-prompt → surfaced as `error` card on reboot (never silently orphaned); boot with a dangling worktree dir → logged removal, clean start; concurrent board-create stress test (10 simultaneous creates for the same repo) → no duplicate worktree paths.
 Files: `projects/*` (worktree manager), `tasks/board-task-service.ts`, `opencode/process-manager.ts`, `packages/opencode-adapter/**`, `.context/versions.md`
-Deliverables: worktree-per-extra-board isolation; dir-exact session reuse; env-port + readiness + liveness; SDK 1.18.x + binary lockstep recorded.
+Deliverables: worktree-per-extra-board isolation; dir-exact session reuse; env-port + readiness + liveness; SDK 1.19.0 + binary lockstep recorded.
 Unit tests: worktree path computation (`<repo>/.chorus-worktrees/<boardId>`, idempotency when `git worktree list` already contains it); session-reuse predicate (same dir → reuse; worktree dir → fork; unrelated dir → fork); `resolveInside` applied to worktree roots; adapter normalization (new SDK event shapes map to Chorus-owned types; unknown future variant → logged + skipped, never stored raw); boot version assertion (SDK version === binary version, mismatch → loud boot error).
 Integration tests: two boards on the same fixture repo → `git worktree list` shows two isolated entries; parallel prompts (≥4) run without git index-lock errors; kill opencode mid-prompt → reboot surfaces an `error` card (never silently orphaned); seed a dangling worktree dir → boot logs its removal and starts clean; 10 simultaneous board-creates for one repo → exactly one worktree per board, no dup paths; SDK event-burst replay against the stub (Phase 9 stub drafts the sequence here if not yet written).
 Done when: 8 simulated concurrent runs across ≥3 repos hold §8 budgets locally.
@@ -206,6 +219,13 @@ Done when: 8 simulated concurrent runs across ≥3 repos hold §8 budgets locall
 ## Phase 7 — Web push approvals
 
 **Goal:** spec §10 end-to-end. Voice I/O stays in scope for v1 (Groq STT/TTS already wired): this phase additionally puts the voice HTTP routes under the Phase 4 cookie guard verification if not already covered, and adds the push opt-in UI next to the existing voice settings.
+
+**Implementation status (2026-10-12): partial.** Device identity, push key and
+subscription persistence, notification delivery, service-worker navigation,
+and browser opt-in recovery are implemented. Focused tests, type checks, and the
+production build pass. The scripted server-side multi-client approval flow and
+ten-minute server load gate now pass. Real Chrome/iOS device acceptance and
+browser E2E remain open; no browser E2E was run in this execution.
 
 Tasks
 1. Dep: `web-push-neo` (`bun add`, never hand-edit); VAPID keypair generated into `meta` table on first boot; `VAPID_PUBLIC_KEY` exposed via authenticated `GET /auth/vapid-key` endpoint.
@@ -233,7 +253,7 @@ Tasks
 2. `compose.yaml` profiles: `prod` (chorus + caddy w/ LE TLS, volume `./data`), `dev` (chorus only). Root `.env.example` (started in Phase 0) completed here to match the spec env list exactly, each var annotated **required** or **optional** with the consequence of omitting it:
    `PORT` (optional, default 2000) · `CHORUS_TOKEN` (**required in prod** — hard boot failure if unset; laptop/dev auto-generates) · `DATA_DIR` (optional, default `/data`) · `OPENCODE_DIRECTORY` (optional) · `OPENCODE_PER_WORKTREE` (optional, default false) · `RETENTION_DAYS` (optional, default 30) · `DB_SIZE_CAP_MB` (optional, default 512) · `COALESCE_MS` (optional, default 100) · `CORS_ALLOWED_ORIGINS` (dev-only, must not be set in prod) · `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` (optional — push disabled if absent) · `GROQ_API_KEY` (optional — voice STT/TTS 503 if absent). Delete the stale `ARMORIQ_*` lines (Phase 0 if not already done).
 3. Graceful shutdown flush verified inside container: `docker stop` sends SIGTERM → serve drains queue, writes final snapshot, checkpoints WAL, exits within 5s. Test by running `docker stop --time=10 <container>` and verifying state is intact on restart.
-4. Docs: laptop mode (`bun dev`) + VPS quickstart in README. Include a one-liner for generating `CHORUS_TOKEN`: `openssl rand -hex 32`.
+4. Docs: laptop mode (`bun dev`) opens straight into the workspace; device pairing is explained in the UI and README. VPS quickstart still documents the operator-supplied `CHORUS_TOKEN` requirement.
 
 Verify: fresh-clone `docker compose --profile prod up` on a VPS → HTTPS URL, login gate, prompt round-trip; container restart → state intact; `chorus.db` and `chorus.token` owned by `chorus` user, mode `0600`; SIGTERM → clean exit ≤5s.
 Files: `Dockerfile` (new), `compose.yaml` (new, profiles `prod`/`dev`), `Caddyfile` (new, via caddy service), `docker/entrypoint.sh` (new), `.env.example` (completed), `README.md` (quickstarts)
@@ -305,7 +325,7 @@ Suggested cadence: land P0–P4 as one reviewable arc ("backend core"), then P5 
 4. **Projector parity**: mitigated by `applyEventToBoard` pure helper in `packages/contracts` (Phase 1 deliverable). If this helper is not in contracts, any divergence between server and client reducers is invisible until a client renders wrong state. Do not skip this task.
 5. **Serial queue correctness**: the `#queue = #queue.then(...)` pattern must be applied to every mutation entry point — `applyMutation`, `applyAgentEvent`, `updateBoardSession`. A single unguarded direct call reintroduces races. Code review must check this mechanically.
 6. **Worktree creation race**: worktree create must be inside the serial queue (Phase 6, task 2). If it slips outside, concurrent board-creates silently corrupt the worktree list. Flag this in the PR review checklist.
-7. **OpenCode SDK 1.3→1.18 drift**: event/permission/question payload shapes may have changed across ~15 minors; the adapter's type re-exports propagate breakage silently. Mitigated by lockstep binary pin (decision #5), changelog diff, normalization-layer update, and extended `event-stream.test.ts` — all Phase 6 exit gates, none optional.
+7. **OpenCode SDK 1.3→1.19 drift**: event/permission/question payload shapes may have changed across many minors; the adapter's type re-exports propagate breakage silently. Mitigated by lockstep binary pin (decision #5), changelog diff, normalization-layer update, and extended `event-stream.test.ts` — all Phase 6 exit gates, none optional.
 8. **RCE regression**: any future `exec(` string-interpolation reintroduces the Phase 0 kill class. Mitigated by the grep-based unit test (Phase 0) that fails CI on reintroduction. Do not delete or weaken that test.
 
 ---
@@ -313,3 +333,6 @@ Suggested cadence: land P0–P4 as one reviewable arc ("backend core"), then P5 
 ## Amendment changelog
 
 - 2026-10: Phase 0 added (cleanup finish, Bun pin fix, `.context/versions.md`, RCE hotfix pulled forward from P4.7 with `resolveInside` seed, baselines, log-gate script + owner, root `.env.example` skeleton). SDK pin updated (1.3.13 → upgrade mandate to 1.18.x with binary lockstep; decision #5; P6.5 rewritten; risk #7). P4 rescoped (auth/transport/abuse; RCE now verify-only; voice routes explicitly in cookie guard). P8.2 env table completed. Per-phase Deliverables + Unit + Integration test lists added (P0–P9). Phase-exit bar added. `AGENTS.md` realtime-line fix assigned to P0. Amendment review owners: plan author + one reviewer before P0 starts.
+- 2026-10-12: SDK and observed OpenCode engine aligned at exact version 1.19.0 after dev startup exposed a 1.18.29/1.19.0 mismatch.
+- 2026-10-12: Added the P6/P7 completion companion with source-verified gaps, proposed repository/lifecycle/engine/device decisions, ordered work packages, and testing/release gates. Both phases retain their current implementation status until those gates are satisfied.
+- 2026-10-12: Implemented the P6/P7 repository, checkout lifecycle, engine pool, device identity, push delivery, and opt-in recovery work. Added a board-scoped session-diff endpoint and collision rejection for legacy imports. A follow-up scoped reconciliation to attached recoverable sessions and corrected the qualification mirror comparison to use JSON wire semantics; the eight-run qualification now passes. Latest `bun run check`, `bun run check-types`, `bun run build`, and affected focused tests pass. Real-device, sustained-load, credentialed-inference, manual folder-picker, and browser E2E gates remain open.

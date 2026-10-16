@@ -22,6 +22,7 @@ export const CONTENT_SECURITY_POLICY = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
   "connect-src 'self' ws: wss:",
+  "worker-src 'self'",
   "font-src 'self'",
   "object-src 'none'",
   "base-uri 'self'",

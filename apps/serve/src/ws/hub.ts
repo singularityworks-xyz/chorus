@@ -13,6 +13,7 @@ import {
   viewportSyncSchema,
   type WorkspaceEvent,
   WS_CLOSE_RATE_LIMITED,
+  WS_CLOSE_UNAUTHORIZED,
 } from "@chorus/contracts";
 import type {
   SequencedRecord,
@@ -268,6 +269,8 @@ interface Client {
   commandWindowStart: number;
   consecutiveDrops: number;
   criticalOnly: boolean;
+  /** Signed device identity verified before the socket was registered. */
+  deviceId?: string;
   /** Frames the transport discarded outright (`send()` returned 0). */
   droppedFrames: number;
   id: string;
@@ -283,8 +286,10 @@ interface Client {
 
 export interface HubOptions {
   coalesceMs?: number;
+  isDeviceAllowed?: (deviceId: string) => boolean;
   now?: () => number;
   pingIntervalMs?: number;
+  pongTimeoutMs?: number;
 }
 
 export interface HubStats {
@@ -306,6 +311,8 @@ export class WorkspaceHub {
   readonly #now: () => number;
   readonly #coalesceMs: number;
   readonly #pingIntervalMs: number;
+  readonly #pongTimeoutMs: number;
+  readonly #isDeviceAllowed: HubOptions["isDeviceAllowed"];
 
   /**
    * Per-board buffers of coalescible events awaiting flush. Holds whole
@@ -327,16 +334,18 @@ export class WorkspaceHub {
   #pendingDepth = 0;
 
   constructor(store: WorkspaceStore, options: HubOptions = {}) {
+    this.#isDeviceAllowed = options.isDeviceAllowed;
     this.#store = store;
     this.#now = options.now ?? Date.now;
     this.#coalesceMs = options.coalesceMs ?? COALESCE_MS;
     this.#pingIntervalMs = options.pingIntervalMs ?? PING_INTERVAL_MS;
+    this.#pongTimeoutMs = options.pongTimeoutMs ?? PONG_TIMEOUT_MS;
     this.#startHeartbeat();
   }
 
   // ── registry ──────────────────────────────────────────────────────────────
 
-  register(socket: HubSocket): Client {
+  register(socket: HubSocket, deviceId?: string): Client {
     // An id can outlive its socket if a connection is replaced in place. Without
     // this, the new client shadows the old one in the id map while the old stays
     // in the set — still receiving events and pings into a dead socket, and
@@ -353,6 +362,7 @@ export class WorkspaceHub {
       commandsThisMinute: 0,
       consecutiveDrops: 0,
       droppedFrames: 0,
+      ...(deviceId ? { deviceId } : {}),
       commandWindowStart: this.#now(),
       telemetryThisMinute: 0,
       telemetryWindowStart: this.#now(),
@@ -379,8 +389,31 @@ export class WorkspaceHub {
     }
   }
 
+  /** Closes every authenticated mirror for a device during explicit logout. */
+  disconnectDevice(deviceId: string): number {
+    const clients = [...this.#clients].filter(
+      (client) => client.deviceId === deviceId
+    );
+    for (const client of clients) {
+      client.socket.close?.(1000, "signed out");
+      this.#drop(client);
+    }
+    return clients.length;
+  }
+
   clientCount(): number {
     return this.#clients.size;
+  }
+
+  hasReadyConnectionForDevice(deviceId: string): boolean {
+    const healthyWithinMs = this.#pingIntervalMs + this.#pongTimeoutMs;
+    const now = this.#now();
+    return [...this.#clients].some(
+      (client) =>
+        client.deviceId === deviceId &&
+        client.ready &&
+        now - client.lastPongAt <= healthyWithinMs
+    );
   }
 
   stats(): HubStats {
@@ -741,22 +774,24 @@ export class WorkspaceHub {
     this.#mergeIndex.clear();
     this.#pendingDepth = 0;
 
-    for (const [, records] of entries) {
-      // Merging can leave a buffer whose entries are not in sequence order
-      // (a merge extends an earlier entry's range past a later one). Deliver
-      // ascending so a client's contiguous-run tracking stays meaningful.
-      const ordered = [...records].sort((a, b) => a.fromSeq - b.fromSeq);
-      for (const record of ordered) {
-        // One unserialisable record must not discard the rest of the window:
-        // the records were already removed from the buffers above, so a throw
-        // here would drop them silently, and on the synchronous path it would
-        // escape into the store's commit and fail a write that is already
-        // durable.
-        try {
-          this.#deliver(record);
-        } catch (error) {
-          console.error("[ws] delivery failed:", error);
-        }
+    // Sequences are workspace-wide, not board-local. Sorting each board
+    // independently and then sending whole board buffers can deliver 1, 3, 2
+    // when events from two boards were interleaved. Merge only consumes
+    // contiguous ranges, so a global ordering preserves the cursor invariant.
+    const ordered = entries
+      .flatMap(([, records]) => records)
+      .sort((a, b) => a.fromSeq - b.fromSeq);
+
+    for (const record of ordered) {
+      // One unserialisable record must not discard the rest of the window:
+      // the records were already removed from the buffers above, so a throw
+      // here would drop them silently, and on the synchronous path it would
+      // escape into the store's commit and fail a write that is already
+      // durable.
+      try {
+        this.#deliver(record);
+      } catch (error) {
+        console.error("[ws] delivery failed:", error);
       }
     }
   }
@@ -937,7 +972,7 @@ export class WorkspaceHub {
 
   #startHeartbeat(): void {
     this.#heartbeatTimer = setInterval(() => {
-      const cutoff = this.#now() - PONG_TIMEOUT_MS * 2;
+      const cutoff = this.#now() - this.#pingIntervalMs - this.#pongTimeoutMs;
       for (const client of [...this.#clients]) {
         if (client.lastPongAt < cutoff) {
           client.socket.close?.(4000, "pong timeout");
@@ -1017,6 +1052,17 @@ export class WorkspaceHub {
    * "slow" and "gone" distinguishable in diagnostics.
    */
   #send(client: Client, message: unknown): void {
+    if (
+      this.#isDeviceAllowed &&
+      !(client.deviceId && this.#isDeviceAllowed(client.deviceId))
+    ) {
+      client.socket.close?.(
+        WS_CLOSE_UNAUTHORIZED,
+        "device session expired or revoked"
+      );
+      this.#drop(client);
+      return;
+    }
     const status = client.socket.send(JSON.stringify(message));
 
     if (typeof status !== "number" || status > 0) {

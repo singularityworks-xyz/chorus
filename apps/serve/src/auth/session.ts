@@ -1,5 +1,11 @@
 /**
- * Session cookie signing (spec §6.1, plan P4.2).
+ * Registered v2 sessions and legacy v1 signing helpers.
+ *
+ * Serve supplies a SessionRegistry and issues opaque v2 credentials, storing
+ * only their hashes. Each session belongs to a revocable device. A v1 cookie
+ * cannot authenticate when a registry is configured. Local bootstrap replaces
+ * an old session without asking for a token; remote browsers must sign in again.
+ * The v1 helpers below remain for compatibility with isolated library callers.
  *
  * Shape: `<expiresAtBase36>.<signature>`, where the signature is
  * HMAC-SHA256 over `"chorus-session-v1:<expiresAt>"` under a key derived from
@@ -15,9 +21,12 @@
  *   timing-oracle bug, and a token comparison is exactly where it is tempting.
  */
 
+import type { SessionRegistry } from "./session-registry";
+
 const KEY_LABEL = "chorus-session";
 /** Cookie name used on both the HTTP responses and the WS upgrade. */
 export const SESSION_COOKIE = "chorus_session";
+export const SECURE_SESSION_COOKIE = "__Host-chorus_session";
 
 /** 30 days (decision #3). */
 export const SESSION_TTL_SECONDS = 2_592_000;
@@ -34,7 +43,9 @@ const KEY_LENGTH_BITS = 256;
 export type SessionKeyUsage = "sign" | "verify";
 
 export interface SessionOptions {
+  deviceLabel?: string;
   now?: () => number;
+  registry?: SessionRegistry;
   /** Injected in tests; production derives it from `CHORUS_TOKEN`. */
   token: string;
 }
@@ -75,6 +86,7 @@ export async function deriveSessionKey(
 export interface IssuedSession {
   /** Cookie value to set. */
   cookie: string;
+  deviceId?: string;
   /** Absolute expiry in ms since epoch. */
   expiresAt: number;
 }
@@ -105,6 +117,14 @@ export async function issueSessionCookie(
 ): Promise<IssuedSession> {
   const now = options.now ?? Date.now;
   const expiresAt = now() + ttlSeconds * 1000;
+  if (options.registry) {
+    const issued = options.registry.issue(expiresAt, options.deviceLabel);
+    return {
+      cookie: `v2.${issued.credential}`,
+      expiresAt,
+      deviceId: issued.deviceId,
+    };
+  }
   const key = await deriveSessionKey(options.token);
 
   const signature = await crypto.subtle.sign(
@@ -129,7 +149,7 @@ export type VerifyFailure =
   | "unsupported-version";
 
 export type VerifyResult =
-  | { ok: true; expiresAt: number }
+  | { ok: true; expiresAt: number; deviceId?: string }
   | { ok: false; reason: VerifyFailure };
 
 /**
@@ -145,6 +165,17 @@ export async function verifySessionCookie(
 ): Promise<VerifyResult> {
   if (!cookie) {
     return { ok: false, reason: "malformed" };
+  }
+
+  if (options.registry) {
+    const [version, credential, extra] = cookie.split(".");
+    if (version !== "v2" || !credential || extra !== undefined) {
+      return { ok: false, reason: "unsupported-version" };
+    }
+    const session = options.registry.verify(credential);
+    return session
+      ? { ok: true, expiresAt: session.expiresAt, deviceId: session.deviceId }
+      : { ok: false, reason: "signature" };
   }
 
   const [version, expiresRaw, signature] = cookie.split(".");
@@ -185,13 +216,24 @@ export function readSessionCookie(
     return null;
   }
 
-  for (const part of header.split(";")) {
-    const separator = part.indexOf("=");
-    if (separator === -1) {
-      continue;
+  for (const name of [SECURE_SESSION_COOKIE, SESSION_COOKIE]) {
+    const parts = header
+      .split(";")
+      .filter(
+        (part) =>
+          part.indexOf("=") > 0 &&
+          part.slice(0, part.indexOf("=")).trim() === name
+      );
+    if (parts.length > 1) {
+      return null;
     }
-    if (part.slice(0, separator).trim() === SESSION_COOKIE) {
-      return decodeURIComponent(part.slice(separator + 1).trim());
+    const part = parts[0];
+    if (part) {
+      try {
+        return decodeURIComponent(part.slice(part.indexOf("=") + 1).trim());
+      } catch {
+        return null;
+      }
     }
   }
 
@@ -205,7 +247,7 @@ export function buildSessionCookieHeader(
   secure: boolean
 ): string {
   const attributes = [
-    `${SESSION_COOKIE}=${cookie}`,
+    `${secure ? SECURE_SESSION_COOKIE : SESSION_COOKIE}=${cookie}`,
     "Path=/",
     "HttpOnly",
     "SameSite=Strict",
@@ -225,7 +267,7 @@ export function buildSessionCookieHeader(
 /** `Set-Cookie` value that clears the session. */
 export function buildClearedCookieHeader(secure: boolean): string {
   const attributes = [
-    `${SESSION_COOKIE}=`,
+    `${secure ? SECURE_SESSION_COOKIE : SESSION_COOKIE}=`,
     "Path=/",
     "HttpOnly",
     "SameSite=Strict",

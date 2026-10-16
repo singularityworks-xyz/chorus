@@ -30,7 +30,7 @@ jobs:
       - name: Lint
         run: bunx ultracite check
       - name: Log Gate
-        run: bash scripts/check-log-gate.sh
+        run: bun run check:log
 
   typecheck:
     name: Typecheck
@@ -68,9 +68,39 @@ jobs:
       - name: Unit Tests
         run: bun test
 
+  relay-postgres:
+    name: Relay PostgreSQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres@sha256:3645570cccdfa447589da9f57dd740faa29b30938e861289a5574b6ca6b03826
+        env:
+          POSTGRES_USER: chorus_test
+          POSTGRES_PASSWORD: chorus-test-fixture-only
+          POSTGRES_DB: chorus_relay_test
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready --username=chorus_test --dbname=chorus_relay_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - name: Install Dependencies
+        run: bun ci
+      - name: Real PostgreSQL Relay Checks
+        env:
+          CHORUS_TEST_POSTGRES_URL: postgres://chorus_test:chorus-test-fixture-only@127.0.0.1:5432/chorus_relay_test
+        run: bun test ./apps/relay/src/postgres.integration.test.ts ./apps/relay/src/testing/postgres.test.ts
+
   build:
     name: Build / Compile
-    needs: [lint, typecheck, unit-tests]
+    needs: [lint, typecheck, unit-tests, relay-postgres]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -93,6 +123,8 @@ jobs:
         run: bun ci
       - name: Build
         run: bun run build
+      - name: Production Local Entry HTTP Check
+        run: bun apps/serve/src/auth/testing/production-entry-smoke.ts
 
   integration-tests:
     name: Integration Tests
@@ -142,7 +174,7 @@ jobs:
 
           COOKIE=$(curl -sf -D - -o /dev/null -X POST http://localhost:2100/auth/login \
             -H 'content-type: application/json' -d "{\"token\":\"$CHORUS_TOKEN\"}" \
-            | grep -i '^set-cookie:' | sed 's/^[Ss]et-[Cc]ookie: *//' | cut -d';' -f1 | tr -d '\r')
+            | grep -i '^set-cookie:' | sed 's/^[Ss]et-[Cc]ookie: *//' | cut -d';' -f1 | tr -d '\r' | paste -sd ';' -)
 
           # Sent as an explicit header: the cookie is Secure, so curl correctly
           # refuses to attach it over plain HTTP. TLS arrives with Caddy in P8.
@@ -177,6 +209,9 @@ jobs:
     needs: [build, integration-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      matrix:
+        target: [serve, web]
     steps:
       - uses: actions/checkout@v6
       - name: Detect Dockerfile
@@ -190,14 +225,23 @@ jobs:
           fi
       - uses: docker/setup-buildx-action@v3
         if: steps.detect.outputs.exists == 'true'
+      - uses: oven-sh/setup-bun@v2
+        if: steps.detect.outputs.exists == 'true'
+        with:
+          bun-version-file: package.json
       - uses: docker/build-push-action@v6
         if: steps.detect.outputs.exists == 'true'
         with:
           context: .
           push: false
           load: true
+          target: ${{ matrix.target }}
+          tags: chorus-host-${{ matrix.target }}:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Container HTTP, Storage and Shutdown Check
+        if: steps.detect.outputs.exists == 'true'
+        run: bun scripts/check-host-container.ts ${{ matrix.target }} chorus-host-${{ matrix.target }}:ci
 
   ci-result:
     name: CI Result
@@ -205,6 +249,7 @@ jobs:
       - lint
       - typecheck
       - unit-tests
+      - relay-postgres
       - build
       - integration-tests
       - security

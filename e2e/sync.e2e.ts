@@ -12,6 +12,8 @@ import { expect, test } from "@playwright/test";
  */
 
 import {
+  E2E_REPO_DIR,
+  E2E_SERVE_ENV,
   repoRoot,
   SERVE_DATA_DIR,
   SERVE_LOG_FILE,
@@ -30,7 +32,15 @@ import { start, stop } from "./serve-process";
 async function signIn(page: Page): Promise<void> {
   await page.goto("/login");
   await page.getByLabel("Access token").fill(TOKEN);
+  const loginResponse = page.waitForResponse((response) =>
+    response.url().endsWith("/api/auth/login")
+  );
   await page.getByRole("button", { name: "Continue" }).click();
+  const response = await loginResponse;
+  expect(
+    response.ok(),
+    `login request returned ${String(response.status())}`
+  ).toBe(true);
   await page.waitForURL("/");
 }
 
@@ -43,37 +53,40 @@ async function signIn(page: Page): Promise<void> {
  */
 // biome-ignore lint/suspicious/useAwait: forwards the page's awaited evaluate result
 async function createBoard(page: Page, title: string): Promise<string> {
-  return page.evaluate(async (boardTitle) => {
-    const response = await fetch("/api/workspace", {
-      body: JSON.stringify({
-        baseRevision: null,
-        clientId: "playwright",
-        mutationId: `pw-${crypto.randomUUID()}`,
-        payload: {
-          seed: {
-            repo: {
-              directory: "/tmp/chorus-e2e-repo",
-              sandboxes: [],
-              worktree: "/tmp/chorus-e2e-repo",
+  return page.evaluate(
+    async ({ boardTitle, directory }) => {
+      const response = await fetch("/api/workspace", {
+        body: JSON.stringify({
+          baseRevision: null,
+          clientId: "playwright",
+          mutationId: `pw-${crypto.randomUUID()}`,
+          payload: {
+            seed: {
+              repo: {
+                directory,
+                sandboxes: [],
+                worktree: directory,
+              },
+              title: boardTitle,
             },
-            title: boardTitle,
           },
-        },
-        type: "board.create",
-      }),
-      headers: { "content-type": "application/json" },
-      method: "POST",
-    });
+          type: "board.create",
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
 
-    if (!response.ok) {
-      throw new Error(`board create failed: ${String(response.status)}`);
-    }
+      if (!response.ok) {
+        throw new Error(`board create failed: ${String(response.status)}`);
+      }
 
-    const snapshot = (await response.json()) as {
-      boards: { boardId: string }[];
-    };
-    return snapshot.boards.at(-1)?.boardId ?? "";
-  }, title);
+      const snapshot = (await response.json()) as {
+        boards: { boardId: string }[];
+      };
+      return snapshot.boards.at(-1)?.boardId ?? "";
+    },
+    { boardTitle: title, directory: E2E_REPO_DIR }
+  );
 }
 
 /**
@@ -203,7 +216,9 @@ test.describe("client sync", () => {
 
     // Simulate the radio dropping by failing every request for a window.
     await page.context().setOffline(true);
-    await page.waitForTimeout(1000);
+    await expect(page.getByTestId("connection-strip")).toBeVisible({
+      timeout: 10_000,
+    });
     await page.context().setOffline(false);
 
     // Coming back online triggers an immediate reconnect, which is the
@@ -211,9 +226,9 @@ test.describe("client sync", () => {
     await page.context().setOffline(false);
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
 
-    await expect
-      .poll(() => readLastSeq(page), { timeout: 30_000 })
-      .not.toBeNull();
+    await expect(page.getByTestId("connection-strip")).toHaveCount(0, {
+      timeout: 30_000,
+    });
 
     // And the board is still there afterwards: reconnecting must not lose state.
     await expectBoardPresent(page, title);
@@ -245,6 +260,7 @@ test.describe("client sync", () => {
 
     await start({
       dataDir: SERVE_DATA_DIR,
+      env: E2E_SERVE_ENV,
       logFile: SERVE_LOG_FILE,
       pidFile: SERVE_PID_FILE,
       port: SERVE_PORT,
@@ -284,6 +300,9 @@ test.describe("client sync", () => {
 
     // Now cut the first client off and commit one more change behind its back.
     await page.context().setOffline(true);
+    await expect(page.getByTestId("connection-strip")).toBeVisible({
+      timeout: 10_000,
+    });
     await expect
       .poll(() => readLastSeq(page), { timeout: 20_000 })
       .not.toBeNull();
@@ -303,10 +322,10 @@ test.describe("client sync", () => {
     await page.context().setOffline(false);
     await page.evaluate(() => window.dispatchEvent(new Event("online")));
 
-    await expectBoardPresent(page, third);
     await expect(page.getByTestId("connection-strip")).toHaveCount(0, {
       timeout: 40_000,
     });
+    await expectBoardPresent(page, third);
 
     await otherContext.close();
   });
@@ -369,10 +388,19 @@ test.describe("client sync", () => {
 
     // Signing back in clears the gate without a manual reload.
     await page.getByRole("link", { name: "Sign in" }).click();
-    await page.waitForURL("/login");
+    await page.waitForURL((url) => url.pathname === "/login");
+    expect(new URL(page.url()).searchParams.get("returnTo")).toBe("/");
     await page.getByLabel("Access token").fill(TOKEN);
+    const loginResponse = page.waitForResponse((response) =>
+      response.url().endsWith("/api/auth/login")
+    );
     await page.getByRole("button", { name: "Continue" }).click();
-    await page.waitForURL("/");
+    const response = await loginResponse;
+    expect(
+      response.ok(),
+      `login request returned ${String(response.status())}`
+    ).toBe(true);
+    await page.waitForURL((url) => url.pathname === "/");
     await expect(page.getByText("Session expired")).toHaveCount(0, {
       timeout: 30_000,
     });

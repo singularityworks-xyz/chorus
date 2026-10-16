@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { Glob } from "bun";
 
 export interface PackageManifest {
@@ -26,7 +27,7 @@ export interface VersionState {
 const semverPattern = /^\d+\.\d+\.\d+$/;
 const packageJsonSuffixPattern = /\/package\.json$/;
 const rootDir = new URL("../../", import.meta.url);
-const rootPath = rootDir.pathname;
+const rootPath = fileURLToPath(rootDir);
 const isDryRun = Bun.argv.includes("--dry-run");
 const temporaryChangesetPath = ".changeset/chorus-auto-version.md";
 const statePath = new URL(".git/chorus-autobump-state.json", rootDir);
@@ -37,6 +38,7 @@ const workspaceManifestGlobs = [
 
 function runGit(args: string[]) {
   const result = Bun.spawnSync(["git", ...args], {
+    windowsHide: true,
     cwd: rootPath,
     stderr: "pipe",
     stdout: "pipe",
@@ -244,6 +246,7 @@ export function shouldBumpRootVersion({
 
 function runChangesetVersion() {
   const result = Bun.spawnSync(["bun", "x", "changeset", "version"], {
+    windowsHide: true,
     cwd: rootPath,
     stderr: "inherit",
     stdout: "inherit",

@@ -5,6 +5,7 @@ import type {
   VersionedSnapshot,
   WorkspaceEvent,
 } from "@chorus/contracts";
+import { LOCAL_ENTRY_PORT } from "@chorus/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChorusSync,
@@ -12,6 +13,7 @@ import {
   resolveSocketUrl,
 } from "./chorus-sync";
 import { eventsAfterSnapshot } from "./protocol";
+import { prepareAuthenticatedSocketUrl } from "./socket-credentials";
 
 /**
  * The one socket owner (plan P5 task 1).
@@ -106,6 +108,10 @@ export function useChorusSync(
       (typeof window === "undefined"
         ? "ws://localhost:2000/ws"
         : resolveSocketUrl({
+            localServePort: 2000,
+            allowLocalHostRebinding: process.env.NODE_ENV !== "production",
+            developmentServePort:
+              process.env.NODE_ENV === "production" ? undefined : 2000,
             explicit: process.env.NEXT_PUBLIC_CHORUS_WS_URL,
             isSecure: window.location.protocol === "https:",
             origin: window.location.origin,
@@ -118,7 +124,10 @@ export function useChorusSync(
   // that instead of retrying an origin that will never answer.
   const urlIsExplicit =
     options.socketUrl !== undefined ||
-    process.env.NEXT_PUBLIC_CHORUS_WS_URL !== undefined;
+    process.env.NEXT_PUBLIC_CHORUS_WS_URL !== undefined ||
+    (typeof window !== "undefined" &&
+      process.env.NODE_ENV !== "production" &&
+      window.location.port === "3000");
 
   useEffect(() => {
     const sync = new ChorusSync(
@@ -131,6 +140,15 @@ export function useChorusSync(
             : ReturnType<
                 ConstructorParameters<typeof ChorusSync>[0]["createSocket"]
               >,
+        prepareSocketUrl: (target) =>
+          prepareAuthenticatedSocketUrl(target, {
+            allowLocalBootstrap: true,
+            localEntryPort:
+              process.env.NODE_ENV === "production"
+                ? LOCAL_ENTRY_PORT
+                : undefined,
+            pageOrigin: window.location.origin,
+          }),
         url,
         urlIsExplicit,
       },
@@ -196,9 +214,7 @@ export function useChorusSync(
       sync.reconnectNow();
     };
     const onOffline = () => {
-      // Nothing to do but let the close handler run; recorded so the UI can say
-      // so rather than showing a silent stall.
-      setState((current) => ({ ...current, lastError: "offline" }));
+      sync.networkOffline();
     };
 
     document.addEventListener("visibilitychange", onVisible);

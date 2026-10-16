@@ -1,5 +1,6 @@
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { HostVault } from "../hosting/vault";
 
 /** Token file inside the data dir (spec §6.1). */
 export const TOKEN_FILE_NAME = "chorus.token";
@@ -7,13 +8,17 @@ export const TOKEN_FILE_NAME = "chorus.token";
 /** 32 bytes → 64 hex chars → 256 bits of entropy (plan P4.1). */
 const TOKEN_BYTES = 32;
 
-export type TokenSource = "environment" | "generated" | "persisted";
+export type TokenSource =
+  | "environment"
+  | "generated"
+  | "persisted"
+  | "host-vault";
 
 export interface ResolvedToken {
   source: TokenSource;
   /** The token value. Never log this. */
   token: string;
-  /** Absolute path to the token file, for the bootstrap message. */
+  /** Absolute storage path for internal persistence; never show it to users. */
   tokenPath: string;
 }
 
@@ -21,6 +26,8 @@ export interface TokenEnvironment {
   dataDir: string;
   envToken?: string | undefined;
   isProduction: boolean;
+  /** Only installations with the separate private entry listener enable this. */
+  managedLocalEntry?: boolean;
 }
 
 /**
@@ -61,11 +68,10 @@ export async function persistToken(
 }
 
 /**
- * Production hard-fails without a token (decision #4).
+ * Unmanaged production hard-fails without a token (decision #4).
  *
- * Never auto-generates in production: a server that silently invents its own
- * credential on a public URL is a server nobody can log into, and one that logs
- * the path of a file nobody will find.
+ * Managed installations instead keep an encrypted internal signing root and
+ * enter through the separate loopback listener. Neither path exposes the root.
  */
 export class MissingTokenError extends Error {
   constructor() {
@@ -77,16 +83,17 @@ export class MissingTokenError extends Error {
 /**
  * Resolves the token for this boot.
  *
- * Order: production requires the env var outright; otherwise the env var wins,
- * then an already-persisted file is reused (so restarts do not orphan the token
- * the operator already has), and only then is one generated.
+ * Order: unmanaged production requires the env var; otherwise the env var wins,
+ * then an already-persisted internal secret is reused, and only then is one
+ * generated. Local browser sessions use the guarded loopback bootstrap instead
+ * of exposing this value to the operator.
  */
 export async function resolveToken(
   env: TokenEnvironment
 ): Promise<ResolvedToken> {
   const fromEnv = env.envToken?.trim();
 
-  if (env.isProduction && !fromEnv) {
+  if (env.isProduction && !fromEnv && !env.managedLocalEntry) {
     throw new MissingTokenError();
   }
 
@@ -96,6 +103,19 @@ export async function resolveToken(
       token: fromEnv,
       tokenPath: tokenFilePath(env.dataDir),
     };
+  }
+
+  if (env.isProduction && env.managedLocalEntry) {
+    const vault = await HostVault.open(join(env.dataDir, "host"));
+    try {
+      return {
+        source: "host-vault",
+        token: vault.sessionSigningSecret(),
+        tokenPath: join(env.dataDir, "host", "vault.db"),
+      };
+    } finally {
+      vault.close();
+    }
   }
 
   const target = tokenFilePath(env.dataDir);

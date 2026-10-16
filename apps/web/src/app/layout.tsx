@@ -16,6 +16,16 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Chorus",
   description: "many agents, one coordinated output.",
+  manifest: "/manifest.webmanifest",
+  icons: {
+    icon: "/chorus.svg",
+    apple: "/chorus.svg",
+  },
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "Chorus",
+  },
 };
 
 /**

@@ -7,10 +7,12 @@ import type { NormalizedAgentEvent } from "@chorus/oc-adapter";
 import { WorkspaceStore } from "./store";
 
 const dirs: string[] = [];
+const stores: WorkspaceStore[] = [];
 
 const CORRUPT_SNAPSHOT = /corrupt workspace snapshot/;
 const CORRUPT_EVENT = /corrupt event at seq/;
 const CORRUPT_LEGACY = /refusing to start.*corrupt/is;
+const LEGACY_CHECKOUT_COLLISION = /share checkout/;
 
 type StoreOptions = ConstructorParameters<typeof WorkspaceStore>[1];
 
@@ -23,10 +25,20 @@ function fileMode(path: string): number {
 function createStore(options?: StoreOptions) {
   const dir = mkdtempSync(join(tmpdir(), "chorus-store-"));
   dirs.push(dir);
-  return new WorkspaceStore(dir, options);
+  return trackStore(new WorkspaceStore(dir, options));
 }
 
-afterEach(() => {
+function trackStore(store: WorkspaceStore): WorkspaceStore {
+  stores.push(store);
+  return store;
+}
+
+function createStoreAt(dir: string, options?: StoreOptions): WorkspaceStore {
+  return trackStore(new WorkspaceStore(dir, options));
+}
+
+afterEach(async () => {
+  await Promise.all(stores.splice(0).map((store) => store.close()));
   while (dirs.length > 0) {
     const dir = dirs.pop();
     if (dir) {
@@ -138,7 +150,7 @@ describe("WorkspaceStore persistence", () => {
     const dir = mkdtempSync(join(tmpdir(), "chorus-replay-"));
     dirs.push(dir);
 
-    const first = new WorkspaceStore(dir);
+    const first = createStoreAt(dir);
     await first.load();
     const boardId = await seedBoard(first);
     await first.applyMutation(
@@ -153,7 +165,7 @@ describe("WorkspaceStore persistence", () => {
     const before = first.getSnapshot();
     await first.close();
 
-    const second = new WorkspaceStore(dir);
+    const second = createStoreAt(dir);
     await second.load();
 
     expect(second.getSnapshot()).toEqual(before);
@@ -230,7 +242,7 @@ describe("WorkspaceStore idempotency", () => {
     const dir = mkdtempSync(join(tmpdir(), "chorus-dedup-"));
     dirs.push(dir);
 
-    const first = new WorkspaceStore(dir);
+    const first = createStoreAt(dir);
     await first.load();
     const boardId = await seedBoard(first);
 
@@ -244,7 +256,7 @@ describe("WorkspaceStore idempotency", () => {
     });
     await first.close();
 
-    const second = new WorkspaceStore(dir);
+    const second = createStoreAt(dir);
     await second.load();
 
     const head = second.headSeq();
@@ -386,14 +398,17 @@ describe("WorkspaceStore durability", () => {
     await store.load();
     await store.close();
 
-    expect(fileMode(store.databasePath)).toBe(0o600);
+    expect(statSync(store.databasePath).isFile()).toBe(true);
+    if (process.platform !== "win32") {
+      expect(fileMode(store.databasePath)).toBe(0o600);
+    }
   });
 
   test("a corrupt snapshot blob aborts rather than silently emptying", async () => {
     const dir = mkdtempSync(join(tmpdir(), "chorus-corrupt-"));
     dirs.push(dir);
 
-    const first = new WorkspaceStore(dir);
+    const first = createStoreAt(dir);
     await first.load();
     await seedBoard(first);
     await first.close();
@@ -405,7 +420,7 @@ describe("WorkspaceStore durability", () => {
     db.exec("UPDATE snapshots SET blob = 'not-json'");
     db.close();
 
-    const second = new WorkspaceStore(dir);
+    const second = createStoreAt(dir);
     await expect(second.load()).rejects.toThrow(CORRUPT_SNAPSHOT);
   });
 
@@ -413,7 +428,7 @@ describe("WorkspaceStore durability", () => {
     const dir = mkdtempSync(join(tmpdir(), "chorus-bad-event-"));
     dirs.push(dir);
 
-    const first = new WorkspaceStore(dir);
+    const first = createStoreAt(dir);
     await first.load();
     await seedBoard(first);
 
@@ -422,12 +437,70 @@ describe("WorkspaceStore durability", () => {
     db.exec("UPDATE events SET payload = '{oops'");
     db.close();
 
-    const second = new WorkspaceStore(dir);
+    const second = createStoreAt(dir);
     await expect(second.load()).rejects.toThrow(CORRUPT_EVENT);
   });
 });
 
 describe("WorkspaceStore snapshots and retention", () => {
+  test("automatically snapshots after the configured event interval", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chorus-auto-snap-"));
+    dirs.push(dir);
+
+    const store = createStoreAt(dir, { snapshotInterval: 2 });
+    await store.load();
+    const boardId = await seedBoard(store);
+    await store.applyMutation(
+      mutation("board.move", { boardId, position: { x: 5, y: 5 } })
+    );
+
+    const { Database } = await import("bun:sqlite");
+    const db = new Database(store.databasePath);
+    const count = db.query("SELECT COUNT(*) AS c FROM events").get() as {
+      c: number;
+    };
+    db.close();
+
+    expect(store.headSeq()).toBe(2);
+    expect(count.c).toBe(1);
+    expect(store.getBoard(boardId)?.position).toEqual({ x: 5, y: 5 });
+
+    await store.close();
+    const recovered = createStoreAt(dir);
+    await recovered.load();
+    expect(recovered.getBoard(boardId)?.position).toEqual({ x: 5, y: 5 });
+    await recovered.close();
+  });
+
+  test("a snapshot failure does not fail an already durable mutation", async () => {
+    const store = createStore({ snapshotInterval: 1 });
+    await store.load();
+    const { Database } = await import("bun:sqlite");
+    const db = new Database(store.databasePath);
+    db.exec(`
+      CREATE TRIGGER reject_snapshot_insert
+      BEFORE INSERT ON snapshots
+      BEGIN SELECT RAISE(FAIL, 'snapshot unavailable'); END;
+    `);
+
+    try {
+      const commit = await store.applyMutation(
+        mutation("board.create", { seed: SEED })
+      );
+      const boardId =
+        commit?.events[0]?.type === "board.created"
+          ? commit.events[0].board.boardId
+          : undefined;
+
+      expect(boardId).toBeDefined();
+      expect(commit?.lastSeq).toBe(1);
+      expect(store.getBoard(boardId ?? "")?.title).toBe("Repo");
+    } finally {
+      db.exec("DROP TRIGGER IF EXISTS reject_snapshot_insert");
+      db.close();
+    }
+  });
+
   test("writeSnapshot folds the covered events away", async () => {
     const store = createStore({ snapshotInterval: 1000 });
     await store.load();
@@ -465,7 +538,7 @@ describe("WorkspaceStore snapshots and retention", () => {
     const dir = mkdtempSync(join(tmpdir(), "chorus-snap-"));
     dirs.push(dir);
 
-    const first = new WorkspaceStore(dir);
+    const first = createStoreAt(dir);
     await first.load();
     const boardId = await seedBoard(first);
     await first.applyMutation(
@@ -474,7 +547,7 @@ describe("WorkspaceStore snapshots and retention", () => {
     await first.writeSnapshot();
     await first.close();
 
-    const second = new WorkspaceStore(dir);
+    const second = createStoreAt(dir);
     await second.load();
     expect(second.getBoard(boardId)?.position).toEqual({ x: 11, y: 12 });
     await second.close();
@@ -602,6 +675,34 @@ describe("WorkspaceStore agent events", () => {
     ]);
   });
 
+  test("deduplicates recovered agent events across store restarts", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chorus-agent-receipt-"));
+    dirs.push(dir);
+    const first = createStoreAt(dir);
+    await first.load();
+    await seedActiveBoard(first);
+    const recoveredEvent = agentEvent({
+      activity: "writing",
+      messageID: "message-1",
+      partID: "part-1",
+      sourceEventId: "history:message-1:part-1",
+      text: "recovered output",
+    });
+
+    const originalCommit = await first.applyAgentEvent(recoveredEvent);
+    const headAfterFirstDelivery = first.headSeq();
+    expect(originalCommit).not.toBeNull();
+    expect(await first.applyAgentEvent(recoveredEvent)).toBeNull();
+    expect(first.headSeq()).toBe(headAfterFirstDelivery);
+    await first.close();
+
+    const restarted = createStoreAt(dir);
+    await restarted.load();
+    expect(await restarted.applyAgentEvent(recoveredEvent)).toBeNull();
+    expect(restarted.headSeq()).toBe(headAfterFirstDelivery);
+    await restarted.close();
+  });
+
   test("agent events for an unknown session are ignored", async () => {
     const store = createStore();
     await store.load();
@@ -615,7 +716,7 @@ describe("WorkspaceStore agent events", () => {
     const dir = mkdtempSync(join(tmpdir(), "chorus-agent-"));
     dirs.push(dir);
 
-    const first = new WorkspaceStore(dir);
+    const first = createStoreAt(dir);
     await first.load();
     await seedActiveBoard(first);
 
@@ -625,7 +726,7 @@ describe("WorkspaceStore agent events", () => {
     const before = first.getSnapshot();
     await first.close();
 
-    const second = new WorkspaceStore(dir);
+    const second = createStoreAt(dir);
     await second.load();
     expect(second.getSnapshot()).toEqual(before);
     await second.close();
@@ -665,7 +766,7 @@ describe("WorkspaceStore legacy migration", () => {
       })
     );
 
-    const store = new WorkspaceStore(dir);
+    const store = createStoreAt(dir);
     await store.load(legacyPath);
 
     expect(store.getSnapshot().boards).toHaveLength(1);
@@ -689,13 +790,52 @@ describe("WorkspaceStore legacy migration", () => {
     await store.close();
   });
 
+  test("rejects legacy boards that share a checkout and preserves the source", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chorus-legacy-collision-"));
+    dirs.push(dir);
+    const legacyPath = join(dir, "workspace.json");
+    const board = (boardId: string) => ({
+      boardId,
+      columns: { approve: [], done: [], in_progress: [], queue: [] },
+      modelSelection: null,
+      position: { x: 0, y: 0 },
+      repo: SEED.repo,
+      reviewMode: "auto",
+      session: { state: "uninitialized" },
+      title: `Legacy ${boardId}`,
+    });
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({
+        boards: [board("legacy-1"), board("legacy-2")],
+        preferences: {
+          boardViewMode: "relaxed",
+          composerHintDismissed: false,
+          recentlyUsedModels: [],
+          speechVoiceId: null,
+        },
+        previousWorkspaces: [],
+        revision: 1,
+        selectedBoardId: "legacy-1",
+      })
+    );
+
+    const store = createStoreAt(dir);
+    await expect(store.load(legacyPath)).rejects.toThrow(
+      LEGACY_CHECKOUT_COLLISION
+    );
+
+    expect(statSync(legacyPath).isFile()).toBe(true);
+    expect(() => statSync(`${legacyPath}.imported`)).toThrow();
+  });
+
   test("a corrupt workspace.json aborts boot instead of emptying", async () => {
     const dir = mkdtempSync(join(tmpdir(), "chorus-badlegacy-"));
     dirs.push(dir);
     const legacyPath = join(dir, "workspace.json");
     writeFileSync(legacyPath, "{ this is not json");
 
-    const store = new WorkspaceStore(dir);
+    const store = createStoreAt(dir);
     await expect(store.load(legacyPath)).rejects.toThrow(CORRUPT_LEGACY);
   });
 
@@ -712,7 +852,7 @@ describe("WorkspaceStore export", () => {
     const dir = mkdtempSync(join(tmpdir(), "chorus-export-"));
     dirs.push(dir);
 
-    const store = new WorkspaceStore(dir);
+    const store = createStoreAt(dir);
     await store.load();
     await seedBoard(store);
     const destination = join(dir, "backup.db");

@@ -227,11 +227,10 @@ describe("engine event burst replay", () => {
     }
   });
 
-  test("the normalizer is order-sensitive and the store sees the difference", async () => {
-    // Documented rather than incidental: the normalizer classifies part events
-    // using the role from `message.updated`, so if that ordering ever stops
-    // holding, content vanishes with no error at all. Pinning the consequence
-    // means a change to the assumption has to be deliberate.
+  test("an event dropped before its parent is not receipted and can be replayed", async () => {
+    // The normalizer needs the parent's role before it can attribute a part.
+    // Since no workspace event can be produced yet, the store must leave the
+    // source ID unreceipted so a later reconciliation can retry it.
     resetMessageTracking();
     const { boardId, dir, store } = await seedStoreWithCard(
       "chorus-burst-order-"
@@ -253,7 +252,8 @@ describe("engine event burst replay", () => {
       // part with an unrecorded parent belongs to.
       expect(findCard(store, boardId)?.run?.steps ?? []).toHaveLength(0);
 
-      // Parents arrive, then the part, then the increment.
+      // Parents arrive, then the part, then the same increment is normalized
+      // again with the missing context available.
       for (const raw of [userMessage, assistantMessage, textPart, delta]) {
         await store.applyAgentEvent(
           normalizeEvent(raw as OpencodeEvent) as NormalizedAgentEvent
@@ -268,13 +268,7 @@ describe("engine event burst replay", () => {
     }
   });
 
-  test("the store does not dedup agent events, so the transport must not replay them", async () => {
-    // Characterisation, not a guarantee. `applyMutation` dedups by mutation id;
-    // agent events have no id and are not deduped here at all, and the projector
-    // concatenates delta text. So a replayed delta is visible duplicated content.
-    // The protection against that is the client's cursor and its
-    // `eventsAfterSnapshot` filter, not this layer — which is exactly why the
-    // transport has to be the thing that gets it right.
+  test("durable source receipts deduplicate a replayed event burst", async () => {
     resetMessageTracking();
     const { boardId, dir, store } = await seedStoreWithCard(
       "chorus-burst-twice-"
@@ -304,8 +298,9 @@ describe("engine event burst replay", () => {
       }
 
       const twice = findCard(store, boardId);
-      // The increment applied a second time, visibly.
-      expect(streamedText(twice)).toBe("Working on it on it");
+      // The repeated source IDs are already durable, so replay does not append
+      // the increment twice.
+      expect(streamedText(twice)).toBe("Working on it");
 
       await store.close();
     } finally {

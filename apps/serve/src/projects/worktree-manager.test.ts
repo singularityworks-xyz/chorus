@@ -19,20 +19,28 @@ const NOT_A_REPO = /not a git repository/;
 
 function makeRepo(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
-  execFileSync("git", ["init", "--quiet"], { cwd: dir });
+  execFileSync("git", ["init", "--quiet"], { cwd: dir, windowsHide: true });
   execFileSync("git", ["config", "user.email", "test@example.com"], {
     cwd: dir,
+    windowsHide: true,
   });
-  execFileSync("git", ["config", "user.name", "Test"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "Test"], {
+    cwd: dir,
+    windowsHide: true,
+  });
   writeFileSync(join(dir, "README.md"), "# fixture\n");
-  execFileSync("git", ["add", "-A"], { cwd: dir });
-  execFileSync("git", ["commit", "--quiet", "-m", "init"], { cwd: dir });
+  execFileSync("git", ["add", "-A"], { cwd: dir, windowsHide: true });
+  execFileSync("git", ["commit", "--quiet", "-m", "init"], {
+    cwd: dir,
+    windowsHide: true,
+  });
   return dir;
 }
 
 function worktreeList(repo: string): string[] {
   return execFileSync("git", ["worktree", "list", "--porcelain"], {
     cwd: repo,
+    windowsHide: true,
   })
     .toString()
     .split("\n")
@@ -69,7 +77,7 @@ describe("WorktreeManager", () => {
     const manager = new WorktreeManager();
     const path = manager.worktreePath("/repos/app", "board-1");
 
-    expect(path).toBe(join("/repos/app", WORKTREE_CONTAINER, "board-1"));
+    expect(path).toBe(resolve("/repos/app", WORKTREE_CONTAINER, "board-1"));
   });
 
   test("a traversing board id is rejected rather than escaping the repo", () => {
@@ -160,6 +168,77 @@ describe("WorktreeManager", () => {
     expect(worktreeList(repo)).toContain(resolve(repo));
 
     await store.close();
+    rmSync(repo, { force: true, recursive: true });
+  });
+
+  test("dirty and ignored worktree files block board removal", async () => {
+    const repo = makeRepo("chorus-wt-dirty-");
+    const manager = new WorktreeManager();
+    const store = new WorkspaceStore(
+      mkdtempSync(join(tmpdir(), "chorus-wt-db-dirty-")),
+      { worktreeProvisioner: manager }
+    );
+    await store.load();
+
+    await seedBoard(store, repo);
+    const boardId = await seedBoard(store, repo);
+    const worktree = store.getBoard(boardId)?.repo.worktree;
+    if (!worktree) {
+      throw new Error("second board has no worktree");
+    }
+    const ignoredFile = join(worktree, "private-local.txt");
+    writeFileSync(
+      join(repo, ".git", "info", "exclude"),
+      "private-local.txt\n",
+      {
+        flag: "a",
+      }
+    );
+    writeFileSync(ignoredFile, "keep this local file\n");
+
+    await expect(
+      store.applyMutation({
+        baseRevision: null,
+        clientId: "worktree-test",
+        mutationId: `remove-dirty-${crypto.randomUUID()}`,
+        payload: { boardId },
+        type: "board.remove",
+      })
+    ).rejects.toThrow("worktree for board");
+
+    expect(store.getBoard(boardId)).toBeDefined();
+    expect(existsSync(ignoredFile)).toBe(true);
+    expect(worktreeList(repo)).toContain(resolve(worktree));
+
+    await store.close();
+    rmSync(repo, { force: true, recursive: true });
+  });
+
+  test("pending cleanup is recovered after restart with no remaining boards", async () => {
+    const repo = makeRepo("chorus-wt-recovery-");
+    const dataDir = mkdtempSync(join(tmpdir(), "chorus-wt-recovery-db-"));
+    const manager = new WorktreeManager();
+    const store = new WorkspaceStore(dataDir, {
+      worktreeProvisioner: manager,
+    });
+    await store.load();
+    const boardId = "removed-before-crash";
+    const worktree = await manager.ensureWorktree(repo, boardId);
+    store.meta.setMeta(
+      `worktree-cleanup:v1:${boardId}`,
+      JSON.stringify({ boardId, createdAt: Date.now(), repoDirectory: repo })
+    );
+    await store.close();
+
+    const restarted = new WorkspaceStore(dataDir, {
+      worktreeProvisioner: manager,
+    });
+    await restarted.load();
+
+    expect(existsSync(worktree)).toBe(false);
+    expect(restarted.meta.getMeta(`worktree-cleanup:v1:${boardId}`)).toBeNull();
+    await restarted.close();
+    rmSync(dataDir, { force: true, recursive: true });
     rmSync(repo, { force: true, recursive: true });
   });
 

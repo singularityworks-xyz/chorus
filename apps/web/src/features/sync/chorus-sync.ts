@@ -12,6 +12,7 @@ import {
   writePersistedSnapshot,
 } from "./last-seq";
 import { decideFrame, parseServerFrame } from "./protocol";
+import { SocketAuthenticationExpiredError } from "./socket-credentials";
 
 /**
  * The socket state machine (plan P5 task 1).
@@ -31,6 +32,7 @@ export const WS_CLOSE_UNAUTHORIZED = 4401;
 
 /** The code a browser reports when a handshake fails outright, e.g. a 404. */
 export const WS_CLOSE_ABNORMAL = 1006;
+const IPV4_OCTET_PATTERN = /^\d{1,3}$/;
 
 /**
  * Turns a close event into something worth showing a person.
@@ -69,6 +71,11 @@ export interface ChorusSyncDeps {
   /** How many reconnect attempts have been made — surfaced for diagnostics. */
   createSocket: (url: string) => ChorusSyncSocket;
   now?: () => number;
+  /**
+   * Optionally obtains per-connection credentials before opening the socket.
+   * Tickets are single-use, so this must run again after every disconnect.
+   */
+  prepareSocketUrl?: (baseUrl: string) => Promise<string>;
   random?: () => number;
   /** Injected so reconnect scheduling is deterministic under test. */
   schedule?: (fn: () => void, delayMs: number) => unknown;
@@ -137,6 +144,8 @@ export class ChorusSync {
    * a second trigger cannot shadow a socket that is already open or handshaking.
    */
   #handshakeInFlight = false;
+  #socketUrlPreparationInFlight = false;
+  #connectionGeneration = 0;
 
   /**
    * Latches a resync so a burst of gapped frames sends one `resync`, not one per
@@ -236,6 +245,7 @@ export class ChorusSync {
   /** Closes the socket and stops reconnecting. Used by the hook's cleanup. */
   stop(): void {
     this.#started = false;
+    this.#invalidateSocketUrlPreparation();
     this.#clearReconnect();
     this.#closeSocket();
     this.#setState({ status: "offline" });
@@ -256,13 +266,33 @@ export class ChorusSync {
       this.#socket !== null &&
       (this.#state.status === "connecting" || this.#state.status === "live");
 
-    if (live) {
+    if (live || this.#socketUrlPreparationInFlight) {
       return;
     }
 
     this.#clearReconnect();
     this.#backoff.reset();
     this.#connect();
+  }
+
+  /**
+   * Drops the transport when the browser reports that it is offline.
+   *
+   * Browsers do not consistently close an existing WebSocket when their
+   * network status changes. Keeping that socket marked live makes the next
+   * `online` event a no-op, even though no more frames can reach the client.
+   * Closing it here makes the next reconnect replay from the last applied
+   * cursor.
+   */
+  networkOffline(): void {
+    if (this.#state.status === "auth-expired") {
+      return;
+    }
+
+    this.#clearReconnect();
+    this.#invalidateSocketUrlPreparation();
+    this.#closeSocket();
+    this.#setState({ lastError: "offline", status: "offline" });
   }
 
   /**
@@ -300,15 +330,62 @@ export class ChorusSync {
     // Never shadow a live socket. Without this, a `visibilitychange` and an
     // `online` firing together on a waking phone would leave the first socket
     // running with no handler, silently stranding the client.
-    if (this.#socket !== null || this.#handshakeInFlight) {
+    if (
+      this.#socket !== null ||
+      this.#handshakeInFlight ||
+      this.#socketUrlPreparationInFlight
+    ) {
       return;
     }
 
     this.#setState({ status: "connecting" });
 
+    const prepareSocketUrl = this.#deps.prepareSocketUrl;
+    if (prepareSocketUrl) {
+      const generation = ++this.#connectionGeneration;
+      this.#socketUrlPreparationInFlight = true;
+      Promise.resolve()
+        .then(() => prepareSocketUrl(this.#deps.url))
+        .then((url) => {
+          if (!this.#isCurrentPreparation(generation)) {
+            return;
+          }
+          this.#socketUrlPreparationInFlight = false;
+          this.#openSocket(url);
+        })
+        .catch((error: unknown) => {
+          if (!this.#isCurrentPreparation(generation)) {
+            return;
+          }
+          this.#socketUrlPreparationInFlight = false;
+          if (error instanceof SocketAuthenticationExpiredError) {
+            this.#failAuth();
+            return;
+          }
+
+          this.#setState({
+            lastError:
+              error instanceof Error
+                ? error.message
+                : "socket credentials failed",
+            status: "offline",
+          });
+          this.#scheduleReconnect();
+        });
+      return;
+    }
+
+    this.#openSocket(this.#deps.url);
+  }
+
+  #openSocket(url: string): void {
+    if (!this.#started || this.#state.status === "auth-expired") {
+      return;
+    }
+
     let socket: ChorusSyncSocket;
     try {
-      socket = this.#deps.createSocket(this.#deps.url);
+      socket = this.#deps.createSocket(url);
     } catch (error) {
       this.#setState({
         lastError: error instanceof Error ? error.message : "socket failed",
@@ -536,6 +613,7 @@ export class ChorusSync {
     const storage = this.#deps.storage ?? browserStorage();
 
     this.#started = false;
+    this.#invalidateSocketUrlPreparation();
     this.#clearReconnect();
     this.#closeSocket();
 
@@ -603,6 +681,19 @@ export class ChorusSync {
     }
   }
 
+  #isCurrentPreparation(generation: number): boolean {
+    return (
+      this.#started &&
+      this.#socketUrlPreparationInFlight &&
+      generation === this.#connectionGeneration
+    );
+  }
+
+  #invalidateSocketUrlPreparation(): void {
+    this.#connectionGeneration += 1;
+    this.#socketUrlPreparationInFlight = false;
+  }
+
   #setState(patch: Partial<ChorusSyncState>): void {
     this.#state = { ...this.#state, ...patch };
 
@@ -630,6 +721,9 @@ function defaultCancel(handle: unknown): void {
  * concern to wire up.
  */
 export function resolveSocketUrl(env: {
+  allowLocalHostRebinding?: boolean;
+  developmentServePort?: number;
+  localServePort?: number;
   explicit?: string | undefined;
   isSecure: boolean;
   origin: string;
@@ -640,6 +734,29 @@ export function resolveSocketUrl(env: {
   // during render, taking the whole workspace tree down.
   const explicit = env.explicit?.trim();
   const url = new URL(explicit ? explicit : env.origin);
+
+  if (!explicit && url.port === "3000") {
+    const port =
+      env.developmentServePort ??
+      (isLoopbackHostname(url.hostname) ? env.localServePort : undefined);
+    if (port) {
+      url.port = String(port);
+    }
+  }
+
+  if (
+    explicit &&
+    env.allowLocalHostRebinding &&
+    isLoopbackHostname(url.hostname)
+  ) {
+    const page = new URL(env.origin);
+    if (url.hostname !== page.hostname) {
+      // In development the web app may be opened from another device on the
+      // LAN. Keep the configured serve port, but target the host that served
+      // this page instead of making the other device connect to itself.
+      url.hostname = page.hostname;
+    }
+  }
 
   // An explicitly configured address keeps its own scheme. Overriding it with
   // the page's would turn `https://serve.example` into `ws://` when opened from
@@ -652,4 +769,20 @@ export function resolveSocketUrl(env: {
   url.pathname = "/ws";
   url.search = "";
   return url.toString();
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (normalized === "localhost" || normalized === "::1") {
+    return true;
+  }
+
+  const octets = normalized.split(".");
+  return (
+    octets.length === 4 &&
+    octets[0] === "127" &&
+    octets.every(
+      (octet) => IPV4_OCTET_PATTERN.test(octet) && Number(octet) <= 255
+    )
+  );
 }

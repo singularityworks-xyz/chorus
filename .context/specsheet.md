@@ -22,7 +22,7 @@ Chorus is a **self-hosted harness for driving AI coding agents** through an **in
 | Users per instance | 1 (multi-device, multi-session) |
 | Concurrency model | Single authoritative writer (the serve process); all UIs are mirrors |
 | Collaboration | None. No multiplayer, no CRDTs, no presence |
-| Hosting | Laptop (localhost) **or** VPS (public URL behind TLS proxy) — identical behavior |
+| Hosting | User-owned laptop or VPS; optional operator-owned connection relay — identical workspace behavior |
 | Packaging | Docker / docker-compose |
 | Backend runtime | Bun + Elysia (existing `apps/serve`) |
 | Agent engine | OpenCode SDK (`@opencode-ai/sdk`), spawned/managed by serve |
@@ -144,9 +144,9 @@ Explicitly fixed by this design (from the 2026 audit): silent-wipe-on-corrupt (#
 
 The threat model is real: a public URL that spawns shell-executing agents on your machine.
 
-1. **Token gate**: `CHORUS_TOKEN` (env, or generated on first start if absent). All HTTP routes except `GET /health` require it; a successful `POST /auth/login` exchanges it for an HttpOnly, SameSite=Strict session cookie. A newly generated token is **never emitted through the application logger** (§6.7): it is persisted to `<DATA_DIR>/chorus.token` with `0600` permissions and the bootstrap message only points the operator at that file path.
+1. **Session gate and first visit**: unmanaged production requires an operator-supplied `CHORUS_TOKEN`; a successful `POST /auth/login` exchanges that value or a valid device-pairing code for a revocable HttpOnly, SameSite=Strict session cookie. Managed native installations enable `CHORUS_LOCAL_ENTRY_ENABLED`, keep their internal signing root in the private encrypted host vault and open locally without a root token. Their separate entry listener binds only `127.0.0.1:2001`, accepts only an exact loopback frontend Origin, a direct loopback peer and the custom bootstrap header, and issues protected `__Host-` Secure cookies. It is never proxied or relayed. The main production listener always refuses local bootstrap. Development retains its loopback-only bootstrap and internal persisted secret. Neither path trusts forwarded IP headers or exposes signing material. Authenticated devices generate five-minute, single-use pairing codes in Settings; only a digest is held in memory and restart invalidates the code. Production browser acceptance remains a release gate. The local workspace must not ask the user for an access token or a shell command.
 2. **WebSocket auth**: the WS upgrade is authenticated with the **same HttpOnly session cookie** (browsers attach it to same-origin upgrade requests automatically) or, for clients behind proxies that strip cookies, a short-lived single-use ticket obtained from an authenticated HTTP endpoint and presented once at upgrade. Connections failing auth are closed immediately. The server never accepts an unauthenticated socket, and browser JavaScript never needs to read or transmit `CHORUS_TOKEN` itself.
-3. **CORS locked down**: same-origin only in production; explicit allowlist env for local dev ports.
+3. **CORS locked down**: same-origin only in production; local development uses only the loopback frontend origins by default, or the explicit `CORS_ALLOWED_ORIGINS` allowlist. The local session route additionally checks the direct peer and exact Origin.
 4. **Path sandboxing**: every filesystem-touching operation (snapshots, diffs, worktrees, prompt file-parts) resolves against the board's registered root and rejects escapes. Absolute paths from clients are rejected unless inside a registered repo/worktree.
 5. **No shell interpolation**: all git/exec invocations go through argument arrays (`execFile`-style). The current string-built `git ${args}` pattern is banned and must be removed.
 6. **Rate limits**: per-IP token brute-force guard on `/auth/login`; per-client WS command rate cap.
@@ -155,6 +155,18 @@ The threat model is real: a public URL that spawns shell-executing agents on you
 ---
 
 ## 7. Deployment
+
+### Remote hosting extension (approved 2026-10-16)
+
+The execution plan is [remote-hosting-plan.md](./remote-hosting-plan.md).
+Chorus frontend/backend, agents, repositories, credentials, durable workspace
+state and handoff journals stay on the user's host. The operator's central VPS
+provides encrypted connection relay plus account/host registration only. It
+does not host user workspaces, execute tasks, store repository backups, or
+arbitrate ownership. Host-to-host handoff uses a verified checkpoint and a
+durable signed source release; no timeout may reactivate a released source.
+The production frontend runs as a Next standalone server alongside Serve;
+the earlier static-export packaging below is superseded by this extension.
 
 ### VPS mode (primary self-host story)
 
@@ -170,7 +182,7 @@ Volumes: `./data:/data` (SQLite db, snapshots, config). Env (all documented in `
 
 ```
 PORT=2000                 # listen port (inside container)
-CHORUS_TOKEN=             # required in production; generate if missing and log once
+CHORUS_TOKEN=             # required in unmanaged production; installed local entry uses its private vault
 DATA_DIR=/data
 OPENCODE_DIRECTORY=/workspaces
 RETENTION_DAYS=30

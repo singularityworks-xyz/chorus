@@ -1,11 +1,19 @@
-import { queueBoardPromptInputSchema } from "@chorus/contracts";
+import {
+  queueBoardPromptInputSchema,
+  sessionFileDiffsSchema,
+} from "@chorus/contracts";
 import { createLogger } from "@chorus/logger";
 import { Elysia, t } from "elysia";
 import { assertRegisteredRoot, UnregisteredRootError } from "../auth/roots";
 import type { OpenCodeBridge } from "../bridge/opencode/bridge";
+import { EngineUnavailableError } from "../opencode/process-manager";
 import { getDiff, getGitStatus, restore, track } from "../snapshot";
 import { getRevertState } from "../snapshot/session-revert";
 import type { BoardTaskService } from "../tasks/board-task-service";
+import {
+  BoardLifecycleError,
+  SessionOwnershipError,
+} from "../tasks/board-task-service";
 import {
   attachForkedSession,
   resolveSessionDirectory,
@@ -29,11 +37,14 @@ const logger = createLogger(
  * arbitrary path on the host — and on the pre-P4 build these routes were also
  * unauthenticated.
  */
-function resolveBoardDirectory(
+async function resolveBoardDirectory(
   store: WorkspaceStore,
+  boardTasks: BoardTaskService,
   directory: string
-): string {
-  return assertRegisteredRoot(directory, store.getSnapshot().boards);
+): Promise<string> {
+  const resolved = assertRegisteredRoot(directory, store.getSnapshot().boards);
+  await boardTasks.assertCheckoutAuthorized(resolved);
+  return resolved;
 }
 
 export function createHttpRoutes(
@@ -53,8 +64,15 @@ export function createHttpRoutes(
    * Throws `UnknownSessionError`, which surfaces as a 4xx-ish failure rather than
    * a command silently applied in the wrong place.
    */
-  const directoryFor = (sessionID: string): string =>
-    resolveSessionDirectory(workspaceStore, sessionID);
+  const directoryFor = async (sessionID: string): Promise<string> => {
+    const board = workspaceStore.getBoardBySessionId(sessionID);
+    if (board) {
+      boardTasks.assertBoardOpen(board.boardId);
+    }
+    const directory = resolveSessionDirectory(workspaceStore, sessionID);
+    await boardTasks.assertCheckoutAuthorized(directory);
+    return directory;
+  };
 
   return (
     new Elysia()
@@ -67,6 +85,10 @@ export function createHttpRoutes(
        * fault and hides the actionable message from anything keying on status.
        */
       .onError(({ error, set }) => {
+        if (error instanceof EngineUnavailableError) {
+          set.status = 503;
+          return { code: error.code, message: error.message };
+        }
         if (error instanceof UnknownSessionError) {
           set.status = 404;
           return { code: "unknown_session", message: error.message };
@@ -75,6 +97,16 @@ export function createHttpRoutes(
         if (error instanceof UnregisteredRootError) {
           set.status = 400;
           return { code: "unregistered_root", message: error.message };
+        }
+
+        if (error instanceof SessionOwnershipError) {
+          set.status = error.code === "session_directory_unknown" ? 503 : 409;
+          return { code: error.code, message: error.message };
+        }
+
+        if (error instanceof BoardLifecycleError) {
+          set.status = error.code === "board_abort_failed" ? 504 : 409;
+          return { code: error.code, message: error.message };
         }
 
         return undefined;
@@ -111,12 +143,18 @@ export function createHttpRoutes(
         "/tasks/:sessionID/approve",
         async ({ params, body }) => {
           const result = await bridge.replyPermission({
-            directory: directoryFor(params.sessionID),
+            directory: await directoryFor(params.sessionID),
             requestID: body.requestID,
             sessionID: params.sessionID,
             reply: "once",
             message: body.message,
           });
+          if (result) {
+            await workspaceStore.resolvePendingApproval(
+              params.sessionID,
+              body.requestID
+            );
+          }
 
           return {
             sessionID: params.sessionID,
@@ -140,12 +178,18 @@ export function createHttpRoutes(
         "/tasks/:sessionID/reject",
         async ({ params, body }) => {
           const result = await bridge.replyPermission({
-            directory: directoryFor(params.sessionID),
+            directory: await directoryFor(params.sessionID),
             requestID: body.requestID,
             sessionID: params.sessionID,
             reply: "reject",
             message: body.message,
           });
+          if (result) {
+            await workspaceStore.resolvePendingApproval(
+              params.sessionID,
+              body.requestID
+            );
+          }
 
           return {
             sessionID: params.sessionID,
@@ -174,7 +218,7 @@ export function createHttpRoutes(
           });
 
           await bridge.promptSessionAsync({
-            directory: directoryFor(params.sessionID),
+            directory: await directoryFor(params.sessionID),
             sessionID: params.sessionID,
             text: `The plan has been reviewed and finalized. Here is the final plan:\n\n${body.plan}\n\n${body.questions && body.questions.length > 0 ? `Answers to your questions:\n${body.questions.map((q: { question: string; answer: string }) => `- ${q.question}: ${q.answer}`).join("\n")}\n\n` : ""}Please proceed with implementing this plan.`,
           });
@@ -208,7 +252,7 @@ export function createHttpRoutes(
         async ({ params }) => {
           const result = await bridge.abortSession(
             params.sessionID,
-            directoryFor(params.sessionID)
+            await directoryFor(params.sessionID)
           );
 
           return {
@@ -234,7 +278,7 @@ export function createHttpRoutes(
           // nothing. The engine lists per directory, so scoping by session is our
           // job.
           const questions = await bridge.listQuestions(
-            directoryFor(params.sessionID)
+            await directoryFor(params.sessionID)
           );
           return {
             questions: questions.filter(
@@ -254,10 +298,14 @@ export function createHttpRoutes(
         "/tasks/:sessionID/questions/:requestID/reply",
         async ({ params, body }) => {
           await bridge.replyQuestion({
-            directory: directoryFor(params.sessionID),
+            directory: await directoryFor(params.sessionID),
             requestID: params.requestID,
             answers: body.answers,
           });
+          await workspaceStore.resolvePendingApproval(
+            params.sessionID,
+            params.requestID
+          );
 
           return {
             sessionID: params.sessionID,
@@ -287,7 +335,11 @@ export function createHttpRoutes(
         async ({ params }) => {
           await bridge.rejectQuestion(
             params.requestID,
-            directoryFor(params.sessionID)
+            await directoryFor(params.sessionID)
+          );
+          await workspaceStore.resolvePendingApproval(
+            params.sessionID,
+            params.requestID
           );
 
           return {
@@ -309,7 +361,7 @@ export function createHttpRoutes(
         async ({ params, body }) => {
           if (body.mode === "soft") {
             await bridge.promptSession({
-              directory: directoryFor(params.sessionID),
+              directory: await directoryFor(params.sessionID),
               sessionID: params.sessionID,
               text: `Redirect instruction: ${body.text}`,
             });
@@ -321,7 +373,7 @@ export function createHttpRoutes(
             };
           }
 
-          const directory = directoryFor(params.sessionID);
+          const directory = await directoryFor(params.sessionID);
 
           const forked = await bridge.forkSession({
             sessionID: params.sessionID,
@@ -372,7 +424,7 @@ export function createHttpRoutes(
             logger.debug("Reverting session", { sessionID: params.sessionID });
             const result = await bridge.revertSession(
               params.sessionID,
-              directoryFor(params.sessionID)
+              await directoryFor(params.sessionID)
             );
             const duration = Date.now() - startTime;
             logger.info("Session reverted", {
@@ -418,7 +470,7 @@ export function createHttpRoutes(
             });
             await bridge.unrevertSession(
               params.sessionID,
-              directoryFor(params.sessionID)
+              await directoryFor(params.sessionID)
             );
             const duration = Date.now() - startTime;
             logger.info("Session unreverted", {
@@ -445,12 +497,28 @@ export function createHttpRoutes(
         }
       )
 
+      .get(
+        "/sessions/:sessionID/diff",
+        async ({ params }) => {
+          const directory = await directoryFor(params.sessionID);
+          const diffs = await bridge.sessionDiff(params.sessionID, directory);
+          return sessionFileDiffsSchema.parse(diffs);
+        },
+        {
+          params: t.Object({ sessionID: t.String() }),
+        }
+      )
+
       .post(
         "/snapshots/track",
         async ({ body }) => {
           try {
             const hash = await track(
-              resolveBoardDirectory(workspaceStore, body.directory)
+              await resolveBoardDirectory(
+                workspaceStore,
+                boardTasks,
+                body.directory
+              )
             );
             return { hash, timestamp: Date.now() };
           } catch (error) {
@@ -472,7 +540,11 @@ export function createHttpRoutes(
         async ({ body }) => {
           try {
             await restore(
-              resolveBoardDirectory(workspaceStore, body.directory),
+              await resolveBoardDirectory(
+                workspaceStore,
+                boardTasks,
+                body.directory
+              ),
               body.hash
             );
             return { success: true, timestamp: Date.now() };
@@ -497,7 +569,11 @@ export function createHttpRoutes(
         async ({ query }) => {
           try {
             const diff = await getDiff(
-              resolveBoardDirectory(workspaceStore, query.directory),
+              await resolveBoardDirectory(
+                workspaceStore,
+                boardTasks,
+                query.directory
+              ),
               query.fromHash
             );
             return { diff, timestamp: Date.now() };
@@ -539,7 +615,11 @@ export function createHttpRoutes(
         async ({ query }) => {
           try {
             const status = await getGitStatus(
-              resolveBoardDirectory(workspaceStore, query.directory)
+              await resolveBoardDirectory(
+                workspaceStore,
+                boardTasks,
+                query.directory
+              )
             );
             return { ...status, timestamp: Date.now() };
           } catch (error) {

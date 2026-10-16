@@ -4,6 +4,7 @@ import {
   boardViewModeSchema,
   columnsSchema,
   modelSelectionSchema,
+  pendingApprovalRequestSchema,
   reviewModeSchema,
   taskSchema,
   workspaceBoardSchema,
@@ -130,9 +131,16 @@ export const cardMovedEventSchema = boardScopedSchema.extend({
 
 export const cardWaitingForApprovalEventSchema = boardScopedSchema.extend({
   kind: approvalRequestKindSchema,
+  pendingApproval: pendingApprovalRequestSchema.optional(),
   requestId: z.string().min(1).optional(),
   taskId: z.string().min(1),
   type: z.literal("card.waiting_for_approval"),
+});
+
+export const cardApprovalResolvedEventSchema = boardScopedSchema.extend({
+  requestId: z.string().min(1),
+  taskId: z.string().min(1),
+  type: z.literal("card.approval_resolved"),
 });
 
 export const cardCompletedEventSchema = boardScopedSchema.extend({
@@ -240,6 +248,7 @@ export const workspaceEventSchema = z.discriminatedUnion("type", [
   cardStartedEventSchema,
   cardMovedEventSchema,
   cardWaitingForApprovalEventSchema,
+  cardApprovalResolvedEventSchema,
   cardCompletedEventSchema,
   cardFailedEventSchema,
   runStartedEventSchema,
@@ -276,6 +285,7 @@ export const BOARD_SCOPED_EVENT_TYPES = [
   "card.started",
   "card.moved",
   "card.waiting_for_approval",
+  "card.approval_resolved",
   "card.completed",
   "card.failed",
   "run.started",

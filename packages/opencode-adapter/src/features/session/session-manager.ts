@@ -4,9 +4,13 @@ import type {
   OpencodeClient,
   OutputFormat,
   Session,
+  SessionStatus,
   SubtaskPartInput,
   TextPartInput,
 } from "@opencode-ai/sdk/v2";
+import { normalizeSessionDiff } from "./session-diff";
+
+export type { SessionFileDiff } from "./session-diff";
 
 /**
  * Unwraps a generated-client response, keeping the failure legible.
@@ -147,6 +151,11 @@ export class SessionManager {
     return unwrap(result, "session.get");
   }
 
+  async status(directory?: string): Promise<Record<string, SessionStatus>> {
+    const result = await this.client.session.status({ directory });
+    return unwrap(result, "session.status");
+  }
+
   async list(options?: {
     directory?: string;
     roots?: boolean;
@@ -235,11 +244,6 @@ export class SessionManager {
     return unwrap(result, "session.fork");
   }
 
-  async status(directory?: string): Promise<Record<string, { type: string }>> {
-    const result = await this.client.session.status({ directory });
-    return result.data ?? {};
-  }
-
   async messages(
     sessionID: string,
     options?: { limit?: number; directory?: string }
@@ -250,6 +254,18 @@ export class SessionManager {
       directory: options?.directory,
     });
     return unwrap(result, "session.messages");
+  }
+
+  async diff(sessionID: string, directory?: string) {
+    const result = await this.client.session.diff({ sessionID, directory });
+    const entries = unwrap(result, "session.diff");
+    return normalizeSessionDiff(entries, async (path) => {
+      const content = unwrap(
+        await this.client.file.read({ path, directory }),
+        "file.read"
+      );
+      return { content: content.content, type: content.type };
+    });
   }
 
   async summarize(

@@ -975,7 +975,7 @@ function TaskCard({
     );
 
   return (
-    <KanbanItem disabled={!draggable} value={task.id}>
+    <KanbanItem data-task-id={task.id} disabled={!draggable} value={task.id}>
       {showOutput ? (
         <>
           {contentNode}

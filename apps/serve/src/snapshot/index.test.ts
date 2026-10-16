@@ -28,16 +28,27 @@ function snapshotDirFor(projectPath: string): string {
 
 beforeAll(() => {
   projectDir = mkdtempSync(join(tmpdir(), "chorus-snapshot-test-"));
-  execFileSync("git", ["init", "--initial-branch=main"], { cwd: projectDir });
+  execFileSync("git", ["init", "--initial-branch=main"], {
+    cwd: projectDir,
+    windowsHide: true,
+  });
   execFileSync("git", ["config", "user.email", "test@chorus.local"], {
     cwd: projectDir,
+    windowsHide: true,
   });
   execFileSync("git", ["config", "user.name", "Chorus Test"], {
     cwd: projectDir,
+    windowsHide: true,
   });
   writeFileSync(join(projectDir, "app.txt"), "original\n");
-  execFileSync("git", ["add", "-A"], { cwd: projectDir });
-  execFileSync("git", ["commit", "-m", "initial"], { cwd: projectDir });
+  execFileSync("git", ["add", "-A"], {
+    cwd: projectDir,
+    windowsHide: true,
+  });
+  execFileSync("git", ["commit", "-m", "initial"], {
+    cwd: projectDir,
+    windowsHide: true,
+  });
 });
 
 afterAll(() => {

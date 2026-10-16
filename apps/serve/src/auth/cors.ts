@@ -23,6 +23,12 @@ export interface CorsEnvironment {
   isProduction: boolean;
 }
 
+const DEFAULT_LOCAL_ORIGINS = [
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://[::1]:3000",
+];
+
 /** Parses the dev-only allowlist. Empty/blank entries are dropped. */
 export function parseAllowedOrigins(raw: string | undefined): string[] {
   if (!raw) {
@@ -53,12 +59,24 @@ export class CorsMisconfigurationError extends Error {
  */
 export function resolveCorsPolicy(env: CorsEnvironment): CorsPolicy {
   const parsed = parseAllowedOrigins(env.corsAllowedOrigins);
+  let allowedOrigins = parsed;
 
   if (env.isProduction && parsed.length > 0) {
     throw new CorsMisconfigurationError();
   }
 
-  return { allowedOrigins: parsed, isProduction: env.isProduction };
+  if (
+    parsed.length === 0 &&
+    env.corsAllowedOrigins === undefined &&
+    !env.isProduction
+  ) {
+    allowedOrigins = DEFAULT_LOCAL_ORIGINS;
+  }
+
+  return {
+    allowedOrigins,
+    isProduction: env.isProduction,
+  };
 }
 
 /**

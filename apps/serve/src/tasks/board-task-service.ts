@@ -3,12 +3,14 @@ import type {
   QueueBoardPromptInput,
   QueueBoardPromptResponse,
   WorkspaceBoard,
+  WorkspaceMutation,
 } from "@chorus/contracts";
 import { queueBoardPromptInputSchema } from "@chorus/contracts";
 import { createLogger } from "@chorus/logger";
 import type { OpenCodeBridge } from "../bridge/opencode/bridge";
 import { resolveInside, SandboxEscapeError } from "../paths/sandbox";
-import type { WorkspaceStore } from "../workspace/store";
+import type { RepositoryRegistry } from "../projects/repository-registry";
+import type { StoreCommit, WorkspaceStore } from "../workspace/store";
 import {
   type BoardSessionRecord,
   BoardSessionRegistry,
@@ -20,6 +22,28 @@ const logger = createLogger(
   { env: process.env.NODE_ENV === "production" ? "production" : "development" },
   "SERVE:TASKS"
 );
+
+export class SessionOwnershipError extends Error {
+  readonly code: "session_ownership_conflict" | "session_directory_unknown";
+
+  constructor(code: SessionOwnershipError["code"], message: string) {
+    super(message);
+    this.name = "SessionOwnershipError";
+    this.code = code;
+  }
+}
+
+export class BoardLifecycleError extends Error {
+  readonly code: "board_closing" | "board_abort_failed";
+
+  constructor(code: BoardLifecycleError["code"], message: string) {
+    super(message);
+    this.name = "BoardLifecycleError";
+    this.code = code;
+  }
+}
+
+const BOARD_ABORT_TIMEOUT_MS = 5000;
 
 type SdkPart =
   | { text: string; type: "text" }
@@ -138,17 +162,23 @@ export class BoardTaskService {
   readonly #registry: BoardSessionRegistry;
   readonly #workspaceStore: WorkspaceStore;
   readonly #watchdog: SessionWatchdog | null;
+  readonly #boardOperations = new Map<string, Promise<void>>();
+  readonly #removals = new Map<string, Promise<StoreCommit | null>>();
+  readonly #closingBoards = new Set<string>();
+  readonly #repositoryRegistry: RepositoryRegistry | undefined;
 
   constructor(
     bridge: OpenCodeBridge,
     workspaceStore: WorkspaceStore,
     registry = new BoardSessionRegistry(),
-    watchdog: SessionWatchdog | null = null
+    watchdog: SessionWatchdog | null = null,
+    repositoryRegistry?: RepositoryRegistry
   ) {
     this.#bridge = bridge;
     this.#workspaceStore = workspaceStore;
     this.#registry = registry;
     this.#watchdog = watchdog;
+    this.#repositoryRegistry = repositoryRegistry;
   }
 
   get registry() {
@@ -157,6 +187,148 @@ export class BoardTaskService {
 
   getWorkspaceSnapshot() {
     return this.#workspaceStore.getSnapshot();
+  }
+
+  assertBoardOpen(boardId: string): void {
+    if (this.#closingBoards.has(boardId)) {
+      throw new BoardLifecycleError(
+        "board_closing",
+        "this board is closing and cannot accept commands"
+      );
+    }
+  }
+
+  async assertCheckoutAuthorized(directory: string): Promise<void> {
+    await this.#repositoryRegistry?.validateAuthorizedCheckout(directory);
+  }
+
+  async removeBoard(
+    mutation: Extract<WorkspaceMutation, { type: "board.remove" }>
+  ): Promise<StoreCommit | null> {
+    const boardId = mutation.payload.boardId;
+    const existing = this.#removals.get(boardId);
+    if (existing) {
+      return existing;
+    }
+    this.assertBoardOpen(boardId);
+    this.#closingBoards.add(boardId);
+    const removal = this.#withBoardOperation(boardId, async () => {
+      const board = this.#workspaceStore.getBoard(boardId);
+      if (!board) {
+        return this.#workspaceStore.applyMutation(mutation);
+      }
+      const sessionId = board.session.sessionId;
+      if (sessionId && board.session.state === "active") {
+        const directory = boardDirectory(board);
+        const stoppedByAbort = await this.#abortSessionForRemoval(
+          sessionId,
+          directory
+        );
+        if (stoppedByAbort) {
+          this.#watchdog?.stop(sessionId);
+          await this.#workspaceStore.updateBoardSession(boardId, {
+            errorMessage:
+              "The agent was stopped for board removal; this checkout was retained if removal could not finish.",
+            state: "error",
+          });
+        }
+      }
+      return this.#workspaceStore.applyMutation(mutation);
+    });
+    this.#removals.set(boardId, removal);
+    try {
+      return await removal;
+    } finally {
+      if (this.#removals.get(boardId) === removal) {
+        this.#removals.delete(boardId);
+        this.#closingBoards.delete(boardId);
+      }
+    }
+  }
+
+  async #abortSessionForRemoval(
+    sessionId: string,
+    directory: string
+  ): Promise<boolean> {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(
+        () =>
+          reject(
+            new BoardLifecycleError(
+              "board_abort_failed",
+              "the agent did not confirm an abort before the timeout; the board was kept"
+            )
+          ),
+        BOARD_ABORT_TIMEOUT_MS
+      );
+    });
+
+    try {
+      if (await this.#bridge.waitForSessionIdle(sessionId, directory, 0)) {
+        return false;
+      }
+
+      const aborted = await Promise.race([
+        this.#bridge.abortSession(sessionId, directory),
+        timeout,
+      ]);
+      if (!aborted) {
+        throw new BoardLifecycleError(
+          "board_abort_failed",
+          "the agent did not confirm an abort; the board was kept"
+        );
+      }
+
+      const isIdle = await Promise.race([
+        this.#bridge.waitForSessionIdle(
+          sessionId,
+          directory,
+          BOARD_ABORT_TIMEOUT_MS
+        ),
+        timeout,
+      ]);
+      if (!isIdle) {
+        throw new BoardLifecycleError(
+          "board_abort_failed",
+          "the agent did not confirm an abort; the board was kept"
+        );
+      }
+      return true;
+    } catch (error) {
+      if (error instanceof BoardLifecycleError) {
+        throw error;
+      }
+      throw new BoardLifecycleError(
+        "board_abort_failed",
+        "the engine could not confirm an abort; the board was kept"
+      );
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
+  }
+
+  async #withBoardOperation<T>(
+    boardId: string,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    const previous = this.#boardOperations.get(boardId) ?? Promise.resolve();
+    let release: () => void = () => undefined;
+    const current = new Promise<void>((resolvePromise) => {
+      release = resolvePromise;
+    });
+    this.#boardOperations.set(boardId, current);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.#boardOperations.get(boardId) === current) {
+        this.#boardOperations.delete(boardId);
+      }
+    }
   }
 
   /**
@@ -265,12 +437,11 @@ export class BoardTaskService {
 
     try {
       // Queried *without* the target directory. Passing it would scope the lookup
-      // to the very checkout we are trying to validate, so a session that actually
-      // belongs elsewhere comes back not-found, the catch yields "unknown", and
-      // the wrong-checkout session is reused — failing open in exactly the
-      // post-restart case this check exists for.
+      // to the very checkout we are trying to validate, so an unrelated session
+      // cannot appear valid just because the request supplied the target path.
       const session = await this.#bridge.getSession({
         sessionID: candidate,
+        engineDirectory: input.directory,
       });
       return session.directory ?? null;
     } catch {
@@ -291,21 +462,28 @@ export class BoardTaskService {
     input: QueueBoardPromptInput;
     persistedBoard: WorkspaceBoard | undefined;
   }): Promise<{ createdSession: boolean; sessionId: string }> {
-    const candidate =
-      input.sessionId ??
-      existing?.sessionId ??
-      persistedBoard?.session.sessionId;
+    const boundSessionId =
+      existing?.sessionId ?? persistedBoard?.session.sessionId;
+    if (input.sessionId && input.sessionId !== boundSessionId) {
+      throw new SessionOwnershipError(
+        "session_ownership_conflict",
+        "the supplied session is not bound to this board"
+      );
+    }
 
-    const candidateDirectory = await this.#candidateDirectory({
-      candidate,
-      existing,
-      input,
-    });
+    const candidate = boundSessionId;
+    const candidateDirectory = candidate
+      ? await this.#candidateDirectory({ candidate, existing, input })
+      : null;
 
-    // Only a *known* mismatch forks. `candidateDirectory === null` means the
-    // directory could not be established at all, and treating that as "different"
-    // would fork a session that was in the right place every time the engine was
-    // briefly unreachable.
+    if (candidate && candidateDirectory === null) {
+      throw new SessionOwnershipError(
+        "session_directory_unknown",
+        "the engine could not verify this board's session directory; retry when the engine is available"
+      );
+    }
+
+    // A known mismatch is only forked after the current board binding is proven.
     if (
       candidate &&
       candidateDirectory !== null &&
@@ -365,10 +543,20 @@ export class BoardTaskService {
     return { createdSession: true, sessionId: session.id };
   }
 
-  async queuePrompt(
+  queuePrompt(
     rawInput: QueueBoardPromptInput
   ): Promise<QueueBoardPromptResponse> {
     const parsed = queueBoardPromptInputSchema.parse(rawInput);
+    this.assertBoardOpen(parsed.boardId);
+    return this.#withBoardOperation(parsed.boardId, () => {
+      this.assertBoardOpen(parsed.boardId);
+      return this.#queuePromptParsed(parsed);
+    });
+  }
+
+  async #queuePromptParsed(
+    parsed: QueueBoardPromptInput
+  ): Promise<QueueBoardPromptResponse> {
     const existing = this.#registry.get(parsed.boardId);
     const persistedBoard = this.#workspaceStore.getBoard(parsed.boardId);
 
@@ -392,6 +580,7 @@ export class BoardTaskService {
     // One resolver with the follow-up command paths, so a board's checkout is
     // computed the same way everywhere (session-directory.ts).
     const directory = boardDirectory(persistedBoard);
+    await this.assertCheckoutAuthorized(directory);
 
     const input: QueueBoardPromptInput = { ...parsed, directory };
 
@@ -403,7 +592,6 @@ export class BoardTaskService {
         ? `${input.model.providerID}/${input.model.modelID}`
         : undefined,
       reviewMode: input.reviewMode,
-      textPreview: input.text.slice(0, 100),
     });
 
     await this.#bridge.subscribeDirectory(input.directory);
