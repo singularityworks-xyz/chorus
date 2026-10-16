@@ -4,10 +4,9 @@ import {
   MAX_REPOSITORY_FILES,
   portableRepositoryPathSchema,
   type RepositoryCheckpoint,
-  sha256Schema,
 } from "@chorus/contracts";
 import { ensurePrivateHostDirectory } from "../private-directory";
-import { RepositoryContent } from "./content";
+import type { RepositoryContent } from "./content";
 import { syncDirectory } from "./durability";
 import {
   gitText,
@@ -15,6 +14,7 @@ import {
   readGitIndex,
   transferGit,
 } from "./git";
+import { verifiedCheckpoint } from "./verified-checkpoint";
 
 /** Verifies every payload before creating a new private, inactive checkout. */
 export async function stageRepository(
@@ -22,36 +22,14 @@ export async function stageRepository(
   expectedDigest: string,
   stagingParent: string
 ): Promise<string> {
-  sha256Schema.parse(expectedDigest);
-  const content = await RepositoryContent.open(checkpointDirectory);
-  const { checkpoint, digest } = await content.manifest();
-  if (digest !== expectedDigest) {
-    throw new RepositoryTransferError("checkpoint_invalid");
-  }
-  const verified = new Map<string, string>();
-  for (const reference of [
-    checkpoint.staged,
-    ...(checkpoint.history ? [checkpoint.history] : []),
-    ...checkpoint.files.map((file) => file.content),
-  ]) {
-    if (!verified.has(reference.digest)) {
-      verified.set(reference.digest, await content.path(reference));
-    }
-  }
+  const { content, checkpoint } = await verifiedCheckpoint(
+    checkpointDirectory,
+    expectedDigest
+  );
   const parent = await ensurePrivateHostDirectory(stagingParent);
   const directory = await mkdtemp(join(parent, "repository-"));
   try {
-    await restoreGitState(directory, checkpoint, content);
-    const index = await readGitIndex(directory, true);
-    if (
-      process.platform === "win32" &&
-      checkpoint.files.some(
-        (file) => file.mode !== (index.get(file.path) ?? "100644")
-      )
-    ) {
-      throw new RepositoryTransferError("target_incompatible");
-    }
-    await restoreWorkingFiles(directory, checkpoint, content);
+    await restoreCheckpoint(directory, checkpoint, content);
     await syncDirectory(join(directory, ".git"));
     await syncDirectory(directory);
     await syncDirectory(parent);
@@ -65,30 +43,53 @@ export async function stageRepository(
   }
 }
 
+/** Internal seam: the caller owns a new repository or an empty linked worktree. */
+export async function restoreCheckpoint(
+  directory: string,
+  checkpoint: RepositoryCheckpoint,
+  content: RepositoryContent,
+  linkedWorktree = false
+): Promise<void> {
+  await restoreGitState(directory, checkpoint, content, linkedWorktree);
+  const index = await readGitIndex(directory, true);
+  if (
+    process.platform === "win32" &&
+    checkpoint.files.some(
+      (file) => file.mode !== (index.get(file.path) ?? "100644")
+    )
+  ) {
+    throw new RepositoryTransferError("target_incompatible");
+  }
+  await restoreWorkingFiles(directory, checkpoint, content);
+}
+
 async function restoreGitState(
   directory: string,
   checkpoint: RepositoryCheckpoint,
-  content: RepositoryContent
+  content: RepositoryContent,
+  linkedWorktree: boolean
 ): Promise<void> {
-  await transferGit(
-    directory,
-    [
-      "init",
-      "--quiet",
-      "--template=",
-      `--object-format=${checkpoint.objectFormat}`,
-    ],
-    { importing: true }
-  );
-  await transferGit(directory, ["config", "core.autocrlf", "false"], {
-    importing: true,
-  });
-  if (process.platform === "win32") {
-    await transferGit(directory, ["config", "core.longpaths", "true"], {
+  if (!linkedWorktree) {
+    await transferGit(
+      directory,
+      [
+        "init",
+        "--quiet",
+        "--template=",
+        `--object-format=${checkpoint.objectFormat}`,
+      ],
+      { importing: true }
+    );
+    await transferGit(directory, ["config", "core.autocrlf", "false"], {
       importing: true,
     });
+    if (process.platform === "win32") {
+      await transferGit(directory, ["config", "core.longpaths", "true"], {
+        importing: true,
+      });
+    }
   }
-  if (checkpoint.history) {
+  if (checkpoint.history && !linkedWorktree) {
     const history = await content.path(checkpoint.history);
     await transferGit(directory, ["bundle", "verify", history], {
       importing: true,
@@ -100,7 +101,7 @@ async function restoreGitState(
       importing: true,
     });
   }
-  if (checkpoint.refs.length) {
+  if (!linkedWorktree && checkpoint.refs.length) {
     await transferGit(directory, ["update-ref", "--stdin"], {
       importing: true,
       input: checkpoint.refs

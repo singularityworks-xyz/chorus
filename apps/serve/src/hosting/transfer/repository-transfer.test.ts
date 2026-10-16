@@ -63,13 +63,29 @@ async function clean(root: string) {
 }
 
 describe("portable repository checkpoints", () => {
-  test("rejects external object stores before creating a checkpoint", async () => {
+  test("rejects external object stores, grafts and partial clones before creating a checkpoint", async () => {
     const files = await fixture();
     try {
       await writeFile(
         join(files.repo, ".git", "objects", "info", "alternates"),
         "../external\n"
       );
+      await expect(
+        captureRepository(files.repo, files.checkpoint)
+      ).rejects.toThrow("repository_not_ready");
+      expect(existsSync(files.checkpoint)).toBe(false);
+      await rm(join(files.repo, ".git", "objects", "info", "alternates"));
+      await mkdir(join(files.repo, ".git", "info"), { recursive: true });
+      await writeFile(join(files.repo, ".git", "info", "grafts"), "");
+      await expect(
+        captureRepository(files.repo, files.checkpoint)
+      ).rejects.toThrow("repository_not_ready");
+      await rm(join(files.repo, ".git", "info", "grafts"));
+      await transferGit(files.repo, [
+        "config",
+        "remote.origin.promisor",
+        "true",
+      ]);
       await expect(
         captureRepository(files.repo, files.checkpoint)
       ).rejects.toThrow("repository_not_ready");

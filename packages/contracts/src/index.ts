@@ -25,4 +25,5 @@ export * from "./projector";
 export * from "./protocol";
 export * from "./relay";
 export * from "./repository-transfer";
+export * from "./review-transfer";
 export * from "./session-diff";

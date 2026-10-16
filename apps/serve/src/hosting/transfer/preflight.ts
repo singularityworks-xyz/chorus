@@ -22,13 +22,24 @@ export async function preflight(root: string) {
   if (relative(root, top) !== "") {
     throw new RepositoryTransferError("repository_not_ready");
   }
-  const alternates = await gitText(root, [
-    "rev-parse",
-    "--git-path",
-    "objects/info/alternates",
-  ]);
-  if (existsSync(resolve(root, alternates))) {
+  const partial = await gitText(
+    root,
+    [
+      "config",
+      "--name-only",
+      "--get-regexp",
+      "^(extensions\\.partialclone|remote\\..*\\.promisor)$",
+    ],
+    { allowFailure: true }
+  );
+  if (partial) {
     throw new RepositoryTransferError("repository_not_ready");
+  }
+  for (const metadata of ["objects/info/alternates", "info/grafts"]) {
+    const path = await gitText(root, ["rev-parse", "--git-path", metadata]);
+    if (existsSync(resolve(root, path))) {
+      throw new RepositoryTransferError("repository_not_ready");
+    }
   }
   const modes = await readGitIndex(root);
   // Capture avoids `git status` and external filters. Repositories requiring

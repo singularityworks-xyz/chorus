@@ -58,7 +58,7 @@ public deployment.
 | Relay accounts | Google/GitHub configuration, Turnstile, secure host cookies, approved enrollment, scoped machine grants, PostgreSQL metadata/quota transactions, account portal | Real provider callbacks, PostgreSQL concurrency/rollback tests and operational cleanup |
 | Host authentication | Persistent hashed per-browser sessions, ten-device limit, in-app revocation, WS/push revocation checks, protected production cookies, encrypted internal signing root for managed local entry | Browser/mobile acceptance and packaged first launch |
 | Remote connections | frp authorization policy/plugin, SNI passthrough config, local host TLS config, verified native binary manifest, hidden child processes, bounded restart/shutdown, HTTPS readiness probe, settings enrollment/pause/resume; pinned native config checks pass | Release pipeline supplying reviewed native artifacts, actual frp protocol integration, certificates/renewals and reconnect/revocation under load |
-| Workspace move | Encrypted host identity, local signed ownership journal, bounded repository checkpoints and verified import into fresh inactive staging; preparation, fencing, release, activation and return-generation tests | Whole-workspace/worktree/review transfer, execution barriers, authenticated host pairing/transport, linked agent continuation, recovery UI and browser host switching |
+| Workspace move | Encrypted host identity, local signed ownership journal, bounded repository/worktree checkpoints, review object packs and verified import into fresh inactive staging; preparation, fencing, release, activation and return-generation tests | Whole-workspace projection/path remapping, review-root discovery/installation, execution barriers, authenticated host pairing/transport, linked agent continuation, recovery UI and browser host switching |
 | Release security | Strict endpoint pinning, purpose-separated encrypted credentials/signatures, negative authorization tests and dependency failure handling | ASVS L2 assessment, independent review, certificate capacity, Linux container/browser CI, phone acceptance and 100-host load qualification |
 
 Runtime remote access is optional and defaults to unconfigured. It refuses to
@@ -124,7 +124,7 @@ and packaged launcher acceptance remain required.
 
 Committed checkpoints: `187459c` (hidden check/version helpers), `4b7a53d` (relay
 control plane and packaging), `1812990` (host/device access foundation),
-`7ce1c95` (private production local entry).
+`7ce1c95` (private production local entry), `2cc19fd` (repository checkpoints).
 
 ### Next delivery order
 
@@ -138,7 +138,7 @@ Preflight rejects incomplete history, merge conflicts, special index flags,
 symlinks/submodules, unsafe/nonportable names and configured size limits.
 Ignored untracked files follow the source's Git ignore policy; Chorus-owned
 control/worktree folders are excluded. This increment does not activate a host
-or replace the workspace snapshot/review transfer and execution barrier work.
+or replace the whole-workspace projection and execution barrier work.
 
 Repository staging tests exercise actual hidden Git processes, full/unborn/
 detached history, staged and unstaged binary/text changes, deletions, ignored
@@ -154,6 +154,25 @@ endpoint and cannot start engines or change workspace ownership.
 `bun test ./apps/serve/src/hosting/transfer/repository-transfer.test.ts
 ./packages/contracts/src/repository-transfer.test.ts`: **13 pass, 0 fail,
 82 assertions**. `bun run check` and all nine `check-types` packages pass.
+
+The worktree/review follow-up restores real linked Git worktrees under the fresh
+repository's `.chorus-worktrees/<boardId>`, preserving their own staged/working
+changes and detached history. Conflicting branches, names and mismatched shared
+refs fail preflight. The family is limited to 100 linked worktrees and 1 GiB of
+declared checkpoint bytes; failed restoration removes only that fresh family.
+Explicit review tree roots are packed with their reachable objects, verified and
+staged in a fresh bare store. Source config, unrelated objects and snapshot
+indexes stay private. Tree paths, modes, counts and content sizes are checked on
+both sides. Review-root discovery and installation for remapped paths still need
+whole-workspace integration; these primitives do not expose a handoff endpoint.
+
+Transfer Git children disable hooks, filesystem monitors, replacement objects,
+lazy fetching and remote protocols. Partial clones, alternates and grafts fail
+preflight. This keeps checkpointing from launching network credential helpers.
+The environment controls follow the [official Git documentation](https://git-scm.com/docs/git).
+
+The combined repository/worktree/review test selection passes **22 tests,
+121 assertions across five files**. Lint/log gates and all nine type checks pass.
 
 1. Qualify the real central/PostgreSQL/frp deployment and install reviewed native
    binaries in a Linux CI environment. Qualify the packaged local-first launcher
