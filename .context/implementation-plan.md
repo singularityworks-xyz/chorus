@@ -6,7 +6,7 @@
 > Last reviewed: 2026-10 (amendment pass: Phase 0 added, RCE hotfix pulled forward,
 > SDK upgrade mandated, per-phase deliverables + unit/integration tests, voice/auth clarified).
 > Remaining Phase 6 and Phase 7 execution detail: [phase-6-7-completion-plan.md](./phase-6-7-completion-plan.md).
-> UX improvement workstream: [ux-flow-plan.md](./ux-flow-plan.md) (local-first access and device pairing are implemented; browser acceptance remains deferred; VPS execution handoff is out of scope).
+> UX improvement workstream: [ux-flow-plan.md](./ux-flow-plan.md) (local-first access and device pairing are implemented; browser acceptance remains deferred). Remote relay and VPS handoff now follow [remote-hosting-plan.md](./remote-hosting-plan.md), approved 2026-10-16; its standalone production frontend supersedes Phase 8's static-export assumption.
 
 ---
 

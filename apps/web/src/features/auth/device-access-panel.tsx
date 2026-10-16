@@ -3,6 +3,8 @@
 import { devicePairingTokenResponseSchema } from "@chorus/contracts";
 import { CopyIcon, KeyRoundIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+import { PairedDevices } from "./paired-devices";
+import { RemoteAccessPanel } from "./remote-access-panel";
 
 interface ActivePairingToken {
   expiresAt: number;
@@ -109,6 +111,7 @@ export function DeviceAccessPanel() {
 
   return (
     <section aria-label="Device access" className="space-y-3 px-1 py-3">
+      <RemoteAccessPanel />
       <div className="flex items-start gap-2.5">
         <span className="flex size-8 shrink-0 items-center justify-center border border-white/8 bg-white/[0.03] text-white/65">
           <KeyRoundIcon className="size-3.5" />
@@ -167,6 +170,7 @@ export function DeviceAccessPanel() {
         Codes work once and expire after five minutes. Closing this panel hides
         the code here; generate a new one to replace it.
       </p>
+      <PairedDevices />
     </section>
   );
 }

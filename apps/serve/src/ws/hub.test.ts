@@ -337,6 +337,25 @@ describe("resume handshake", () => {
 });
 
 describe("authenticated device presence", () => {
+  test("expired or revoked device state blocks the next outbound frame", async () => {
+    const store = makeStore();
+    let allowed = true;
+    const hub = new WorkspaceHub(store, { isDeviceAllowed: () => allowed });
+    const socket = makeSocket();
+    hub.register(socket, "d".repeat(32));
+    await hub.handleRawMessage(
+      socket,
+      JSON.stringify({ type: "hello", since: 0 })
+    );
+    const delivered = socket.sent.length;
+    expect(delivered).toBeGreaterThan(0);
+    allowed = false;
+    await hub.handleRawMessage(socket, JSON.stringify({ type: "resync" }));
+    expect(socket.sent).toHaveLength(delivered);
+    expect(socket.closeCalls[0]?.code).toBe(4401);
+    expect(hub.clientCount()).toBe(0);
+    hub.close();
+  });
   test("only ready, healthy sockets suppress push and multiple tabs are counted independently", async () => {
     const store = makeStore();
     const hub = new WorkspaceHub(store, { pingIntervalMs: 1000 });

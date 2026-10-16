@@ -176,6 +176,22 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 describe("PushDispatcher", () => {
+  test("revoked device state prevents delivery even if subscription cleanup failed", async () => {
+    const active = createHarness();
+    const revoked = createHarness({
+      overrides: { isDeviceAllowed: () => false },
+    });
+    try {
+      await waitFor(() => active.fetcher.mock.calls.length === 1);
+      expect(active.fetcher).toHaveBeenCalledTimes(1);
+      expect(revoked.store.listPushSubscriptions()).toHaveLength(1);
+      expect(revoked.fetcher).not.toHaveBeenCalled();
+      expect(revoked.buildRequest).not.toHaveBeenCalled();
+    } finally {
+      active.dispatcher.stop();
+      revoked.dispatcher.stop();
+    }
+  });
   test("retries transient provider failures only within the attempt budget", async () => {
     for (const status of [429, 500]) {
       const harness = createHarness({ status });

@@ -1,4 +1,5 @@
-import { cookies } from "next/headers";
+import { cookies, headers as requestHeaders } from "next/headers";
+import { mutationOriginMatches } from "./request-origin";
 
 /**
  * Server-side proxy to the Chorus serve process.
@@ -71,6 +72,9 @@ export async function proxyChorusJson(
   pathname: string,
   init: RequestInit = {}
 ): Promise<Response> {
+  if (!(await permittedMutationOrigin(init.method ?? "GET"))) {
+    return Response.json({ code: "origin_rejected" }, { status: 403 });
+  }
   const url = createUrl(pathname);
 
   try {
@@ -126,6 +130,24 @@ export async function proxyChorusJson(
       }
     );
   }
+}
+
+async function permittedMutationOrigin(method: string): Promise<boolean> {
+  if (["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase())) {
+    return true;
+  }
+  let inbound: Awaited<ReturnType<typeof requestHeaders>>;
+  try {
+    inbound = await requestHeaders();
+  } catch {
+    return true;
+  } // No HTTP request scope: trusted server-side invocation.
+  const origin = inbound.get("origin");
+  const host = inbound.get("host");
+  const protocol =
+    inbound.get("x-forwarded-proto") ??
+    (process.env.NODE_ENV === "production" ? "https" : "http");
+  return mutationOriginMatches(origin, host, protocol);
 }
 
 /** True when a proxied response is a session rejection rather than a real error. */

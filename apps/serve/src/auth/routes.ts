@@ -9,13 +9,14 @@ import { canCreateLocalSession } from "./local-access";
 import type { DevicePairingTokenStore } from "./pairing";
 import {
   buildClearedCookieHeader,
-  buildSessionCookieHeader,
   issueSessionCookie,
   readSessionCookie,
   SESSION_TTL_SECONDS,
   timingSafeEqualStrings,
   verifySessionCookie,
 } from "./session";
+import { sessionHeaders } from "./session-headers";
+import { DeviceLimitError, type SessionRegistry } from "./session-registry";
 import { issueTicket, type TicketStore } from "./ticket";
 
 /**
@@ -35,6 +36,7 @@ export interface AuthRouteOptions {
   onLogoutDevice?: (deviceId: string) => Promise<void>;
   pairingTokenStore: DevicePairingTokenStore;
   rateLimiter?: LoginRateLimiter;
+  sessionRegistry?: SessionRegistry;
   ticketStore: TicketStore;
   token: string;
 }
@@ -68,8 +70,19 @@ function unauthorized(): Response {
 export function createAuthRoutes(options: AuthRouteOptions) {
   const now = options.now ?? Date.now;
   const limiter = options.rateLimiter ?? new LoginRateLimiter({ now });
+  const sessionOptions = {
+    now,
+    token: options.token,
+    registry: options.sessionRegistry,
+  };
 
   return new Elysia()
+    .onError(({ error, set }) => {
+      if (error instanceof DeviceLimitError) {
+        set.status = 409;
+        return { code: "device_limit_reached", message: error.message };
+      }
+    })
     .post("/auth/local-session", async ({ request, set, server }) => {
       set.headers["cache-control"] = "no-store";
 
@@ -88,19 +101,19 @@ export function createAuthRoutes(options: AuthRouteOptions) {
 
       const existing = await verifySessionCookie(
         readSessionCookie(request.headers.get("cookie")),
-        { now, token: options.token }
+        sessionOptions
       );
       if (existing.ok) {
         return { authenticated: true, expiresAt: existing.expiresAt };
       }
 
       const session = await issueSessionCookie(
-        { now, token: options.token },
+        sessionOptions,
         SESSION_TTL_SECONDS
       );
-      set.headers["set-cookie"] = buildSessionCookieHeader(
-        session.cookie,
-        session.expiresAt,
+      set.headers["set-cookie"] = await sessionHeaders(
+        session,
+        options.token,
         options.isProduction
       );
       return { authenticated: true, expiresAt: session.expiresAt };
@@ -110,7 +123,7 @@ export function createAuthRoutes(options: AuthRouteOptions) {
       set.headers["cache-control"] = "no-store";
       const session = await verifySessionCookie(
         readSessionCookie(request.headers.get("cookie")),
-        { now, token: options.token }
+        sessionOptions
       );
       if (!session.ok) {
         set.status = 401;
@@ -155,13 +168,13 @@ export function createAuthRoutes(options: AuthRouteOptions) {
         limiter.reset(key);
 
         const session = await issueSessionCookie(
-          { now, token: options.token },
+          sessionOptions,
           SESSION_TTL_SECONDS
         );
 
-        set.headers["set-cookie"] = buildSessionCookieHeader(
-          session.cookie,
-          session.expiresAt,
+        set.headers["set-cookie"] = await sessionHeaders(
+          session,
+          options.token,
           options.isProduction
         );
 
@@ -176,13 +189,24 @@ export function createAuthRoutes(options: AuthRouteOptions) {
     )
 
     .post("/auth/logout", async ({ request, set }) => {
+      const session = await verifySessionCookie(
+        readSessionCookie(request.headers.get("cookie")),
+        sessionOptions
+      );
       const device = await deviceIdFromHeader(
         request.headers.get("cookie"),
         options.token
       );
-      if (device.ok && options.onLogoutDevice) {
+      let deviceId = device.ok ? device.deviceId : undefined;
+      if (options.sessionRegistry) {
+        deviceId = session.ok ? session.deviceId : undefined;
+      }
+      if (deviceId && options.sessionRegistry) {
+        options.sessionRegistry.revokeDevice(deviceId);
+      }
+      if (deviceId && options.onLogoutDevice) {
         try {
-          await options.onLogoutDevice(device.deviceId);
+          await options.onLogoutDevice(deviceId);
         } catch {
           set.status = 503;
           set.headers["set-cookie"] = buildClearedCookieHeader(
@@ -203,7 +227,7 @@ export function createAuthRoutes(options: AuthRouteOptions) {
     .post("/auth/device", async ({ request, set }) => {
       const session = await verifySessionCookie(
         readSessionCookie(request.headers.get("cookie")),
-        { token: options.token }
+        sessionOptions
       );
       if (!session.ok) {
         set.status = 401;
@@ -214,11 +238,14 @@ export function createAuthRoutes(options: AuthRouteOptions) {
         request.headers.get("cookie"),
         options.token
       );
-      if (existing.ok) {
+      if (
+        existing.ok &&
+        (!session.deviceId || session.deviceId === existing.deviceId)
+      ) {
         return { deviceId: existing.deviceId };
       }
 
-      const cookie = await issueDeviceCookie(options.token);
+      const cookie = await issueDeviceCookie(options.token, session.deviceId);
       const deviceId = cookie.split(".")[1];
       if (!deviceId) {
         set.status = 500;
@@ -232,11 +259,19 @@ export function createAuthRoutes(options: AuthRouteOptions) {
     })
 
     .get("/auth/ws-ticket", async ({ request, set }) => {
+      const session = await verifySessionCookie(
+        readSessionCookie(request.headers.get("cookie")),
+        sessionOptions
+      );
       const device = await deviceIdFromHeader(
         request.headers.get("cookie"),
         options.token
       );
-      if (!device.ok) {
+      if (
+        !device.ok ||
+        (options.sessionRegistry &&
+          (!session.ok || session.deviceId !== device.deviceId))
+      ) {
         set.status = 401;
         set.headers["cache-control"] = "no-store";
         return { code: "device_identity_required" };

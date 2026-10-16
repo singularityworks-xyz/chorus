@@ -1,6 +1,7 @@
 import { status } from "elysia";
 import { deviceIdFromHeader } from "./device";
 import { readSessionCookie, verifySessionCookie } from "./session";
+import type { SessionRegistry } from "./session-registry";
 import { consumeTicketIdentity, type TicketOptions } from "./ticket";
 
 /**
@@ -110,6 +111,8 @@ export function unauthorizedResponse(): Response {
 export async function verifyRequestCredential(
   request: Request,
   options: {
+    sessionRegistry?: SessionRegistry;
+    allowTicket?: boolean;
     requireDevice?: boolean;
     ticketOptions: TicketOptions;
     token: string;
@@ -122,7 +125,10 @@ export async function verifyRequestCredential(
   // upgrades. Consume and verify it even when a session cookie is also present;
   // otherwise a ticket bound to another device could be ignored in favor of the
   // cookie and appear to have authenticated successfully.
-  if (new URL(request.url).searchParams.has("ticket")) {
+  if (
+    options.allowTicket !== false &&
+    new URL(request.url).searchParams.has("ticket")
+  ) {
     const ticketResult = consumeRequestTicket(
       request,
       await deviceIdFromHeader(request.headers.get("cookie"), options.token),
@@ -155,6 +161,7 @@ export async function verifyRequestCredential(
 
 interface CredentialOptions {
   requireDevice?: boolean;
+  sessionRegistry?: SessionRegistry;
   ticketOptions: TicketOptions;
   token: string;
 }
@@ -164,15 +171,20 @@ async function verifySessionCredential(
   device: Awaited<ReturnType<typeof deviceIdFromHeader>>,
   options: CredentialOptions
 ) {
-  const session = await verifySessionCookie(cookie, { token: options.token });
+  const session = await verifySessionCookie(cookie, {
+    token: options.token,
+    registry: options.sessionRegistry,
+  });
   if (!session.ok) {
     return null;
   }
-  if (options.requireDevice && !device.ok) {
+  const deviceId =
+    session.deviceId ?? (device.ok ? device.deviceId : undefined);
+  if (options.requireDevice && !deviceId) {
     return { ok: false as const, reason: "device identity missing or invalid" };
   }
   return {
-    ...(device.ok ? { deviceId: device.deviceId } : {}),
+    ...(deviceId ? { deviceId } : {}),
     ok: true as const,
     via: "cookie" as const,
   };
@@ -198,6 +210,12 @@ function consumeRequestTicket(
     return { ok: false as const, reason: `ticket ${outcome.result}` };
   }
   const deviceId = device.ok ? device.deviceId : outcome.deviceId;
+  if (
+    options.sessionRegistry &&
+    !(deviceId && options.sessionRegistry.deviceAllowed(deviceId))
+  ) {
+    return { ok: false as const, reason: "device session revoked or expired" };
+  }
   if (options.requireDevice && !deviceId) {
     return { ok: false as const, reason: "ticket device identity missing" };
   }
@@ -244,6 +262,7 @@ function consumeRequestTicket(
  * all look like a working guard in code review.
  */
 export function authGuardHandler(options: {
+  sessionRegistry?: SessionRegistry;
   isStaticAsset?: (pathname: string) => boolean;
   ticketOptions: TicketOptions;
   token: string;
@@ -266,6 +285,8 @@ export function authGuardHandler(options: {
     }
 
     const result = await verifyRequestCredential(request, {
+      allowTicket: false,
+      sessionRegistry: options.sessionRegistry,
       ticketOptions: options.ticketOptions,
       token: options.token,
     });

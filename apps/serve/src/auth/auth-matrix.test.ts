@@ -30,9 +30,9 @@ import { CONTENT_SECURITY_POLICY } from "../security-headers";
 const SERVE_ENTRY = join(import.meta.dir, "..", "index.ts");
 
 const HEX_32 = /^[0-9a-f]{32}$/;
-const COOKIE_PAIR = /chorus_session=[^;]+/;
-const DEVICE_COOKIE_PAIR = /chorus_device=[^;]+/;
-const COOKIE_VALUE = /chorus_session=([^;]+)/;
+const COOKIE_PAIR = /(?:__Host-)?chorus_session=[^;]+/;
+const DEVICE_COOKIE_PAIR = /(?:__Host-)?chorus_device=[^;]+/;
+const COOKIE_VALUE = /(?:__Host-)?chorus_session=([^;]+)/;
 
 /** POSIX mode mask: keeps permission bits, drops the file-type bits. */
 const MODE_MASK = 0o777;
@@ -41,6 +41,20 @@ const TOKEN = "f".repeat(64);
 
 /** Routes the plan requires to reject an unauthenticated caller. */
 const GATED_ROUTES = [
+  { label: "GET /auth/devices", method: "GET", path: "/auth/devices" },
+  { label: "GET /hosting/remote", method: "GET", path: "/hosting/remote" },
+  {
+    label: "POST /hosting/remote/enrollment",
+    method: "POST",
+    path: "/hosting/remote/enrollment",
+    body: { label: "Laptop" },
+  },
+  {
+    label: "POST /hosting/remote/connection",
+    method: "POST",
+    path: "/hosting/remote/connection",
+    body: { enabled: true },
+  },
   { label: "GET /models", method: "GET", path: "/models" },
   { label: "GET /providers", method: "GET", path: "/providers" },
   {
@@ -291,9 +305,7 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
     }
   });
 
-  test("a cookie signed with a different token is rejected", async () => {
-    // Minted with the right shape but the wrong key: only a real HMAC check
-    // catches this, not a prefix or expiry parse.
+  test("a tampered opaque session credential is rejected", async () => {
     const login = await fetch(`${server.base}/auth/login`, {
       body: JSON.stringify({ token: TOKEN }),
       headers: { "content-type": "application/json" },
@@ -301,10 +313,9 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
     });
     const good = login.headers.get("set-cookie") ?? "";
     const value = good.match(COOKIE_VALUE)?.[1] ?? "";
-    const [, expires, signature] = value.split(".");
-
-    // Re-sign the same expiry with a truncated signature.
-    const tampered = `chorus_session=v1.${expires}.${signature.slice(0, -2)}AA`;
+    expect(value.startsWith("v2.")).toBe(true);
+    const last = value.endsWith("0") ? "1" : "0";
+    const tampered = `__Host-chorus_session=${value.slice(0, -1)}${last}`;
 
     const res = await fetch(`${server.base}/workspace`, {
       headers: { cookie: tampered },
@@ -314,8 +325,15 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
   });
 
   test("logout clears the cookie", async () => {
+    const login = await fetch(`${server.base}/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: TOKEN }),
+    });
+    const ownCookie =
+      login.headers.get("set-cookie")?.match(COOKIE_PAIR)?.[0] ?? "";
     const res = await fetch(`${server.base}/auth/logout`, {
-      headers: { cookie: server.cookie },
+      headers: { cookie: ownCookie },
       method: "POST",
     });
 
@@ -424,8 +442,15 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
     });
     expect(ticketRes.status).toBe(200);
     const { ticket } = (await ticketRes.json()) as { ticket: string };
+    const otherLogin = await fetch(`${server.base}/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: TOKEN }),
+    });
+    const otherSession =
+      otherLogin.headers.get("set-cookie")?.match(COOKIE_PAIR)?.[0] ?? "";
     const otherDevice = await fetch(`${server.base}/auth/device`, {
-      headers: { cookie: server.cookie.split(";")[0] },
+      headers: { cookie: otherSession },
       method: "POST",
     });
     const otherCookie =

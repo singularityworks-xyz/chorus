@@ -129,6 +129,7 @@ export interface WsHandlerOptions {
   boardTasks: BoardTaskService;
   bridge: OpenCodeBridge;
   hub: WorkspaceHub;
+  sessionRegistry?: import("../auth/session-registry").SessionRegistry;
   /** Cookie/ticket verification for the upgrade (spec §6.2). */
   ticketOptions: TicketOptions;
   token: string;
@@ -147,7 +148,7 @@ export function createWsHandler(options: WsHandlerOptions) {
     options;
   const registrations = new Map<
     string,
-    { closed: boolean; ready: Promise<boolean> }
+    { closed: boolean; ready: Promise<boolean>; deviceId?: string }
   >();
 
   /**
@@ -176,6 +177,7 @@ export function createWsHandler(options: WsHandlerOptions) {
     }
 
     const result = await verifyRequestCredential(data.request, {
+      sessionRegistry: options.sessionRegistry,
       requireDevice: true,
       ticketOptions,
       token,
@@ -206,7 +208,11 @@ export function createWsHandler(options: WsHandlerOptions) {
 
     async open(ws) {
       const socket = toHubSocket(ws);
-      const registration = {
+      const registration: {
+        closed: boolean;
+        ready: Promise<boolean>;
+        deviceId?: string;
+      } = {
         closed: false,
         ready: Promise.resolve(false),
       };
@@ -224,6 +230,14 @@ export function createWsHandler(options: WsHandlerOptions) {
             return false;
           }
 
+          if (
+            options.sessionRegistry &&
+            !options.sessionRegistry.deviceAllowed(auth.deviceId)
+          ) {
+            ws.close(WS_CLOSE_UNAUTHORIZED, "unauthorized");
+            return false;
+          }
+          registration.deviceId = auth.deviceId;
           hub.register(socket, auth.deviceId);
           return true;
         })
@@ -250,6 +264,17 @@ export function createWsHandler(options: WsHandlerOptions) {
       // hub.register and disappear, leaving it connected but never hydrated.
       registration.ready.then((registered) => {
         if (!registered || registration.closed) {
+          return;
+        }
+        if (
+          options.sessionRegistry &&
+          !(
+            registration.deviceId &&
+            options.sessionRegistry.deviceAllowed(registration.deviceId)
+          )
+        ) {
+          ws.close(WS_CLOSE_UNAUTHORIZED, "unauthorized");
+          hub.unregister(toHubSocket(ws));
           return;
         }
         handleMessage(ws, message);

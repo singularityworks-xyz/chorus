@@ -7,14 +7,18 @@ import { cors } from "@elysiajs/cors";
 import { Elysia } from "elysia";
 import { LoginRateLimiter } from "./auth/brute-force";
 import { corsOptionsFor, resolveCorsPolicy } from "./auth/cors";
+import { createDeviceManagementRoutes } from "./auth/device-routes";
 import { authGuardHandler, isPublicFrontendPath } from "./auth/guard";
 import { DevicePairingTokenStore } from "./auth/pairing";
 import { UnregisteredRootError } from "./auth/roots";
 import { createAuthRoutes } from "./auth/routes";
+import { SessionRegistry } from "./auth/session-registry";
 import { pruneExpiredTickets, type TicketStore } from "./auth/ticket";
 import { MissingTokenError, resolveToken } from "./auth/token";
 import { OpenCodeBridge } from "./bridge/opencode/bridge";
 import { loadConfig } from "./config";
+import { HostRemoteAccess } from "./hosting/remote-access";
+import { createRemoteAccessRoutes } from "./hosting/routes";
 import { EngineRegistry } from "./opencode/engine-registry";
 import {
   EngineUnavailableError,
@@ -295,11 +299,24 @@ const pushConfiguration = await resolvePushConfiguration(
  * the store through its serial queue, so all of them reach the hub without any
  * of them holding a socket reference or remembering to broadcast.
  */
+const ticketStore: TicketStore = workspaceStore.meta;
+const sessionRegistry = new SessionRegistry(ticketStore, token);
+sessionRegistry.prune();
+
+const remoteAccess = await HostRemoteAccess.open({
+  installationFile: process.env.CHORUS_RELAY_INSTALLATION,
+  dataDir: config.dataDir,
+  servePort: config.port,
+  isProduction,
+});
+
 const hub = new WorkspaceHub(workspaceStore, {
+  isDeviceAllowed: (deviceId) => sessionRegistry.deviceAllowed(deviceId),
   coalesceMs: config.coalesceMs,
 });
 
 const pushDispatcher = new PushDispatcher({
+  isDeviceAllowed: (deviceId) => sessionRegistry.deviceAllowed(deviceId),
   allowedHosts: config.pushAllowedHosts,
   configuration: pushConfiguration,
   presence: hub,
@@ -313,8 +330,6 @@ pushDispatcher.start();
  * The store is the ticket backend so a ticket issued before a restart still
  * works after one, and so the janitor has somewhere to run.
  */
-const ticketStore: TicketStore = workspaceStore.meta;
-
 pruneExpiredTickets(ticketStore);
 
 const loginRateLimiter = new LoginRateLimiter();
@@ -326,6 +341,7 @@ workspaceStore.onCommit((commit) => {
 });
 
 const authRoutes = createAuthRoutes({
+  sessionRegistry,
   isProduction,
   localOrigins: corsPolicy.allowedOrigins,
   onLogoutDevice: async (deviceId) => {
@@ -501,6 +517,7 @@ const securedApp = new Elysia()
   .resolve(
     { as: "global" },
     authGuardHandler({
+      sessionRegistry,
       isStaticAsset: isPublicFrontendPath,
       ticketOptions,
       token,
@@ -508,6 +525,23 @@ const securedApp = new Elysia()
   )
 
   .use(authRoutes)
+  .use(
+    createRemoteAccessRoutes({
+      token,
+      registry: sessionRegistry,
+      remote: remoteAccess,
+    })
+  )
+  .use(
+    createDeviceManagementRoutes({
+      token,
+      registry: sessionRegistry,
+      onRevoke: async (deviceId) => {
+        hub.disconnectDevice(deviceId);
+        await workspaceStore.deleteDevicePushSubscriptions(deviceId);
+      },
+    })
+  )
   .use(
     createPushRoutes({
       allowedHosts: config.pushAllowedHosts,
@@ -523,6 +557,7 @@ const securedApp = new Elysia()
   .use(voiceRoutes)
   .use(
     createWsHandler({
+      sessionRegistry,
       bridge,
       boardTasks,
       hub,
@@ -583,7 +618,7 @@ for (const board of workspaceStore.getSnapshot().boards) {
   }
 }
 
-app.listen(config.port);
+app.listen({ hostname: config.bindAddress, port: config.port });
 
 logger.info("server-running", {
   host: app.server?.hostname,
@@ -605,6 +640,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
 
   const shutdownTimeout = setTimeout(() => {
     logger.warn("shutdown-timeout-force-kill");
+    remoteAccess.forceKill();
     forceKillOpencode();
     process.exit(1);
   }, SHUTDOWN_TIMEOUT_MS);
@@ -615,6 +651,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
     // and later async flushes (snapshot/coalescer) slot in without
     // reordering.
     pushDispatcher.stop();
+    await remoteAccess.close();
     hub.close();
     bridge.stop();
     await app.server?.stop();

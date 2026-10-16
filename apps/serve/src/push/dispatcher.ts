@@ -103,6 +103,7 @@ export interface PushDispatcherOptions {
   buildRequest?: typeof generateRequestDetails;
   configuration: PushConfiguration;
   fetcher?: PushFetch;
+  isDeviceAllowed?: (deviceId: string) => boolean;
   lookupHost?: (hostname: string) => Promise<Array<{ address: string }>>;
   now?: () => number;
   presence: DevicePresence;
@@ -130,6 +131,7 @@ export class PushDispatcher {
   readonly #sendTimeoutMs: number;
   readonly #shutdown = new AbortController();
   readonly #store: PushStore;
+  readonly #isDeviceAllowed: (deviceId: string) => boolean;
   readonly #queue: DeliveryJob[] = [];
   readonly #seen = new Map<string, number>();
   readonly #completed = new Map<string, number>();
@@ -140,6 +142,7 @@ export class PushDispatcher {
   #stopped = false;
 
   constructor(options: PushDispatcherOptions) {
+    this.#isDeviceAllowed = options.isDeviceAllowed ?? (() => true);
     this.#allowedHosts = options.allowedHosts ?? [];
     this.#buildRequest = options.buildRequest ?? generateRequestDetails;
     this.#configuration = options.configuration;
@@ -378,6 +381,7 @@ export class PushDispatcher {
 
   #isCurrent(job: DeliveryJob): boolean {
     if (
+      !this.#isDeviceAllowed(job.deviceId) ||
       this.#stopped ||
       this.#now() >= job.expiresAt ||
       !this.#isPending(job)

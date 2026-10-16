@@ -58,6 +58,17 @@ describe("loadConfig", () => {
     expect(config.port).toBe(3000);
   });
 
+  test("binds privately unless a literal network address is configured", () => {
+    process.env.CHORUS_BIND_ADDRESS = undefined;
+    expect(loadConfig().bindAddress).toBe("127.0.0.1");
+    process.env.CHORUS_BIND_ADDRESS = "0.0.0.0";
+    expect(loadConfig().bindAddress).toBe("0.0.0.0");
+    process.env.CHORUS_BIND_ADDRESS = "public.example.com";
+    expect(() => loadConfig()).toThrow(
+      "CHORUS_BIND_ADDRESS must be a literal IP address"
+    );
+  });
+
   test("reads HOSTNAME from env", () => {
     process.env.HOSTNAME = "0.0.0.0";
 
@@ -141,6 +152,7 @@ describe("loadConfig", () => {
 
     expect(config).toEqual({
       port: 5000,
+      bindAddress: "127.0.0.1",
       hostname: "127.0.0.1",
       opencodePerWorktree: false,
       opencodeBaseUrl: "http://opencode:4096",

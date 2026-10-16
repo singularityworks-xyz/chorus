@@ -27,10 +27,12 @@ Open Chorus locally -> workspace loads immediately
 Returning visitors resume their workspace or the board/card in a notification
 link. Setup appears only when a required capability is missing.
 
-VPS execution handoff, background project-file sync, cloud ownership transfer,
-and continuation while the laptop is shut down are deferred. A later backend
-design must define those capabilities before runtime-switch controls are added.
-Existing VPS deployment work remains tracked in engineering Phase 8.
+The central relay and user-hosted laptop/VPS extension was approved on 2026-10-16
+and now follows [remote-hosting-plan.md](./remote-hosting-plan.md). Remote-access
+settings are implemented behind an installed production relay configuration;
+native transport qualification remains open. VPS execution handoff and linked
+continuation remain implementation work. Runtime-switch controls must wait for
+portable checkpoints and durable execution fencing.
 
 ## 2. Local access and pairing model
 

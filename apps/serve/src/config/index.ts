@@ -1,8 +1,10 @@
+import { isIP } from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
 
 export interface ServerConfig {
   autoStartOpencode: boolean;
+  bindAddress: string;
   /** Delta coalescing window in ms (spec §7). */
   coalesceMs: number;
   /** Where chorus.db, snapshots, and the internal session secret live. */
@@ -188,8 +190,13 @@ export function loadConfig(): ServerConfig {
     );
   }
 
+  const bindAddress = process.env.CHORUS_BIND_ADDRESS ?? "127.0.0.1";
+  if (!isIP(bindAddress)) {
+    throw new Error("CHORUS_BIND_ADDRESS must be a literal IP address");
+  }
   return {
     port,
+    bindAddress,
     hostname: process.env.HOSTNAME ?? "localhost",
     // One source of truth for the engine address. Previously the process manager
     // hardcoded 4096 and this defaulted to `http://localhost:4096`

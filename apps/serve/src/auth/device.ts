@@ -4,6 +4,7 @@ const DEVICE_ID_SHAPE = /^[0-9a-f]{32}$/;
 const DEVICE_SIGNATURE_BYTES = 32;
 
 export const DEVICE_COOKIE = "chorus_device";
+export const SECURE_DEVICE_COOKIE = "__Host-chorus_device";
 export const DEVICE_TTL_SECONDS = 31_536_000;
 
 export type DeviceVerifyResult = { deviceId: string; ok: true } | { ok: false };
@@ -38,10 +39,16 @@ function cookieValueFromHeader(header: string | null): string | null {
   if (!header) {
     return null;
   }
-  for (const item of header.split(";")) {
-    const [name, ...parts] = item.trim().split("=");
-    if (name === DEVICE_COOKIE) {
-      return parts.join("=") || null;
+  for (const expected of [SECURE_DEVICE_COOKIE, DEVICE_COOKIE]) {
+    const matches = header
+      .split(";")
+      .filter((item) => item.trim().split("=")[0] === expected);
+    if (matches.length > 1) {
+      return null;
+    }
+    const item = matches[0];
+    if (item) {
+      return item.slice(item.indexOf("=") + 1).trim() || null;
     }
   }
   return null;
@@ -115,7 +122,7 @@ export function buildDeviceCookieHeader(
   isProduction: boolean
 ): string {
   const attributes = [
-    `${DEVICE_COOKIE}=${value}`,
+    `${isProduction ? SECURE_DEVICE_COOKIE : DEVICE_COOKIE}=${value}`,
     "Path=/",
     `Max-Age=${String(DEVICE_TTL_SECONDS)}`,
     "HttpOnly",

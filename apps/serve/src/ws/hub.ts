@@ -13,6 +13,7 @@ import {
   viewportSyncSchema,
   type WorkspaceEvent,
   WS_CLOSE_RATE_LIMITED,
+  WS_CLOSE_UNAUTHORIZED,
 } from "@chorus/contracts";
 import type {
   SequencedRecord,
@@ -285,6 +286,7 @@ interface Client {
 
 export interface HubOptions {
   coalesceMs?: number;
+  isDeviceAllowed?: (deviceId: string) => boolean;
   now?: () => number;
   pingIntervalMs?: number;
   pongTimeoutMs?: number;
@@ -310,6 +312,7 @@ export class WorkspaceHub {
   readonly #coalesceMs: number;
   readonly #pingIntervalMs: number;
   readonly #pongTimeoutMs: number;
+  readonly #isDeviceAllowed: HubOptions["isDeviceAllowed"];
 
   /**
    * Per-board buffers of coalescible events awaiting flush. Holds whole
@@ -331,6 +334,7 @@ export class WorkspaceHub {
   #pendingDepth = 0;
 
   constructor(store: WorkspaceStore, options: HubOptions = {}) {
+    this.#isDeviceAllowed = options.isDeviceAllowed;
     this.#store = store;
     this.#now = options.now ?? Date.now;
     this.#coalesceMs = options.coalesceMs ?? COALESCE_MS;
@@ -1048,6 +1052,17 @@ export class WorkspaceHub {
    * "slow" and "gone" distinguishable in diagnostics.
    */
   #send(client: Client, message: unknown): void {
+    if (
+      this.#isDeviceAllowed &&
+      !(client.deviceId && this.#isDeviceAllowed(client.deviceId))
+    ) {
+      client.socket.close?.(
+        WS_CLOSE_UNAUTHORIZED,
+        "device session expired or revoked"
+      );
+      this.#drop(client);
+      return;
+    }
     const status = client.socket.send(JSON.stringify(message));
 
     if (typeof status !== "number" || status > 0) {

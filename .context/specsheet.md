@@ -22,7 +22,7 @@ Chorus is a **self-hosted harness for driving AI coding agents** through an **in
 | Users per instance | 1 (multi-device, multi-session) |
 | Concurrency model | Single authoritative writer (the serve process); all UIs are mirrors |
 | Collaboration | None. No multiplayer, no CRDTs, no presence |
-| Hosting | Laptop (localhost) **or** VPS (public URL behind TLS proxy) — identical behavior |
+| Hosting | User-owned laptop or VPS; optional operator-owned connection relay — identical workspace behavior |
 | Packaging | Docker / docker-compose |
 | Backend runtime | Bun + Elysia (existing `apps/serve`) |
 | Agent engine | OpenCode SDK (`@opencode-ai/sdk`), spawned/managed by serve |
@@ -155,6 +155,18 @@ The threat model is real: a public URL that spawns shell-executing agents on you
 ---
 
 ## 7. Deployment
+
+### Remote hosting extension (approved 2026-10-16)
+
+The execution plan is [remote-hosting-plan.md](./remote-hosting-plan.md).
+Chorus frontend/backend, agents, repositories, credentials, durable workspace
+state and handoff journals stay on the user's host. The operator's central VPS
+provides encrypted connection relay plus account/host registration only. It
+does not host user workspaces, execute tasks, store repository backups, or
+arbitrate ownership. Host-to-host handoff uses a verified checkpoint and a
+durable signed source release; no timeout may reactivate a released source.
+The production frontend runs as a Next standalone server alongside Serve;
+the earlier static-export packaging below is superseded by this extension.
 
 ### VPS mode (primary self-host story)
 

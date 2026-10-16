@@ -1,0 +1,41 @@
+{
+	admin off
+	auto_https disable_redirects
+	servers {
+		max_header_size 32KB
+	}
+}
+
+# This proxy belongs on the user's host. frp must pass TLS through to it.
+# No certificate or private key is installed on the central relay.
+{$CHORUS_PUBLIC_HOST} {
+	tls {
+		# Port 80 on the relay forwards only ACME challenges to this host.
+		issuer acme {
+			disable_tlsalpn_challenge
+		}
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+	@foreign_origin {
+		header Origin *
+		not header Origin https://{$CHORUS_PUBLIC_HOST}
+	}
+	respond @foreign_origin 403
+
+	# Never let the tunnel's local socket peer enable local authentication.
+	@bootstrap path /auth/local-session /auth/local-session/* /api/auth/local-session /api/auth/local-session/*
+	respond @bootstrap 403
+
+	@serve path /ws /auth/* /voice/* /health
+	handle @serve {
+		reverse_proxy serve:2000
+	}
+	handle {
+		reverse_proxy web:3000
+	}
+}
