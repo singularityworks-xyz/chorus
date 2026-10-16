@@ -57,7 +57,7 @@ async function waitForHttp(url: string) {
 }
 async function stop(container: string, target: "serve" | "web") {
   const started = Date.now();
-  await docker(["stop", "--time", "5", container]);
+  await docker(["stop", "--timeout", "5", container]);
   assert(
     Date.now() - started < 5000,
     "container shutdown exceeded five seconds"
