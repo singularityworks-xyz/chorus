@@ -5,6 +5,7 @@ import type {
   VersionedSnapshot,
   WorkspaceEvent,
 } from "@chorus/contracts";
+import { LOCAL_ENTRY_PORT } from "@chorus/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChorusSync,
@@ -107,6 +108,7 @@ export function useChorusSync(
       (typeof window === "undefined"
         ? "ws://localhost:2000/ws"
         : resolveSocketUrl({
+            localServePort: 2000,
             allowLocalHostRebinding: process.env.NODE_ENV !== "production",
             developmentServePort:
               process.env.NODE_ENV === "production" ? undefined : 2000,
@@ -140,7 +142,11 @@ export function useChorusSync(
               >,
         prepareSocketUrl: (target) =>
           prepareAuthenticatedSocketUrl(target, {
-            allowLocalBootstrap: process.env.NODE_ENV !== "production",
+            allowLocalBootstrap: true,
+            localEntryPort:
+              process.env.NODE_ENV === "production"
+                ? LOCAL_ENTRY_PORT
+                : undefined,
             pageOrigin: window.location.origin,
           }),
         url,

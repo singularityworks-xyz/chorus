@@ -38,3 +38,6 @@ export const deviceRevocationResponseSchema = z.strictObject({
 });
 
 export const MAX_PAIRED_DEVICES = 10;
+
+/** Private listener; never forwarded by the remote proxy. */
+export const LOCAL_ENTRY_PORT = 2001;

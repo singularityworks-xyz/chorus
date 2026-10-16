@@ -16,9 +16,11 @@ export type SocketCredentialFetcher = (
 ) => Promise<Response>;
 
 export interface SocketCredentialOptions {
-  /** Enable local-first browser bootstrap in development only. */
+  /** Enable bootstrap only when both browser and socket point to loopback. */
   allowLocalBootstrap?: boolean;
   fetcher?: SocketCredentialFetcher;
+  /** Installed production hosts use a separate private entry listener. */
+  localEntryPort?: number;
   /** Browser origin, injectable so URL/auth behavior can be tested without DOM. */
   pageOrigin: string;
 }
@@ -46,6 +48,10 @@ export async function prepareAuthenticatedSocketUrl(
       "/auth/local-session",
       httpOriginForSocket(socketUrl)
     );
+    if (options.localEntryPort !== undefined) {
+      bootstrapUrl.hostname = new URL(options.pageOrigin).hostname;
+      bootstrapUrl.port = String(options.localEntryPort);
+    }
     const bootstrapResponse = await fetchCredentialEndpoint(
       fetcher,
       bootstrapUrl,
@@ -54,8 +60,17 @@ export async function prepareAuthenticatedSocketUrl(
         headers: { "x-chorus-local-bootstrap": "1" },
         method: "POST",
       }
-    );
-    assertCredentialResponse(bootstrapResponse, "local sign-in");
+    ).catch((error: unknown) => {
+      if (options.localEntryPort !== undefined) {
+        return null;
+      }
+      throw error;
+    });
+    // Existing authenticated sessions still work on unmanaged production hosts
+    // where the optional private listener is absent. Remote browsers never try it.
+    if (bootstrapResponse && ![403, 404].includes(bootstrapResponse.status)) {
+      assertCredentialResponse(bootstrapResponse, "local sign-in");
+    }
   }
 
   const deviceResponse = await fetchCredentialEndpoint(

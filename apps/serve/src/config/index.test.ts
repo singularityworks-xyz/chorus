@@ -58,6 +58,18 @@ describe("loadConfig", () => {
     expect(config.port).toBe(3000);
   });
 
+  test("requires explicit private entry configuration and distinct listener ports", () => {
+    process.env.CHORUS_LOCAL_ENTRY_ENABLED = "true";
+    expect(loadConfig().localEntryEnabled).toBe(true);
+    process.env.PORT = "2001";
+    expect(() => loadConfig()).toThrow(
+      "PORT conflicts with the private local entry listener"
+    );
+    process.env.PORT = "2000";
+    process.env.CHORUS_LOCAL_ENTRY_ENABLED = "yes";
+    expect(() => loadConfig()).toThrow("Invalid CHORUS_LOCAL_ENTRY_ENABLED");
+  });
+
   test("binds privately unless a literal network address is configured", () => {
     process.env.CHORUS_BIND_ADDRESS = undefined;
     expect(loadConfig().bindAddress).toBe("127.0.0.1");
@@ -153,6 +165,7 @@ describe("loadConfig", () => {
     expect(config).toEqual({
       port: 5000,
       bindAddress: "127.0.0.1",
+      localEntryEnabled: false,
       hostname: "127.0.0.1",
       opencodePerWorktree: false,
       opencodeBaseUrl: "http://opencode:4096",

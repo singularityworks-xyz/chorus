@@ -54,10 +54,10 @@ public deployment.
 
 | Area | Implemented | Remaining gate/work |
 | --- | --- | --- |
-| Packaging/contracts | Next standalone build, separate user-host Docker targets, strict relay/host/release contracts, encrypted storage package | Fresh container build/boot/shutdown; packaged local-first production entry |
+| Packaging/contracts | Next standalone build, separate user-host Docker targets, strict relay/host/release contracts, encrypted storage package, separate private production entry | Fresh container build/boot/shutdown; packaged launcher and browser acceptance |
 | Relay accounts | Google/GitHub configuration, Turnstile, secure host cookies, approved enrollment, scoped machine grants, PostgreSQL metadata/quota transactions, account portal | Real provider callbacks, PostgreSQL concurrency/rollback tests and operational cleanup |
-| Host authentication | Persistent hashed per-browser sessions, ten-device limit, in-app revocation, WS/push revocation checks, protected production cookies | Browser/mobile acceptance; production local bootstrap must remain separated from remote ingress |
-| Remote connections | frp authorization policy/plugin, SNI passthrough config, local host TLS config, verified native binary manifest, hidden child processes, bounded restart/shutdown, HTTPS readiness probe, settings enrollment/pause/resume | Release pipeline supplying reviewed native artifacts, actual frp/Caddy configuration/protocol tests, certificates/renewals and reconnect/revocation under load |
+| Host authentication | Persistent hashed per-browser sessions, ten-device limit, in-app revocation, WS/push revocation checks, protected production cookies, encrypted internal signing root for managed local entry | Browser/mobile acceptance and packaged first launch |
+| Remote connections | frp authorization policy/plugin, SNI passthrough config, local host TLS config, verified native binary manifest, hidden child processes, bounded restart/shutdown, HTTPS readiness probe, settings enrollment/pause/resume; pinned native config checks pass | Release pipeline supplying reviewed native artifacts, actual frp protocol integration, certificates/renewals and reconnect/revocation under load |
 | Workspace move | Encrypted host identity and local signed ownership journal; preparation, fencing, release, activation and return-generation tests | Portable repository/worktree/review export/import, execution barriers, authenticated host pairing/transfer, linked agent continuation, recovery UI and browser host switching |
 | Release security | Strict endpoint pinning, purpose-separated encrypted credentials/signatures, negative authorization tests and dependency failure handling | ASVS L2 assessment, independent review, certificate capacity, Linux container/browser CI, phone acceptance and 100-host load qualification |
 
@@ -87,16 +87,49 @@ implemented handoff.
   and verifies disabled clients cannot obtain another grant.
 - `bun run --cwd apps/web build`: production standalone build passes, including
   new device and remote-access routes. Relay portal build passes.
-- Docker daemon is stopped. Container/PG/native relay/browser qualification has
-  not run. GitHub release metadata retrieval returned HTTP 403; no unverified
-  binaries were downloaded or executed. The initial sandbox junction failure
-  remains recorded in the baseline above.
+- Docker daemon is stopped. Container/PG/real relay/browser qualification has
+  not run. The initial sandbox junction failure remains recorded in the baseline
+  above.
+
+### Follow-up verification and production local entry
+
+The release asset pages supplied the official archive hashes after GitHub's API
+returned 403. Downloads were verified before extracting only the named binaries:
+
+- Caddy 2.11.7 Windows amd64 archive SHA-256:
+  `0a1edc0b799512051c57071ce0e798d3f2cf67dc98171366f1d2b326072e3b06`.
+- frp 0.71.1 Windows amd64 archive SHA-256:
+  `b90074b2b6a1d792a7a40f085ac6d276bcab2d1bc60201f8a86ca53ce65ce821`.
+- Hidden `caddy adapt --adapter caddyfile --config <host/central file>` passed
+  for both generated Caddyfiles. Hidden `frpc verify -c <file>` and
+  `frps verify -c <file>` passed. No tunnel listener was started. This establishes
+  configuration compatibility, not real transport/certificate qualification.
+
+Managed native production now enables `CHORUS_LOCAL_ENTRY_ENABLED=true`: its
+encrypted vault supplies the internal signing root and an isolated listener binds
+`127.0.0.1:2001`. Only the matching loopback frontend Origin, direct peer and
+bootstrap header can obtain a protected browser cookie there. Main production
+ingress still returns 403 for bootstrap. Remote proxies must never forward 2001.
+
+The follow-up scoped suite passed **455 tests across 45 files**. Bun's broad
+`scripts` filter also selected the existing Phase 6 in-process scripted-engine
+harness, which completed once with hidden Git invocations; no browser, real agent
+engine or E2E runner ran. Future verification should use exact script test paths.
+The separate production HTTP check passed through one hidden Next standalone
+process: local entry, same-origin mutations, cross-origin denial, protected cookie
+forwarding, logout and replay rejection. It is now a CI build-stage check at
+`apps/serve/src/auth/testing/production-entry-smoke.ts`. The updated production
+Next build, all nine type checks and lint/log gates pass. Browser cookie policy
+and packaged launcher acceptance remain required.
+
+Committed checkpoints: `187459c` (hidden check/version helpers), `4b7a53d` (relay
+control plane and packaging), `1812990` (host/device access foundation).
 
 ### Next delivery order
 
 1. Qualify the real central/PostgreSQL/frp deployment and install reviewed native
-   binaries in a Linux CI environment. Implement production local-first launch
-   without letting a tunnel proxy satisfy local-bootstrap checks.
+   binaries in a Linux CI environment. Qualify the packaged local-first launcher
+   and its separate private entry in actual browsers.
 2. Add portable repository, dirty index/worktree, review snapshot and workspace
    transfer with strict file/path/size validation and destination preflight.
 3. Drain/fence engine and store execution, exchange signed peer receipts over

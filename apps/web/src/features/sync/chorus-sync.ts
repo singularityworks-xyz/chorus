@@ -723,6 +723,7 @@ function defaultCancel(handle: unknown): void {
 export function resolveSocketUrl(env: {
   allowLocalHostRebinding?: boolean;
   developmentServePort?: number;
+  localServePort?: number;
   explicit?: string | undefined;
   isSecure: boolean;
   origin: string;
@@ -734,8 +735,13 @@ export function resolveSocketUrl(env: {
   const explicit = env.explicit?.trim();
   const url = new URL(explicit ? explicit : env.origin);
 
-  if (!explicit && env.developmentServePort && url.port === "3000") {
-    url.port = String(env.developmentServePort);
+  if (!explicit && url.port === "3000") {
+    const port =
+      env.developmentServePort ??
+      (isLoopbackHostname(url.hostname) ? env.localServePort : undefined);
+    if (port) {
+      url.port = String(port);
+    }
   }
 
   if (

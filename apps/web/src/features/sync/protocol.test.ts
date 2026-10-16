@@ -66,6 +66,22 @@ describe("decideFrame", () => {
 });
 
 describe("resolveSocketUrl", () => {
+  test("installed loopback frontend finds Serve without rerouting public frontends", () => {
+    expect(
+      resolveSocketUrl({
+        localServePort: 2000,
+        isSecure: false,
+        origin: "http://localhost:3000",
+      })
+    ).toBe("ws://localhost:2000/ws");
+    expect(
+      resolveSocketUrl({
+        localServePort: 2000,
+        isSecure: true,
+        origin: "https://host.example:3000",
+      })
+    ).toBe("wss://host.example:3000/ws");
+  });
   test("an explicitly empty variable falls back to the origin", () => {
     // `.env.example` tells operators to leave this unset when serve fronts the
     // app, and `NEXT_PUBLIC_CHORUS_WS_URL=` is the obvious way to do that.

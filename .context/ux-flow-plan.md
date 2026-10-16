@@ -39,7 +39,7 @@ portable checkpoints and durable execution fencing.
 Serve still resolves a session-signing secret in `apps/serve/src/auth/token.ts`,
 called at startup by `apps/serve/src/index.ts`:
 
-1. Production uses the operator-supplied `CHORUS_TOKEN`; missing configuration
+1. Unmanaged production uses the operator-supplied `CHORUS_TOKEN`; missing configuration
    stops startup.
 2. Development reuses its persisted internal signing secret or generates a new
    256-bit one. The value and file path are not shown to the user.
@@ -48,7 +48,10 @@ The actual bare-runtime default for `DATA_DIR` is `~/.chorus`, from
 `apps/serve/src/config/index.ts`. A local browser gets a session only when Serve
 sees a direct loopback peer, a development-mode request, and an exact allowlisted
 Origin. This path does not trust forwarded addresses and is disabled in
-production. An authenticated user creates a five-minute, single-use pairing
+the main production listener. Managed native releases instead use a separate
+`127.0.0.1:2001` entry listener and an encrypted internal signing root; only the
+matching local frontend Origin and direct loopback peer can enter. It is never
+relayed or proxied. An authenticated user creates a five-minute, single-use pairing
 code in **Settings → Devices**. Serve stores only its digest in memory; the
 login endpoint consumes it and issues the usual HttpOnly session cookie.
 
@@ -56,7 +59,7 @@ On the phone, the user opens the same reachable Chorus instance and enters the
 code. For local development, a loopback WebSocket setting is rebound to the
 host used to open the app so another device does not try connecting to its own
 `localhost`. VPS first-access provisioning remains deferred; production still
-requires its operator-configured token. Credentials must not appear in URLs,
+requires its operator-configured token when unmanaged. Credentials must not appear in URLs,
 logs, durable browser storage, events, or WebSocket traffic.
 
 ## 3. Current UX findings

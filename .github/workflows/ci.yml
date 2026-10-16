@@ -93,6 +93,8 @@ jobs:
         run: bun ci
       - name: Build
         run: bun run build
+      - name: Production Local Entry HTTP Check
+        run: bun apps/serve/src/auth/testing/production-entry-smoke.ts
 
   integration-tests:
     name: Integration Tests

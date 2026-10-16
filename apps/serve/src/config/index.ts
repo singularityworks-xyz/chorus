@@ -1,6 +1,7 @@
 import { isIP } from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
+import { LOCAL_ENTRY_PORT } from "@chorus/contracts";
 
 export interface ServerConfig {
   autoStartOpencode: boolean;
@@ -18,6 +19,7 @@ export interface ServerConfig {
    */
   enableLegacyWorkspaceImport: boolean;
   hostname: string;
+  localEntryEnabled: boolean;
   opencodeBaseUrl: string;
   opencodeDirectory: string;
   opencodePassword: string | undefined;
@@ -194,9 +196,18 @@ export function loadConfig(): ServerConfig {
   if (!isIP(bindAddress)) {
     throw new Error("CHORUS_BIND_ADDRESS must be a literal IP address");
   }
+  const localEntryEnabled = parseBoolean(
+    process.env.CHORUS_LOCAL_ENTRY_ENABLED,
+    false,
+    "CHORUS_LOCAL_ENTRY_ENABLED"
+  );
+  if (localEntryEnabled && port === LOCAL_ENTRY_PORT) {
+    throw new Error("PORT conflicts with the private local entry listener");
+  }
   return {
     port,
     bindAddress,
+    localEntryEnabled,
     hostname: process.env.HOSTNAME ?? "localhost",
     // One source of truth for the engine address. Previously the process manager
     // hardcoded 4096 and this defaulted to `http://localhost:4096`

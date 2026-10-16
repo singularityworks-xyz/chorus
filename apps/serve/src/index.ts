@@ -9,6 +9,7 @@ import { LoginRateLimiter } from "./auth/brute-force";
 import { corsOptionsFor, resolveCorsPolicy } from "./auth/cors";
 import { createDeviceManagementRoutes } from "./auth/device-routes";
 import { authGuardHandler, isPublicFrontendPath } from "./auth/guard";
+import { startLocalEntry } from "./auth/local-entry";
 import { DevicePairingTokenStore } from "./auth/pairing";
 import { UnregisteredRootError } from "./auth/roots";
 import { createAuthRoutes } from "./auth/routes";
@@ -61,11 +62,10 @@ await mkdir(config.dataDir, { recursive: true });
 /**
  * Internal session-signing token lifecycle (spec §6.1, decision #4).
  *
- * Resolved before anything is constructed so a production boot without
- * `CHORUS_TOKEN` fails immediately and loudly, rather than after the engine is
- * spawned and a port is bound. The token value and its file path are never
- * logged. Local browsers sign in through the loopback-only bootstrap route;
- * production still requires an operator-supplied CHORUS_TOKEN.
+ * Resolved before engines or listeners start. Unmanaged production requires
+ * CHORUS_TOKEN; installed hosts with private local entry keep their internal
+ * signing root in the encrypted host vault. Neither value nor storage path is
+ * logged. The main production listener never accepts local bootstrap.
  */
 let token: string;
 try {
@@ -73,6 +73,7 @@ try {
     dataDir: config.dataDir,
     envToken: process.env.CHORUS_TOKEN,
     isProduction,
+    managedLocalEntry: config.localEntryEnabled,
   });
   token = resolved.token;
   logger.info("auth-configured", { source: resolved.source });
@@ -618,7 +619,22 @@ for (const board of workspaceStore.getSnapshot().boards) {
   }
 }
 
-app.listen({ hostname: config.bindAddress, port: config.port });
+let localEntry: ReturnType<typeof startLocalEntry> | null = null;
+try {
+  if (config.localEntryEnabled) {
+    localEntry = startLocalEntry({ token, registry: sessionRegistry });
+  }
+  app.listen({ hostname: config.bindAddress, port: config.port });
+} catch (error) {
+  pushDispatcher.stop();
+  hub.close();
+  bridge.stop();
+  await localEntry?.stop(true);
+  await remoteAccess.close();
+  await workspaceStore.close();
+  await Promise.all([processManager?.stop(), engineRegistry?.stop()]);
+  throw error;
+}
 
 logger.info("server-running", {
   host: app.server?.hostname,
@@ -655,6 +671,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
     hub.close();
     bridge.stop();
     await app.server?.stop();
+    await localEntry?.stop(true);
     // Order matters: stop intake, then tear down state channels, then flush
     // durable state, then children. store.close() drains the serial queue,
     // writes a final snapshot, and folds the WAL so a cold copy of chorus.db is

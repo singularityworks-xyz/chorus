@@ -92,6 +92,22 @@ export class HostVault {
     });
   }
 
+  sessionSigningSecret(): string {
+    return this.#db
+      .transaction(() => {
+        let value = this.#read("browser-signing-root");
+        if (!value) {
+          value = randomBytes(32).toString("hex");
+          this.#save("browser-signing-root", value);
+        }
+        if (!HEX_KEY.test(value)) {
+          throw new Error("The browser signing material is corrupt");
+        }
+        return value;
+      })
+      .immediate();
+  }
+
   journal(): HostJournal {
     const keys = this.#identity();
     return new HostJournal(this.#root, this.identity(), keys.privateKey);

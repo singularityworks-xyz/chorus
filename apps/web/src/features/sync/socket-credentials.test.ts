@@ -6,6 +6,34 @@ import {
 } from "./socket-credentials";
 
 describe("authenticated WebSocket URL preparation", () => {
+  test("installed local production uses its separate private entry and preserves an existing session if it is absent", async () => {
+    const paths: string[] = [];
+    const url = await prepareAuthenticatedSocketUrl("ws://localhost:2000/ws", {
+      allowLocalBootstrap: true,
+      localEntryPort: 2001,
+      pageOrigin: "http://localhost:3000",
+      fetcher: (input) => {
+        paths.push(String(input));
+        if (String(input).includes(":2001")) {
+          return Promise.reject(new Error("optional listener absent"));
+        }
+        return Promise.resolve(
+          Response.json(
+            String(input).endsWith("ws-ticket")
+              ? { ticket: "ab".repeat(16) }
+              : { deviceId: "device-1" }
+          )
+        );
+      },
+    });
+    expect(paths).toEqual([
+      "http://localhost:2001/auth/local-session",
+      "/api/auth/device",
+      "/api/auth/ws-ticket",
+    ]);
+    expect(new URL(url).searchParams.get("ticket")).toBe("ab".repeat(16));
+  });
+
   test("registers the device and uses cookies for same-origin sockets", async () => {
     const requests: { input: string | URL | Request; init?: RequestInit }[] =
       [];

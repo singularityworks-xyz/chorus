@@ -12,7 +12,8 @@ WS and voice to Serve and other requests to Next. Set the web container's
 
 Persistent data must be owned by 10001:10001. Serve also uses `/data/xdg-data`
 and `/data/xdg-config` for engine state/config; mount registered repositories
-separately. Supply `CHORUS_TOKEN` through a protected deployment secret.
+separately. Unmanaged deployments supply `CHORUS_TOKEN` through a protected
+deployment secret. Managed native releases use the private entry described below.
 
 This is packaging groundwork, **not a deployable relay quickstart yet**. Enrollment,
 remote device sessions, routing configuration and settings are implemented;
@@ -56,8 +57,9 @@ user's private `DATA_DIR/host`. Active frpc configuration contains its scoped
 machine credential and is private; normal stop removes that file. Children get
 an allowlisted environment without provider credentials and start hidden on
 Windows. Shutdown cancels network work and stops/kills both children within the
-host's shutdown budget. None of these native binaries were executed during the
-current Windows test run.
+host's shutdown budget. Hidden configuration-only `caddy adapt`, `frpc verify`
+and `frps verify` commands passed with checksum-pinned official releases. No
+tunnel listener was started; real transport and certificate acceptance remain open.
 
 In Settings → Devices → Internet access, the user names and approves their
 computer with a Google/GitHub account, compares its signing fingerprint and waits
@@ -65,3 +67,18 @@ for verified HTTPS readiness. They copy the public address to the phone and ente
 a one-time device code generated on the host. Pause/resume persists locally;
 individual browser access can be revoked independently. The laptop must stay
 awake. Moving the workspace to another host is not implemented yet.
+
+## Local entry in managed native releases
+
+The installer enables `CHORUS_LOCAL_ENTRY_ENABLED=true` and launches Next
+standalone privately at `http://localhost:3000`. Serve stores its internal signing
+root in the encrypted host vault; no root token or shell command is part of the
+user's first visit. A separate listener binds `127.0.0.1:2001` for that local
+browser only. Do not publish, proxy, or relay 2001. The normal production Serve
+listener rejects bootstrap even when its socket peer is a loopback proxy.
+
+The local browser uses that private entry, then ordinary authenticated Next
+routes and the Serve socket. Internet browsers use the public HTTPS address and
+a pairing code. The browser never receives the root signing secret. This behavior
+has real HTTP/SQLite coverage and a build-stage test through Next standalone;
+actual browser cookie handling and packaged launcher acceptance remain required.
