@@ -58,7 +58,7 @@ public deployment.
 | Relay accounts | Google/GitHub configuration, Turnstile, secure host cookies, approved enrollment, scoped machine grants, PostgreSQL metadata/quota transactions, account portal | Real provider callbacks, PostgreSQL concurrency/rollback tests and operational cleanup |
 | Host authentication | Persistent hashed per-browser sessions, ten-device limit, in-app revocation, WS/push revocation checks, protected production cookies, encrypted internal signing root for managed local entry | Browser/mobile acceptance and packaged first launch |
 | Remote connections | frp authorization policy/plugin, SNI passthrough config, local host TLS config, verified native binary manifest, hidden child processes, bounded restart/shutdown, HTTPS readiness probe, settings enrollment/pause/resume; pinned native config checks pass | Release pipeline supplying reviewed native artifacts, actual frp protocol integration, certificates/renewals and reconnect/revocation under load |
-| Workspace move | Encrypted host identity and local signed ownership journal; preparation, fencing, release, activation and return-generation tests | Portable repository/worktree/review export/import, execution barriers, authenticated host pairing/transfer, linked agent continuation, recovery UI and browser host switching |
+| Workspace move | Encrypted host identity, local signed ownership journal, bounded repository checkpoints and verified import into fresh inactive staging; preparation, fencing, release, activation and return-generation tests | Whole-workspace/worktree/review transfer, execution barriers, authenticated host pairing/transport, linked agent continuation, recovery UI and browser host switching |
 | Release security | Strict endpoint pinning, purpose-separated encrypted credentials/signatures, negative authorization tests and dependency failure handling | ASVS L2 assessment, independent review, certificate capacity, Linux container/browser CI, phone acceptance and 100-host load qualification |
 
 Runtime remote access is optional and defaults to unconfigured. It refuses to
@@ -123,9 +123,37 @@ Next build, all nine type checks and lint/log gates pass. Browser cookie policy
 and packaged launcher acceptance remain required.
 
 Committed checkpoints: `187459c` (hidden check/version helpers), `4b7a53d` (relay
-control plane and packaging), `1812990` (host/device access foundation).
+control plane and packaging), `1812990` (host/device access foundation),
+`7ce1c95` (private production local entry).
 
 ### Next delivery order
+
+The repository-transfer increment uses `packages/contracts/src/repository-transfer.ts`
+and focused modules/tests under `apps/serve/src/hosting/transfer/`. Checkpoints
+contain a full Git bundle, a binary staged patch and exact working-file content
+addressed by SHA-256. Import is into a newly created private staging directory,
+never an existing checkout. No arbitrary tar extraction, repository config,
+hooks, remote URLs, host credentials or device sessions are transferred.
+Preflight rejects incomplete history, merge conflicts, special index flags,
+symlinks/submodules, unsafe/nonportable names and configured size limits.
+Ignored untracked files follow the source's Git ignore policy; Chorus-owned
+control/worktree folders are excluded. This increment does not activate a host
+or replace the workspace snapshot/review transfer and execution barrier work.
+
+Repository staging tests exercise actual hidden Git processes, full/unborn/
+detached history, staged and unstaged binary/text changes, deletions, ignored
+files, source filters, unsafe index modes, integrity failures and rollback while
+preserving existing target files. Limits are 256 MiB per repository checkpoint,
+16 MiB per working file and 20,000 files. External filters/object stores,
+symlinks, submodules and special index states fail preflight. Windows import
+rejects executable-bit changes that its filesystem cannot preserve. File writes
+are flushed; POSIX directory entries are flushed too. Windows crash/power-loss
+durability still requires platform qualification. This layer has no network
+endpoint and cannot start engines or change workspace ownership.
+
+`bun test ./apps/serve/src/hosting/transfer/repository-transfer.test.ts
+./packages/contracts/src/repository-transfer.test.ts`: **13 pass, 0 fail,
+82 assertions**. `bun run check` and all nine `check-types` packages pass.
 
 1. Qualify the real central/PostgreSQL/frp deployment and install reviewed native
    binaries in a Linux CI environment. Qualify the packaged local-first launcher
