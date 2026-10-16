@@ -7,13 +7,21 @@ import { readSessionCookie, verifySessionCookie } from "../auth/session";
 import type { SessionRegistry } from "../auth/session-registry";
 import type { HostRemoteAccess } from "./remote-access";
 
+function isRemoteControl(request: Request): boolean {
+  const path = new URL(request.url).pathname;
+  return path === "/hosting/remote" || path.startsWith("/hosting/remote/");
+}
+
 export function createRemoteAccessRoutes(options: {
   token: string;
   registry: SessionRegistry;
   remote: HostRemoteAccess;
 }) {
   return new Elysia()
-    .onError(({ code, set }) => {
+    .onError(({ request, code, set }) => {
+      if (!isRemoteControl(request)) {
+        return;
+      }
       set.status = code === "VALIDATION" ? 422 : 503;
       return {
         code:
@@ -23,6 +31,11 @@ export function createRemoteAccessRoutes(options: {
       };
     })
     .onRequest(async ({ request, set }) => {
+      // Elysia merges onRequest hooks into the parent; restrict this hook to
+      // this module so health, login and private local entry retain their guards.
+      if (!isRemoteControl(request)) {
+        return;
+      }
       set.headers["cache-control"] = "no-store";
       const session = await verifySessionCookie(
         readSessionCookie(request.headers.get("cookie")),

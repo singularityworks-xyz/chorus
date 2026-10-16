@@ -46,6 +46,16 @@ the locally managed CLI package are now both pinned to exact version **1.19.0**.
 Future engine or SDK updates must change both sides together and repeat the
 adapter compatibility checks.
 
+## Container qualification — 2026-10-16
+
+Bun runtime and `packageManager`/CI now agree on **1.4.3**, matching the host
+images. Serve's existing Zod (`^4.3.6`, resolved 4.6.7) and env-core
+(`^0.13.11`, resolved 0.13.11) are runtime dependencies: importing them from a
+production-only install failed when they were listed only as dev dependencies.
+Their resolved versions are unchanged. The isolated relay checks use official
+PostgreSQL **17.11** image manifest
+`sha256:3645570cccdfa447589da9f57dd740faa29b30938e861289a5574b6ca6b03826`.
+
 ### What changed between 1.3.15 and 1.18.29
 
 Diffed against the published types before upgrading (read-only, in `/tmp`):

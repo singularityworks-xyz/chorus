@@ -10,18 +10,40 @@ host-specific `CHORUS_PUBLIC_HOST`, keeps TLS keys in host-owned storage, routes
 WS and voice to Serve and other requests to Next. Set the web container's
 `CHORUS_SERVE_URL=http://serve:2000`. Leave browser WS overrides unset.
 
-Persistent data must be owned by 10001:10001. Serve also uses `/data/xdg-data`
-and `/data/xdg-config` for engine state/config; mount registered repositories
+Persistent data must be owned by 10001:10001. Fresh named volumes inherit the
+image's private `/data` ownership. Serve uses `/data/home` as HOME, keeping
+snapshot storage inside the persistent volume, and `/data/xdg-data` /
+`/data/xdg-config` for engine state/config. Its provider readers honor those same
+XDG roots. Mount registered repositories
 separately. Unmanaged deployments supply `CHORUS_TOKEN` through a protected
 deployment secret. Managed native releases use the private entry described below.
 
 This is packaging groundwork, **not a deployable relay quickstart yet**. Enrollment,
 remote device sessions, routing configuration and settings are implemented;
-native transport, certificate and container acceptance remain required.
+native transport, certificate and browser acceptance remain required.
 Do not publish engine ports or reuse a wildcard TLS private key across hosts.
 
-Container build/boot/TLS/shutdown qualification must run with Docker available.
-The implementation machine currently has no running Docker daemon.
+## Container qualification
+
+Both production targets build and boot on Linux amd64 through Docker Desktop.
+`bun scripts/check-host-container.ts serve chorus-host-serve:<local-tag>` and
+the corresponding `web` command use hidden Docker CLI children, private fixture
+configuration, fresh named storage and loopback-only random ports. They clean up
+only their own container, volume and temporary directory. No browser or agent
+server starts; the native engine is invoked only with `--version`.
+
+The checks pass with a read-only image filesystem and UID 10001: HTTP readiness,
+production authorization/bootstrap rejection, engine 1.19.0, SQLite 0600 mode,
+state preservation/integrity after restart, and SIGTERM shutdown under five
+seconds. The web image passes HTTP readiness and bounded SIGTERM cleanup too;
+installed Next exits 143 after cleanup, while Serve must exit 0. Forced kill/OOM
+are failures. CI now runs these checks after each target's image build.
+
+The paired frontend/API/TLS topology, certificate renewal, native connector and
+arm64/browser/mobile acceptance remain unqualified. Existing experimental
+containers must preserve any old `/home/chorus` state before migration to the
+new persistent `/data/home` layout; existing bind mounts still require owner
+10001:10001.
 
 ## Native production connector contract
 

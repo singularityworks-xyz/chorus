@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import path from "node:path";
+import { openCodeStoragePaths } from "../opencode/storage-paths";
 
 interface OpencodeConfigFile {
   $schema?: string;
@@ -15,8 +15,13 @@ export interface ConfiguredProviderCatalog {
 }
 
 export class OpenCodeConfigStore {
-  readonly #configDir = path.join(homedir(), ".config", "opencode");
-  readonly #configPath = path.join(this.#configDir, "opencode.json");
+  readonly #configDir: string;
+  readonly #configPath: string;
+
+  constructor(configDirectory = openCodeStoragePaths().configDirectory) {
+    this.#configDir = configDirectory;
+    this.#configPath = path.join(configDirectory, "opencode.json");
+  }
 
   async read(): Promise<OpencodeConfigFile> {
     try {

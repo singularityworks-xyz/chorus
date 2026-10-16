@@ -54,8 +54,8 @@ public deployment.
 
 | Area | Implemented | Remaining gate/work |
 | --- | --- | --- |
-| Packaging/contracts | Next standalone build, separate user-host Docker targets, strict relay/host/release contracts, encrypted storage package, separate private production entry | Fresh container build/boot/shutdown; packaged launcher and browser acceptance |
-| Relay accounts | Google/GitHub configuration, Turnstile, secure host cookies, approved enrollment, scoped machine grants, PostgreSQL metadata/quota transactions, account portal | Real provider callbacks, PostgreSQL concurrency/rollback tests and operational cleanup |
+| Packaging/contracts | Next standalone and Linux amd64 host images build; read-only non-root boot, auth, private DB mode, restart/integrity and bounded shutdown pass; strict contracts, encrypted storage and private production entry | Paired frontend/API/TLS topology, packaged launcher, arm64 and browser acceptance |
+| Relay accounts | Google/GitHub configuration, Turnstile, secure host cookies, approved enrollment, scoped machine grants, account portal; real PostgreSQL enrollment, quota/concurrency and rollback qualification | Real provider callbacks and operational cleanup |
 | Host authentication | Persistent hashed per-browser sessions, ten-device limit, in-app revocation, WS/push revocation checks, protected production cookies, encrypted internal signing root for managed local entry | Browser/mobile acceptance and packaged first launch |
 | Remote connections | frp authorization policy/plugin, SNI passthrough config, local host TLS config, verified native binary manifest, hidden child processes, bounded restart/shutdown, HTTPS readiness probe, settings enrollment/pause/resume; pinned native config checks pass | Release pipeline supplying reviewed native artifacts, actual frp protocol integration, certificates/renewals and reconnect/revocation under load |
 | Workspace move | Encrypted host identity, local signed ownership journal, bounded repository/worktree checkpoints, review object packs, portable workspace projection/path remapping and verified whole-workspace inactive staging; preparation, fencing, release, activation and return-generation tests | Automatic capture/review-root discovery, durable candidate installation, execution barriers, authenticated host pairing/transport, linked agent continuation, recovery UI and browser host switching |
@@ -87,9 +87,9 @@ implemented handoff.
   and verifies disabled clients cannot obtain another grant.
 - `bun run --cwd apps/web build`: production standalone build passes, including
   new device and remote-access routes. Relay portal build passes.
-- Docker daemon is stopped. Container/PG/real relay/browser qualification has
-  not run. The initial sandbox junction failure remains recorded in the baseline
-  above.
+- Docker was stopped at this checkpoint; subsequent PostgreSQL/container
+  qualification is recorded below. Real relay/browser qualification remains
+  open. The initial sandbox junction failure remains recorded in the baseline.
 
 ### Follow-up verification and production local entry
 
@@ -127,7 +127,7 @@ control plane and packaging), `1812990` (host/device access foundation),
 `7ce1c95` (private production local entry), `2cc19fd` (repository checkpoints),
 `a11ed44` (linked worktrees and review objects).
 
-### Next delivery order
+### Transfer checkpoints
 
 The repository-transfer increment uses `packages/contracts/src/repository-transfer.ts`
 and focused modules/tests under `apps/serve/src/hosting/transfer/`. Checkpoints
@@ -203,9 +203,52 @@ checkpoint modules): **169 pass, 0 fail, 562 assertions across 15 files**.
 The separate shell-execution regression audit passes **3 tests, 5 assertions**.
 `bun run check`, all nine `check-types` packages and `git diff --check` pass.
 All native test children use hidden argument-array execution. No browser, E2E
-runner, real agent, live tunnel or container was started for these increments.
+runner, real agent, live tunnel or container was started for those transfer increments.
 
-1. Qualify the real central/PostgreSQL/frp deployment and install reviewed native
+### Docker/PostgreSQL qualification — 2026-10-16
+
+The user started Docker Desktop; server 29.8.2 is available. Official PostgreSQL
+17.11 was pulled by recorded digest and run with memory-backed data, no host
+data mounts and a random loopback-only port. Tests use unique private schemas
+and an explicit loopback `chorus_relay_test` connection; schema removal was
+verified. The real suite covers enrollment, machine OAuth/JWKS, revocation,
+expiry, rollback, account quota races and exactly 100 admissions from 105
+simultaneous registry requests. It does not measure 100 real tunnels. Nine
+checks pass; three repeated runs pass 27 tests/294 assertions. A duplicate-host
+race exposed a hostname uniqueness error escaping `ON CONFLICT(host_id)`;
+`ON CONFLICT DO NOTHING` now maps that collision to `host_conflict`.
+
+Both user-host Docker targets build. Boot qualification exposed Serve runtime
+imports (`zod`, env-core) incorrectly listed as dev dependencies; Bun moved them
+to runtime dependencies without changing resolved versions. Fresh `/data` now
+has private non-root ownership, HOME/snapshots are persistent, and credential /
+provider-config readers honor the engine's XDG roots. Manifest-first dependency
+layers and a locked Bun cache avoid repeating downloads after source changes.
+Bun runtime, image and CI/packageManager pins now agree on 1.4.3.
+
+The real Serve HTTP check then exposed a remote-control `onRequest` hook leaking
+into parent health/login routes. Authentication/error mapping is now restricted
+to that module's own path prefix, with parent-mount regression coverage. Both
+container checks now pass: UID 10001, read-only image filesystem, loopback HTTP,
+Serve auth/bootstrap rejection, engine 1.19.0, DB 0600, persisted SQLite state and
+integrity after restart, and shutdown under five seconds. Next 16.2.2 cleanup
+intentionally exits 143 on SIGTERM; Serve must exit 0. OOM/forced kill fail.
+
+`scripts/check-host-container.ts` hides every CLI child and cleans up its own
+container/volume/private fixture directory. CI now runs PostgreSQL qualification
+and per-target container checks. Local combined relay, route composition,
+storage and execution-audit regression: **27 pass, 0 fail, 10,196 assertions
+across 11 files**. Lint/log and all nine type checks pass. No Windows browser /
+E2E runner, real agent session or live public tunnel was started. Remote CI
+execution, real provider callbacks/frp/certificates and public release gates
+remain open.
+
+Committed follow-up: `f1e8765` (PostgreSQL race/qualification). The complete
+implementation, including signed handoff runtime and UX, is still in progress.
+
+### Remaining delivery order
+
+1. Qualify the real central/frp deployment and install reviewed native
    binaries in a Linux CI environment. Qualify the packaged local-first launcher
    and its separate private entry in actual browsers.
 2. Connect authorized automatic capture and review-root discovery to the
