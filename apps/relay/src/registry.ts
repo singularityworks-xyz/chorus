@@ -140,7 +140,7 @@ export class RelayRegistry {
     }
     const hostname = `h-${input.hostId.replaceAll("-", "")}.${this.#hostsDomain}`;
     const inserted = await client.query(
-      "INSERT INTO relay_hosts(host_id,account_id,label,public_key,hostname) VALUES ($1,$2,$3,$4,$5) ON CONFLICT(host_id) DO NOTHING RETURNING host_id",
+      "INSERT INTO relay_hosts(host_id,account_id,label,public_key,hostname) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING host_id",
       [
         input.hostId,
         input.accountId,

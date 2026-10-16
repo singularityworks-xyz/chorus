@@ -1,6 +1,6 @@
 {
   "name": "chorus",
-  "version": "0.1.76",
+  "version": "0.1.77",
   "private": true,
   "scripts": {
     "build": "turbo run build",
@@ -33,7 +33,7 @@
     "vscode": "npm:@codingame/monaco-vscode-extension-api",
     "zod": "^4.3.6"
   },
-  "packageManager": "bun@1.4.0",
+  "packageManager": "bun@1.4.3",
   "trustedDependencies": [
     "opencode-ai"
   ],
