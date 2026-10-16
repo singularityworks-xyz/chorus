@@ -1,0 +1,26 @@
+{
+  "name": "@chorus/relay",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun src/index.ts",
+    "check-types": "tsc --noEmit && tsc --noEmit -p src/portal/tsconfig.json",
+    "build": "bun build src/portal/client.ts --target browser --outdir dist/portal"
+  },
+  "dependencies": {
+    "@better-auth/oauth-provider": "^1.7.10",
+    "@chorus/contracts": "workspace:*",
+    "@chorus/security": "workspace:*",
+    "better-auth": "^1.7.10",
+    "elysia": "^1.4.30",
+    "jose": "^6.2.12",
+    "pg": "^8.23.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.11",
+    "@types/pg": "^8.23.1",
+    "typescript": "6.0.2"
+  }
+}

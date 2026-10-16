@@ -142,7 +142,7 @@ jobs:
 
           COOKIE=$(curl -sf -D - -o /dev/null -X POST http://localhost:2100/auth/login \
             -H 'content-type: application/json' -d "{\"token\":\"$CHORUS_TOKEN\"}" \
-            | grep -i '^set-cookie:' | sed 's/^[Ss]et-[Cc]ookie: *//' | cut -d';' -f1 | tr -d '\r')
+            | grep -i '^set-cookie:' | sed 's/^[Ss]et-[Cc]ookie: *//' | cut -d';' -f1 | tr -d '\r' | paste -sd ';' -)
 
           # Sent as an explicit header: the cookie is Secure, so curl correctly
           # refuses to attach it over plain HTTP. TLS arrives with Caddy in P8.
@@ -177,6 +177,9 @@ jobs:
     needs: [build, integration-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      matrix:
+        target: [serve, web]
     steps:
       - uses: actions/checkout@v6
       - name: Detect Dockerfile
@@ -196,6 +199,7 @@ jobs:
           context: .
           push: false
           load: true
+          target: ${{ matrix.target }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

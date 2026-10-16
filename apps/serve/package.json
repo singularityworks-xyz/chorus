@@ -8,8 +8,10 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@chorus/contracts": "workspace:*",
     "@chorus/logger": "workspace:*",
     "@chorus/oc-adapter": "*",
+    "@chorus/security": "workspace:*",
     "@chorus/voice": "workspace:*",
     "@elysiajs/cors": "^1.4.1",
     "elysia": "^1.4.28",
