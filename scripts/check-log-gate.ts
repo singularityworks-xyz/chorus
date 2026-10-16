@@ -51,7 +51,7 @@ function trackedSourceFiles(root: string): SourceFile[] {
       "apps",
       "packages",
     ],
-    { cwd: root, stderr: "pipe", stdout: "pipe" }
+    { cwd: root, stderr: "pipe", stdout: "pipe", windowsHide: true }
   );
 
   if (result.exitCode !== 0) {

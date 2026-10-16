@@ -38,6 +38,7 @@ const workspaceManifestGlobs = [
 
 function runGit(args: string[]) {
   const result = Bun.spawnSync(["git", ...args], {
+    windowsHide: true,
     cwd: rootPath,
     stderr: "pipe",
     stdout: "pipe",
@@ -245,6 +246,7 @@ export function shouldBumpRootVersion({
 
 function runChangesetVersion() {
   const result = Bun.spawnSync(["bun", "x", "changeset", "version"], {
+    windowsHide: true,
     cwd: rootPath,
     stderr: "inherit",
     stdout: "inherit",
