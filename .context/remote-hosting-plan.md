@@ -58,7 +58,7 @@ public deployment.
 | Relay accounts | Google/GitHub configuration, Turnstile, secure host cookies, approved enrollment, scoped machine grants, PostgreSQL metadata/quota transactions, account portal | Real provider callbacks, PostgreSQL concurrency/rollback tests and operational cleanup |
 | Host authentication | Persistent hashed per-browser sessions, ten-device limit, in-app revocation, WS/push revocation checks, protected production cookies, encrypted internal signing root for managed local entry | Browser/mobile acceptance and packaged first launch |
 | Remote connections | frp authorization policy/plugin, SNI passthrough config, local host TLS config, verified native binary manifest, hidden child processes, bounded restart/shutdown, HTTPS readiness probe, settings enrollment/pause/resume; pinned native config checks pass | Release pipeline supplying reviewed native artifacts, actual frp protocol integration, certificates/renewals and reconnect/revocation under load |
-| Workspace move | Encrypted host identity, local signed ownership journal, bounded repository/worktree checkpoints, review object packs and verified import into fresh inactive staging; preparation, fencing, release, activation and return-generation tests | Whole-workspace projection/path remapping, review-root discovery/installation, execution barriers, authenticated host pairing/transport, linked agent continuation, recovery UI and browser host switching |
+| Workspace move | Encrypted host identity, local signed ownership journal, bounded repository/worktree checkpoints, review object packs, portable workspace projection/path remapping and verified whole-workspace inactive staging; preparation, fencing, release, activation and return-generation tests | Automatic capture/review-root discovery, durable candidate installation, execution barriers, authenticated host pairing/transport, linked agent continuation, recovery UI and browser host switching |
 | Release security | Strict endpoint pinning, purpose-separated encrypted credentials/signatures, negative authorization tests and dependency failure handling | ASVS L2 assessment, independent review, certificate capacity, Linux container/browser CI, phone acceptance and 100-host load qualification |
 
 Runtime remote access is optional and defaults to unconfigured. It refuses to
@@ -124,7 +124,8 @@ and packaged launcher acceptance remain required.
 
 Committed checkpoints: `187459c` (hidden check/version helpers), `4b7a53d` (relay
 control plane and packaging), `1812990` (host/device access foundation),
-`7ce1c95` (private production local entry), `2cc19fd` (repository checkpoints).
+`7ce1c95` (private production local entry), `2cc19fd` (repository checkpoints),
+`a11ed44` (linked worktrees and review objects).
 
 ### Next delivery order
 
@@ -174,11 +175,42 @@ The environment controls follow the [official Git documentation](https://git-scm
 The combined repository/worktree/review test selection passes **22 tests,
 121 assertions across five files**. Lint/log gates and all nine type checks pass.
 
+Whole-workspace staging now binds the portable state, every checkout manifest
+and requested review pack under one SHA-256 manifest chain. Source paths and
+engine project IDs become checkpoint IDs; structured task file references become
+validated relative paths. Boards, task/run history, preferences and workspace
+history are retained. Export only consumes the typed workspace projection and
+captured artifacts, never `chorus.db`, auth/push metadata or machine config.
+Unknown/cross-repository checkout bindings, duplicate identities and misnamed
+worktree/board relationships fail validation. Limits include 100 repository
+families, 1 GiB of declared artifact bytes, and a 16 MiB manifest.
+
+`publishWorkspaceCheckpoint` verifies sources before copying into a new private
+artifact directory. `stageWorkspaceCheckpoint` verifies the manifest/hash chain
+before staging a fresh inactive candidate, then restores linked worktrees and
+review stores and remaps board paths. Failed staging removes only its new
+candidate. Integration tests cover source artifact loss, altered outer/nested
+metadata, invalid review roots and rollback preserving existing target files.
+
+This is **not** an activation path. Historical source session/run identities are
+still present in the staged projection; they must not be submitted to the target
+engine or published as live state. Automatic capture/root discovery, durable
+candidate mapping/installation, quiescence/fencing, signed peer exchange and new
+linked continuation/review must be wired before the move control is offered.
+
+Final focused regression selection (shared contracts, ownership journal and all
+checkpoint modules): **169 pass, 0 fail, 562 assertions across 15 files**.
+The separate shell-execution regression audit passes **3 tests, 5 assertions**.
+`bun run check`, all nine `check-types` packages and `git diff --check` pass.
+All native test children use hidden argument-array execution. No browser, E2E
+runner, real agent, live tunnel or container was started for these increments.
+
 1. Qualify the real central/PostgreSQL/frp deployment and install reviewed native
    binaries in a Linux CI environment. Qualify the packaged local-first launcher
    and its separate private entry in actual browsers.
-2. Add portable repository, dirty index/worktree, review snapshot and workspace
-   transfer with strict file/path/size validation and destination preflight.
+2. Connect authorized automatic capture and review-root discovery to the
+   checkpoint publisher/stager. Persist and verify the target's candidate
+   mapping/installation before issuing a prepared receipt.
 3. Drain/fence engine and store execution, exchange signed peer receipts over
    host-terminated TLS, activate staged checkpoints and continue linked runs.
 4. Implement move/return/recovery UI, host-generation cache reset and device

@@ -27,3 +27,5 @@ export * from "./relay";
 export * from "./repository-transfer";
 export * from "./review-transfer";
 export * from "./session-diff";
+export * from "./workspace-checkpoint";
+export * from "./workspace-transfer";

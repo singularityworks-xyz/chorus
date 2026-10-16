@@ -124,12 +124,16 @@ export class RepositoryContent {
     }
     await regularFile(filename, metadata.size);
     const bytes = await readFile(filename);
-    return {
-      checkpoint: repositoryCheckpointSchema.parse(
-        JSON.parse(bytes.toString("utf8"))
-      ),
-      digest: createHash("sha256").update(bytes).digest("hex"),
-    };
+    try {
+      return {
+        checkpoint: repositoryCheckpointSchema.parse(
+          JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes))
+        ),
+        digest: createHash("sha256").update(bytes).digest("hex"),
+      };
+    } catch {
+      throw new RepositoryTransferError("checkpoint_invalid");
+    }
   }
 
   async save(checkpoint: RepositoryCheckpoint): Promise<string> {
