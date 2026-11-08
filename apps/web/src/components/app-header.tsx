@@ -401,11 +401,11 @@ function useProviderSettings() {
         setStoredCredentials(credentials);
         setConfiguredProviderIDs(configuredProviders);
       } catch (error) {
-        console.error("Failed to load provider status", error);
-        controller.abort();
         if (isCancelled) {
           return;
         }
+        console.error("Failed to load provider status", error);
+        controller.abort();
         setSettingsError(providerSettingsLoadErrorMessage(error));
       } finally {
         if (!isCancelled) {

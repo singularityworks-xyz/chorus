@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  getPendingQuestionApprovals,
   hasPendingQuestion,
   shouldShowReviewActions,
 } from "./task-approval-state";
@@ -22,6 +23,24 @@ describe("task approval state", () => {
 
     expect(hasPendingQuestion(task)).toBe(true);
     expect(shouldShowReviewActions(task)).toBe(false);
+  });
+
+  test("returns every synchronized question request and ignores permissions", () => {
+    const secondQuestion = {
+      ...questionApproval,
+      requestId: "question-2",
+    };
+    const requests = getPendingQuestionApprovals({
+      pendingApprovals: [questionApproval, permissionApproval, secondQuestion],
+    });
+
+    expect(requests).toEqual([questionApproval, secondQuestion]);
+  });
+
+  test("supports the legacy single pending question field", () => {
+    expect(
+      getPendingQuestionApprovals({ pendingApproval: questionApproval })
+    ).toEqual([questionApproval]);
   });
 
   test("keeps permission actions available", () => {

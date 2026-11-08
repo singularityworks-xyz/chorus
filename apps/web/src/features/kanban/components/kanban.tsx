@@ -66,6 +66,7 @@ import type { KanbanTaskActionState } from "@/features/kanban/hooks/use-kanban-c
 import { cn } from "@/lib/utils";
 import { type GroupedStep, groupSteps } from "../utils/group-steps";
 import {
+  getPendingQuestionApprovals,
   hasPendingQuestion,
   shouldShowReviewActions,
 } from "../utils/task-approval-state";
@@ -937,7 +938,10 @@ function TaskCard({
         )}
 
       {showApprovalControls && hasQuestion && task.run?.sessionId && (
-        <QuestionCard sessionID={task.run.sessionId} />
+        <QuestionCard
+          requests={getPendingQuestionApprovals(task)}
+          sessionID={task.run.sessionId}
+        />
       )}
 
       {showReviewActions && (

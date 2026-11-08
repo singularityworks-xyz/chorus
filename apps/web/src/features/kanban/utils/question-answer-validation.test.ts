@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { PendingQuestion } from "@chorus/contracts";
-import { validateQuestionAnswers } from "./question-answer-validation";
+import {
+  questionAnswerKey,
+  validateQuestionAnswers,
+} from "./question-answer-validation";
 
 function makePendingQuestion(
   questions: PendingQuestion["questions"]
@@ -33,28 +36,33 @@ describe("validateQuestionAnswers", () => {
 
   test("accepts an in-range option selection", () => {
     const pending = makePendingQuestion([choiceQuestion]);
+    const answerKey = questionAnswerKey(pending.id, 0, choiceQuestion);
 
     expect(
-      validateQuestionAnswers(pending, { "request-1:0": [1] }, {})
+      validateQuestionAnswers(pending, { [answerKey]: [1] }, {})
     ).toBeNull();
   });
 
   test("accepts custom text when the request allows it", () => {
-    const pending = makePendingQuestion([{ ...choiceQuestion, custom: true }]);
+    const customQuestion = { ...choiceQuestion, custom: true };
+    const pending = makePendingQuestion([customQuestion]);
+    const answerKey = questionAnswerKey(pending.id, 0, customQuestion);
 
     expect(
-      validateQuestionAnswers(pending, {}, { "request-1:0": "  Keep both  " })
+      validateQuestionAnswers(pending, {}, { [answerKey]: "  Keep both  " })
     ).toBeNull();
   });
 
   test("rejects stale option indices and blank custom text", () => {
-    const pending = makePendingQuestion([{ ...choiceQuestion, custom: true }]);
+    const customQuestion = { ...choiceQuestion, custom: true };
+    const pending = makePendingQuestion([customQuestion]);
+    const answerKey = questionAnswerKey(pending.id, 0, customQuestion);
 
     expect(
       validateQuestionAnswers(
         pending,
-        { "request-1:0": [12] },
-        { "request-1:0": "   " }
+        { [answerKey]: [12] },
+        { [answerKey]: "   " }
       )
     ).toBe("Answer “Implementation” before submitting.");
   });
@@ -64,9 +72,23 @@ describe("validateQuestionAnswers", () => {
       choiceQuestion,
       { ...choiceQuestion, header: "Risk" },
     ]);
+    const firstAnswerKey = questionAnswerKey(pending.id, 0, choiceQuestion);
 
-    expect(validateQuestionAnswers(pending, { "request-1:0": [0] }, {})).toBe(
-      "Answer “Risk” before submitting."
+    expect(
+      validateQuestionAnswers(pending, { [firstAnswerKey]: [0] }, {})
+    ).toBe("Answer “Risk” before submitting.");
+  });
+
+  test("does not reuse an answer when a synchronized question changes", () => {
+    const oldAnswerKey = questionAnswerKey("request-1", 0, choiceQuestion);
+    const changedQuestion = {
+      ...choiceQuestion,
+      question: "Which option should now be used?",
+    };
+    const pending = makePendingQuestion([changedQuestion]);
+
+    expect(validateQuestionAnswers(pending, { [oldAnswerKey]: [0] }, {})).toBe(
+      "Answer “Implementation” before submitting."
     );
   });
 

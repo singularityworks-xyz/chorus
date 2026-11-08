@@ -1,12 +1,24 @@
 import type { PendingQuestion } from "@chorus/contracts";
 
+export function questionAnswerKey(
+  requestId: string,
+  questionIndex: number,
+  question: PendingQuestion["questions"][number]
+) {
+  return `${requestId}:${questionIndex}:${JSON.stringify(question)}`;
+}
+
 export function validateQuestionAnswers(
   pendingQuestion: PendingQuestion,
   selected: Record<string, number[]>,
   customAnswers: Record<string, string>
 ): string | null {
   for (const [questionIndex, question] of pendingQuestion.questions.entries()) {
-    const answerKey = `${pendingQuestion.id}:${questionIndex}`;
+    const answerKey = questionAnswerKey(
+      pendingQuestion.id,
+      questionIndex,
+      question
+    );
     const selectedOptions = selected[answerKey] ?? [];
     const hasValidOption = selectedOptions.some(
       (optionIndex) => optionIndex >= 0 && optionIndex < question.options.length

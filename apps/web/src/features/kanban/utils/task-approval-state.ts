@@ -20,6 +20,17 @@ export function hasPendingQuestion(task: TaskApprovalState): boolean {
   );
 }
 
+export function getPendingQuestionApprovals(
+  task: TaskApprovalState
+): Extract<PendingApprovalRequest, { kind: "question" }>[] {
+  return pendingApprovals(task).filter(
+    (
+      approval
+    ): approval is Extract<PendingApprovalRequest, { kind: "question" }> =>
+      approval.kind === "question"
+  );
+}
+
 export function shouldShowReviewActions(task: TaskApprovalState): boolean {
   const approvals = pendingApprovals(task);
   const hasQuestion = approvals.some(
