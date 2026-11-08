@@ -82,6 +82,12 @@ const MINIMAL_PAYLOADS: Record<string, unknown> = {
     mutationId: "m1",
     payload: { model: { providerID: "p", modelID: "m" } },
   },
+  "preference.default_model.set": {
+    baseRevision: null,
+    clientId: "c1",
+    mutationId: "m1",
+    payload: { model: { providerID: "p", modelID: "m" } },
+  },
   "preference.dismiss_composer_hint": {
     baseRevision: null,
     clientId: "c1",
@@ -143,6 +149,7 @@ describe("mutation to event mapping", () => {
       ...AGENT_EVENT_TYPES,
       "board.selected",
       "preference.recent_model_added",
+      "preference.default_model_set",
       "preference.composer_hint_dismissed",
       "preference.speech_voice_set",
       "preference.board_view_mode_set",
@@ -181,6 +188,7 @@ describe("mutation to event mapping", () => {
       ...AGENT_EVENT_TYPES,
       "board.selected",
       "board.task_plan_updated",
+      "preference.default_model_set",
     ]);
     for (const agentType of AGENT_EVENT_TYPES) {
       expect(known.has(agentType)).toBe(true);
@@ -207,6 +215,7 @@ describe("vocabulary completeness", () => {
       ...AGENT_EVENT_TYPES,
       "board.selected",
       "preference.recent_model_added",
+      "preference.default_model_set",
       "preference.composer_hint_dismissed",
       "preference.speech_voice_set",
       "preference.board_view_mode_set",
@@ -238,6 +247,7 @@ describe("vocabulary completeness", () => {
       ...AGENT_EVENT_TYPES,
       "board.selected",
       "preference.recent_model_added",
+      "preference.default_model_set",
       "preference.composer_hint_dismissed",
       "preference.speech_voice_set",
       "preference.board_view_mode_set",

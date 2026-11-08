@@ -40,6 +40,11 @@ export const modelSelectionSchema = z.object({
   modelID: z.string().min(1),
 });
 
+export const apiErrorSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1),
+});
+
 export const opencodeModelSummarySchema = z.object({
   attachment: z.boolean().default(false),
   connected: z.boolean(),
@@ -90,6 +95,19 @@ export const opencodeCredentialCatalogSchema = z.object({
 
 export const opencodeConfiguredProviderCatalogSchema = z.object({
   providerIDs: z.array(z.string().min(1)),
+});
+
+export const opencodeConfigureProviderResponseSchema = z.object({
+  configured: z.boolean(),
+  providerIDs: z.array(z.string().min(1)),
+});
+
+export const opencodeModelsDialogResponseSchema = z.object({
+  opened: z.boolean(),
+});
+
+export const opencodeAuthLoginResponseSchema = z.object({
+  launched: z.boolean(),
 });
 
 export const opencodeProviderAuthPromptTextSchema = z.object({
@@ -316,6 +334,10 @@ export const boardViewModeSchema = z.enum(["stacked", "relaxed"]);
 export const workspacePreferencesSchema = z.object({
   boardViewMode: boardViewModeSchema.optional().default("relaxed"),
   composerHintDismissed: z.boolean(),
+  defaultModelSelection: modelSelectionSchema
+    .nullable()
+    .optional()
+    .default(null),
   recentlyUsedModels: modelSelectionSchema.array().default([]),
   speechVoiceId: z.string().min(1).nullable().optional().default(null),
 });
@@ -384,6 +406,12 @@ export const workspaceMutationSchema = z.discriminatedUnion("type", [
     type: z.literal("board.model.set"),
     payload: z.object({
       boardId: z.string().min(1),
+      model: modelSelectionSchema.nullable(),
+    }),
+  }),
+  workspaceMutationBaseSchema.extend({
+    type: z.literal("preference.default_model.set"),
+    payload: z.object({
       model: modelSelectionSchema.nullable(),
     }),
   }),

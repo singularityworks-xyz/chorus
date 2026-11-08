@@ -131,6 +131,50 @@ describe("project routes", () => {
     });
   });
 
+  test("configures the global provider without a board directory", async () => {
+    const projectService = makeProjectService();
+    const app = new Elysia().use(createProjectRoutes(projectService as never));
+
+    const response = await app.handle(
+      new Request("http://localhost/opencode/configure-provider", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ providerID: "openrouter" }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(projectService.configureProvider).toHaveBeenCalledWith({
+      directory: undefined,
+      providerID: "openrouter",
+    });
+  });
+
+  test("opens host-wide model and auth actions without a board directory", async () => {
+    const projectService = makeProjectService();
+    const app = new Elysia().use(createProjectRoutes(projectService as never));
+
+    const modelResponse = await app.handle(
+      new Request("http://localhost/opencode/models", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      })
+    );
+    const authResponse = await app.handle(
+      new Request("http://localhost/opencode/auth-login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      })
+    );
+
+    expect(modelResponse.status).toBe(200);
+    expect(authResponse.status).toBe(200);
+    expect(projectService.openModels).toHaveBeenCalledWith(undefined);
+    expect(projectService.launchAuthLogin).toHaveBeenCalledWith(undefined);
+  });
+
   test("lists stored auth credentials", async () => {
     const projectService = makeProjectService();
     const app = new Elysia().use(createProjectRoutes(projectService as never));

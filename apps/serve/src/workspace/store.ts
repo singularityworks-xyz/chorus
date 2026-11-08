@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import {
   applyEventToBoard,
   type BoardSeed,
+  type ModelSelection,
   type WorkspaceBoard,
   type WorkspaceEvent,
   type WorkspaceHistoryEntry,
@@ -130,6 +131,7 @@ function canonical<T>(value: T): T {
 const EMPTY_PREFERENCES: WorkspaceSnapshotInput["preferences"] = {
   boardViewMode: "relaxed",
   composerHintDismissed: false,
+  defaultModelSelection: null,
   recentlyUsedModels: [],
   speechVoiceId: null,
 };
@@ -295,6 +297,7 @@ export class WorkspaceStore {
         headSeq: this.#db.headSeq(),
       });
       await this.#reconcileWorktreeIntents();
+      await this.#migrateLegacyGlobalModelSelection();
       return;
     }
 
@@ -314,6 +317,43 @@ export class WorkspaceStore {
       await this.#parkLegacySnapshot(legacySnapshotPath);
     }
     await this.#reconcileWorktreeIntents();
+    await this.#migrateLegacyGlobalModelSelection();
+  }
+
+  /**
+   * Promote one unambiguous historical board model to the application default.
+   * Conflicting legacy selections stay unset so Settings can ask for one choice;
+   * no board is allowed to keep controlling future runs independently.
+   */
+  async #migrateLegacyGlobalModelSelection(): Promise<void> {
+    if (this.#snapshot.preferences.defaultModelSelection) {
+      return;
+    }
+
+    const selections = new Map<string, ModelSelection>();
+    for (const board of this.#snapshot.boards) {
+      const model = board.modelSelection;
+      if (model) {
+        selections.set(`${model.providerID}/${model.modelID}`, model);
+      }
+    }
+
+    if (selections.size !== 1) {
+      return;
+    }
+
+    const model = selections.values().next().value;
+    if (!model) {
+      return;
+    }
+
+    await this.applyMutation({
+      baseRevision: null,
+      clientId: "chorus:global-model-migration",
+      mutationId: "migration:global-model-selection:v1",
+      payload: { model },
+      type: "preference.default_model.set",
+    });
   }
 
   /** Resolves when every queued state change has committed. */
@@ -1233,6 +1273,18 @@ export class WorkspaceStore {
           ],
         };
 
+      case "preference.default_model.set":
+        return {
+          boardId: null,
+          events: [
+            {
+              type: "preference.default_model_set",
+              ts: now,
+              model: mutation.payload.model,
+            },
+          ],
+        };
+
       case "preference.dismiss_composer_hint":
         return {
           boardId: null,
@@ -1462,6 +1514,7 @@ export class WorkspaceStore {
       case "preference.composer_hint_dismissed":
       case "preference.speech_voice_set":
       case "preference.board_view_mode_set":
+      case "preference.default_model_set":
         return applyWorkspacePreference(snapshot, event);
 
       default: {
@@ -1684,6 +1737,16 @@ function applyWorkspacePreference(
     return {
       ...snapshot,
       preferences: { ...snapshot.preferences, boardViewMode: event.mode },
+    };
+  }
+
+  if (event.type === "preference.default_model_set") {
+    return {
+      ...snapshot,
+      preferences: {
+        ...snapshot.preferences,
+        defaultModelSelection: event.model,
+      },
     };
   }
 

@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import { Elysia } from "elysia";
+import { GlobalModelNotConfiguredError } from "../tasks/board-task-service";
 import { createHttpRoutes } from "./index";
 
 function makeMockBridge() {
@@ -38,6 +39,7 @@ function makeMockBoardTasks() {
       boards: [],
       preferences: {
         composerHintDismissed: false,
+        defaultModelSelection: null,
         speechVoiceId: null,
       },
       previousWorkspaces: [],
@@ -234,6 +236,32 @@ describe("HTTP routes", () => {
       );
 
       expect(res.status).toBe(422);
+    });
+
+    test("returns a recoverable conflict when the global model is missing", async () => {
+      const { app, boardTasks } = makeApp();
+      boardTasks.queuePrompt.mockRejectedValue(
+        new GlobalModelNotConfiguredError()
+      );
+
+      const response = await app.handle(
+        new Request("http://localhost/tasks", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            boardId: "board-1",
+            directory: "/tmp/repo",
+            text: "build a feature",
+          }),
+        })
+      );
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        code: "global_model_not_configured",
+        message:
+          "Choose one provider and model in Settings before starting a task.",
+      });
     });
   });
 

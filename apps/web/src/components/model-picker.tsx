@@ -40,6 +40,7 @@ interface ProviderGroup {
 }
 
 interface ModelPickerProps {
+  allowDefaultOption?: boolean;
   availableModels: OpencodeModelSummary[];
   className?: string;
   defaultModel?: ModelSelection;
@@ -56,6 +57,7 @@ interface TriggerCopy {
 }
 
 export function ModelPicker({
+  allowDefaultOption = true,
   availableModels,
   className,
   defaultModel,
@@ -220,7 +222,7 @@ export function ModelPicker({
                 </div>
 
                 <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-2.5">
-                  {hasSearchQuery ? null : (
+                  {hasSearchQuery || !allowDefaultOption ? null : (
                     <DefaultModelCard
                       availableModelsCount={availableModels.length}
                       defaultModel={defaultModel}

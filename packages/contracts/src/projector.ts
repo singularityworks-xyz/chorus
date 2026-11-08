@@ -782,6 +782,15 @@ export function applyEventToWorkspace(
         preferences: { ...workspace.preferences, speechVoiceId: event.voiceId },
       };
 
+    case "preference.default_model_set":
+      return {
+        ...workspace,
+        preferences: {
+          ...workspace.preferences,
+          defaultModelSelection: event.model,
+        },
+      };
+
     case "preference.board_view_mode_set":
       return {
         ...workspace,

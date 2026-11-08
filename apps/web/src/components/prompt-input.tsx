@@ -9,11 +9,7 @@ import { ArrowUp, Mic, MoreHorizontal, XIcon } from "lucide-react";
 import posthog from "posthog-js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CommandPalette } from "@/components/command-palette";
-import {
-  createModelKey,
-  DEFAULT_MODEL_KEY,
-  ModelPicker,
-} from "@/components/model-picker";
+import { createModelKey, ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
 import {
   sharedDropdownContentClass,
@@ -77,7 +73,11 @@ export function PromptInput() {
   const [isMounted, setIsMounted] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [parts, setParts] = useState<PromptPart[]>([]);
-  const [selectedModelKey, setSelectedModelKey] = useState(DEFAULT_MODEL_KEY);
+  const [selectedModelKey, setSelectedModelKey] = useState("");
+  const [modelSelectionError, setModelSelectionError] = useState<string | null>(
+    null
+  );
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [availableModels, setAvailableModels] = useState<
     OpencodeModelSummary[]
@@ -104,7 +104,7 @@ export function PromptInput() {
     selectBoard,
     sessionCommand,
     selectedBoard,
-    setBoardModel,
+    setDefaultModelSelection,
     addRecentModel,
   } = useWorkspace();
 
@@ -125,7 +125,6 @@ export function PromptInput() {
   const isBusy =
     isQueueingPrompt || selectedBoard?.session.state === "starting";
   const hasActiveRun = selectedBoard?.session.currentTaskId !== undefined;
-  const selectedDirectory = selectedBoard?.repo.directory ?? null;
   let sessionMessage = "First prompt will start a new OpenCode session.";
 
   if (hasActiveRun) {
@@ -150,14 +149,14 @@ export function PromptInput() {
       setIsLoadingModels(true);
 
       try {
-        const query = selectedDirectory
-          ? `?directory=${encodeURIComponent(selectedDirectory)}`
-          : "";
-        const response = await fetch(`/api/models${query}`, {
+        const response = await fetch("/api/models", {
           cache: "no-store",
         });
 
-        if (!response.ok || isCancelled) {
+        if (!response.ok) {
+          throw new Error(`model_catalog_http_${String(response.status)}`);
+        }
+        if (isCancelled) {
           return;
         }
 
@@ -168,14 +167,20 @@ export function PromptInput() {
 
         setAvailableModels(payload.models);
         setDefaultModel(payload.defaultModel);
+        setModelSelectionError(null);
         setSelectedModelKey((currentValue) =>
-          currentValue === DEFAULT_MODEL_KEY ||
+          currentValue === "" ||
           payload.models.some((model) => createModelKey(model) === currentValue)
             ? currentValue
-            : DEFAULT_MODEL_KEY
+            : ""
         );
       } catch (error) {
         console.error("Failed to load OpenCode models", error);
+        if (!isCancelled) {
+          setModelSelectionError(
+            "Could not load models. Check provider settings and retry."
+          );
+        }
       } finally {
         if (!isCancelled) {
           setIsLoadingModels(false);
@@ -190,34 +195,18 @@ export function PromptInput() {
     return () => {
       isCancelled = true;
     };
-  }, [selectedDirectory]);
+  }, []);
 
   useEffect(() => {
-    if (!selectedBoard || availableModels.length === 0) {
-      return;
-    }
-
-    const boardModel = selectedBoard.modelSelection;
-    if (boardModel) {
-      const modelKey = `${boardModel.providerID}/${boardModel.modelID}`;
-      const modelExists = availableModels.some(
-        (m) => `${m.providerID}/${m.modelID}` === modelKey
-      );
-      if (modelExists && modelKey !== selectedModelKey) {
-        setSelectedModelKey(modelKey);
-      } else if (!modelExists && selectedModelKey !== DEFAULT_MODEL_KEY) {
-        setSelectedModelKey(DEFAULT_MODEL_KEY);
-      }
-    } else if (selectedModelKey !== DEFAULT_MODEL_KEY) {
-      setSelectedModelKey(DEFAULT_MODEL_KEY);
-    }
-  }, [selectedBoard, availableModels, selectedModelKey]);
+    const defaultSelection = preferences.defaultModelSelection;
+    setSelectedModelKey(
+      defaultSelection
+        ? `${defaultSelection.providerID}/${defaultSelection.modelID}`
+        : ""
+    );
+  }, [preferences.defaultModelSelection]);
 
   const selectedModel = useMemo(() => {
-    if (selectedModelKey === DEFAULT_MODEL_KEY) {
-      return undefined;
-    }
-
     const [providerID, modelID] = selectedModelKey.split("/");
     if (!(providerID && modelID)) {
       return undefined;
@@ -229,15 +218,37 @@ export function PromptInput() {
     } satisfies ModelSelection;
   }, [selectedModelKey]);
 
-  const handleModelValueChange = (value: string) => {
+  const handleModelValueChange = async (value: string) => {
     setSelectedModelKey(value);
-    if (value !== DEFAULT_MODEL_KEY && selectedBoard) {
-      const [providerID, modelID] = value.split("/");
-      if (providerID && modelID) {
-        const model = { providerID, modelID };
-        setBoardModel(selectedBoard.boardId, model);
-        addRecentModel(model);
+    setModelSelectionError(null);
+    try {
+      const model = availableModels.find(
+        (candidate) => createModelKey(candidate) === value
+      );
+      if (!model) {
+        throw new Error("model_unavailable");
       }
+      if (!model.connected) {
+        throw new Error("provider_not_connected");
+      }
+      const selection = {
+        providerID: model.providerID,
+        modelID: model.modelID,
+      };
+      await setDefaultModelSelection(selection);
+      addRecentModel(selection);
+    } catch (error) {
+      const savedSelection = preferences.defaultModelSelection;
+      setSelectedModelKey(
+        savedSelection
+          ? `${savedSelection.providerID}/${savedSelection.modelID}`
+          : ""
+      );
+      setModelSelectionError(
+        error instanceof Error && error.message === "provider_not_connected"
+          ? "Connect this provider in Settings before selecting its model."
+          : "Could not save the application model. Try again in Settings."
+      );
     }
   };
 
@@ -315,6 +326,7 @@ export function PromptInput() {
     }
 
     const trimmedPrompt = prompt.trim();
+    setSubmitError(null);
 
     if (trimmedPrompt === "/undo" || trimmedPrompt === "/redo") {
       const command = trimmedPrompt.replace("/", "") as "undo" | "redo";
@@ -353,11 +365,22 @@ export function PromptInput() {
       })),
     ];
 
-    const result = await queuePrompt({
-      text: trimmedPrompt,
-      model: selectedModel,
-      parts: structuredParts,
-    });
+    let result: Awaited<ReturnType<typeof queuePrompt>>;
+    try {
+      result = await queuePrompt({
+        text: trimmedPrompt,
+        model: selectedModel,
+        parts: structuredParts,
+      });
+    } catch (error) {
+      setSubmitError(
+        error instanceof Error &&
+          error.message === "global_model_not_configured"
+          ? "Choose one provider and model in Settings before starting a task."
+          : "We could not confirm whether the task started. Check the board before retrying; your draft is still here."
+      );
+      return;
+    }
 
     if (result) {
       setPrompt("");
@@ -549,27 +572,48 @@ export function PromptInput() {
                 aria-label="Prompt Chorus"
                 className="scrollbar-hide max-h-40 min-h-8 w-full resize-none overflow-y-auto rounded-none border-0 bg-transparent p-0 font-medium text-[15px] text-white/90 shadow-none placeholder:text-white/40 focus-visible:ring-0 focus-visible:ring-offset-0 dark:bg-transparent"
                 id="chorus-prompt-input"
-                onChange={handleInput}
+                onChange={(event) => {
+                  setSubmitError(null);
+                  handleInput(event);
+                }}
                 onKeyDown={handleKeyDown}
                 placeholder="Ask Chorus to build something..."
                 ref={textareaRef}
                 rows={1}
                 value={prompt}
               />
+              {submitError ? (
+                <p
+                  className="text-[11px] text-rose-200/90 leading-4"
+                  role="alert"
+                >
+                  {submitError}
+                </p>
+              ) : null}
               {/* Bottom toolbar — single row always */}
               <div className="flex items-center justify-between opacity-80 transition-opacity focus-within:opacity-100">
                 {/* Left: model picker */}
                 <div className="flex min-w-0 items-center gap-2">
                   <ModelPicker
+                    allowDefaultOption={false}
                     availableModels={availableModels}
                     className={composerSelectTriggerClass}
                     defaultModel={defaultModel}
                     loading={isLoadingModels}
                     onValueChange={handleModelValueChange}
-                    previousModelSelection={selectedBoard?.modelSelection}
+                    previousModelSelection={preferences.defaultModelSelection}
                     recentlyUsedModels={preferences.recentlyUsedModels}
                     value={selectedModelKey}
                   />
+                  {modelSelectionError ? (
+                    <span
+                      aria-live="polite"
+                      className="text-[10px] text-rose-300"
+                      role="alert"
+                    >
+                      {modelSelectionError}
+                    </span>
+                  ) : null}
                 </div>
                 {/* Right: board (desktop only) + action buttons */}
                 <div className="flex items-center gap-2">

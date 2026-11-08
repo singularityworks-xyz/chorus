@@ -214,6 +214,12 @@ export const preferenceRecentModelAddedEventSchema =
     type: z.literal("preference.recent_model_added"),
   });
 
+export const preferenceDefaultModelSetEventSchema =
+  workspaceEventBaseSchema.extend({
+    model: modelSelectionSchema.nullable(),
+    type: z.literal("preference.default_model_set"),
+  });
+
 export const preferenceComposerHintDismissedEventSchema =
   workspaceEventBaseSchema.extend({
     type: z.literal("preference.composer_hint_dismissed"),
@@ -260,6 +266,7 @@ export const workspaceEventSchema = z.discriminatedUnion("type", [
   sessionErrorEventSchema,
   sessionTimeoutEventSchema,
   preferenceRecentModelAddedEventSchema,
+  preferenceDefaultModelSetEventSchema,
   preferenceComposerHintDismissedEventSchema,
   preferenceSpeechVoiceSetEventSchema,
   preferenceBoardViewModeSetEventSchema,

@@ -162,6 +162,11 @@ describe("WorkspaceStore persistence", () => {
         model: { providerID: "anthropic", modelID: "claude" },
       })
     );
+    await first.applyMutation(
+      mutation("preference.default_model.set", {
+        model: { providerID: "openai", modelID: "gpt-5" },
+      })
+    );
     const before = first.getSnapshot();
     await first.close();
 
@@ -171,7 +176,71 @@ describe("WorkspaceStore persistence", () => {
     expect(second.getSnapshot()).toEqual(before);
     expect(second.getBoard(boardId)?.position).toEqual({ x: 42, y: 43 });
     expect(second.getBoard(boardId)?.modelSelection?.modelID).toBe("claude");
+    expect(second.getSnapshot().preferences.defaultModelSelection).toEqual({
+      providerID: "openai",
+      modelID: "gpt-5",
+    });
     await second.close();
+  });
+
+  test("promotes one unambiguous legacy board model to the global setting", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chorus-global-model-migration-"));
+    dirs.push(dir);
+    const first = createStoreAt(dir);
+    await first.load();
+    const boardId = await seedBoard(first);
+    await first.applyMutation(
+      mutation("board.model.set", {
+        boardId,
+        model: { providerID: "anthropic", modelID: "claude" },
+      })
+    );
+    await first.close();
+
+    const second = createStoreAt(dir);
+    await second.load();
+    expect(second.getSnapshot().preferences.defaultModelSelection).toEqual({
+      providerID: "anthropic",
+      modelID: "claude",
+    });
+    const migratedSeq = second.headSeq();
+    await second.close();
+
+    const third = createStoreAt(dir);
+    await third.load();
+    expect(third.getSnapshot().preferences.defaultModelSelection).toEqual({
+      providerID: "anthropic",
+      modelID: "claude",
+    });
+    expect(third.headSeq()).toBe(migratedSeq);
+  });
+
+  test("does not choose between conflicting legacy board models", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chorus-global-model-conflict-"));
+    dirs.push(dir);
+    const first = createStoreAt(dir);
+    await first.load();
+    const firstBoardId = await seedBoard(first, "First");
+    const secondBoardId = await seedBoard(first, "Second");
+    await first.applyMutation(
+      mutation("board.model.set", {
+        boardId: firstBoardId,
+        model: { providerID: "anthropic", modelID: "claude" },
+      })
+    );
+    await first.applyMutation(
+      mutation("board.model.set", {
+        boardId: secondBoardId,
+        model: { providerID: "openai", modelID: "gpt-5" },
+      })
+    );
+    await first.close();
+
+    const recovered = createStoreAt(dir);
+    await recovered.load();
+    expect(
+      recovered.getSnapshot().preferences.defaultModelSelection
+    ).toBeNull();
   });
 
   test("every mutation type produces exactly one event", async () => {
@@ -194,6 +263,9 @@ describe("WorkspaceStore persistence", () => {
       mutation("preference.set_voice", { voice: "daniel" }),
       mutation("preference.board_view_mode.set", { mode: "stacked" }),
       mutation("preference.recently_used_models.add", {
+        model: { providerID: "p", modelID: "m" },
+      }),
+      mutation("preference.default_model.set", {
         model: { providerID: "p", modelID: "m" },
       }),
       mutation("board.select", { boardId }),

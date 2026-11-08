@@ -12,6 +12,7 @@ import { getRevertState } from "../snapshot/session-revert";
 import type { BoardTaskService } from "../tasks/board-task-service";
 import {
   BoardLifecycleError,
+  GlobalModelNotConfiguredError,
   SessionOwnershipError,
 } from "../tasks/board-task-service";
 import {
@@ -106,6 +107,11 @@ export function createHttpRoutes(
 
         if (error instanceof BoardLifecycleError) {
           set.status = error.code === "board_abort_failed" ? 504 : 409;
+          return { code: error.code, message: error.message };
+        }
+
+        if (error instanceof GlobalModelNotConfiguredError) {
+          set.status = 409;
           return { code: error.code, message: error.message };
         }
 

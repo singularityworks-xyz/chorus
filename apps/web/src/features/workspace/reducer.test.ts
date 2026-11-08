@@ -57,6 +57,7 @@ describe("snapshot handling", () => {
       preferences: {
         boardViewMode: "stacked",
         composerHintDismissed: true,
+        defaultModelSelection: null,
         recentlyUsedModels: [],
         speechVoiceId: "daniel",
       },

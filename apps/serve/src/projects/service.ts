@@ -355,7 +355,7 @@ export class ProjectService {
       });
   }
 
-  async openModels(directory: string): Promise<boolean> {
+  async openModels(directory = this.#defaultDirectory): Promise<boolean> {
     await this.#validateDirectory(directory);
     logger.info("open-models:start", { directory });
     const adapter = await this.#adapterForDirectory(directory);
@@ -371,7 +371,7 @@ export class ProjectService {
     });
   }
 
-  async runConnect(directory: string): Promise<boolean> {
+  async runConnect(directory = this.#defaultDirectory): Promise<boolean> {
     await this.#validateDirectory(directory);
     logger.info("run-connect:start", { directory });
     const adapter = await this.#adapterForDirectory(directory);
@@ -387,7 +387,7 @@ export class ProjectService {
     });
   }
 
-  async launchAuthLogin(directory: string): Promise<boolean> {
+  async launchAuthLogin(directory = this.#defaultDirectory): Promise<boolean> {
     await this.#validateDirectory(directory);
     logger.info("auth-login:start", { directory });
     const before = await this.#credentialStore.listCredentials();

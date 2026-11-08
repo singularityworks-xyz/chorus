@@ -32,6 +32,7 @@ function snapshotWith(
     preferences: {
       boardViewMode: "relaxed",
       composerHintDismissed: false,
+      defaultModelSelection: null,
       recentlyUsedModels: [],
       speechVoiceId: null,
     },

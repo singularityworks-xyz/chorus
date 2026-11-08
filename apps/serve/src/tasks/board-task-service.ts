@@ -43,6 +43,15 @@ export class BoardLifecycleError extends Error {
   }
 }
 
+export class GlobalModelNotConfiguredError extends Error {
+  readonly code = "global_model_not_configured";
+
+  constructor() {
+    super("Choose one provider and model in Settings before starting a task.");
+    this.name = "GlobalModelNotConfiguredError";
+  }
+}
+
 const BOARD_ABORT_TIMEOUT_MS = 5000;
 
 type SdkPart =
@@ -582,7 +591,19 @@ export class BoardTaskService {
     const directory = boardDirectory(persistedBoard);
     await this.assertCheckoutAuthorized(directory);
 
-    const input: QueueBoardPromptInput = { ...parsed, directory };
+    const defaultModelSelection =
+      this.#workspaceStore.getSnapshot().preferences.defaultModelSelection;
+    if (!defaultModelSelection) {
+      throw new GlobalModelNotConfiguredError();
+    }
+
+    const input: QueueBoardPromptInput = {
+      ...parsed,
+      directory,
+      // The synced workspace preference is authoritative. Never let a stale
+      // board model or browser request select a different provider.
+      model: defaultModelSelection,
+    };
 
     logger.info("queue-prompt:start", {
       boardId: input.boardId,

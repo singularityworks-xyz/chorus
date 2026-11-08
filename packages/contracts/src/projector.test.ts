@@ -867,6 +867,7 @@ describe("workspace-scoped events", () => {
     preferences: {
       boardViewMode: "relaxed" as const,
       composerHintDismissed: false,
+      defaultModelSelection: null,
       recentlyUsedModels: [],
       speechVoiceId: null,
     },
@@ -920,6 +921,25 @@ describe("workspace-scoped events", () => {
       mode: "stacked",
     });
     expect(next.preferences.boardViewMode).toBe("stacked");
+  });
+
+  test("global model selection is shared and can be cleared", () => {
+    const selected = applyEventToWorkspace(workspace, {
+      type: "preference.default_model_set",
+      ts: T0,
+      model: { providerID: "anthropic", modelID: "claude" },
+    });
+    expect(selected.preferences.defaultModelSelection).toEqual({
+      providerID: "anthropic",
+      modelID: "claude",
+    });
+
+    const cleared = applyEventToWorkspace(selected, {
+      type: "preference.default_model_set",
+      ts: T0,
+      model: null,
+    });
+    expect(cleared.preferences.defaultModelSelection).toBeNull();
   });
 
   test("recent models prepend and de-duplicate", () => {

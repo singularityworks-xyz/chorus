@@ -101,6 +101,7 @@ export interface WorkspaceContextValue {
   sessionStatus: "connecting" | "live" | "offline" | "auth-expired";
   setBoardModel: (boardId: string, model: ModelSelection | null) => void;
   setBoardViewMode: (mode: WorkspacePreferences["boardViewMode"]) => void;
+  setDefaultModelSelection: (model: ModelSelection | null) => Promise<void>;
   setSpeechVoiceId: (voiceId: string | null) => void;
   updateBoardColumns: (boardId: string, columns: Columns) => void;
   updateBoardPosition: (

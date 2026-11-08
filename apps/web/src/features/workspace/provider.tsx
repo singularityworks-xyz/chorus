@@ -1,7 +1,9 @@
 "use client";
 
 import {
+  apiErrorSchema,
   boardSeedSchema,
+  type ModelSelection,
   projectListResponseSchema,
   queueBoardPromptResponseSchema,
   type SequencedEvent,
@@ -436,7 +438,15 @@ export function ChorusWorkspaceProvider({
         }
 
         if (!response.ok) {
-          throw new Error(`Failed to queue prompt: ${String(response.status)}`);
+          const errorPayload = apiErrorSchema.safeParse(
+            await response.json().catch(() => undefined)
+          );
+          throw new Error(
+            errorPayload.success &&
+              errorPayload.data.code === "global_model_not_configured"
+              ? errorPayload.data.code
+              : "prompt_request_failed"
+          );
         }
 
         const payload = queueBoardPromptResponseSchema.parse(
@@ -465,9 +475,6 @@ export function ChorusWorkspaceProvider({
             title: input.text.slice(0, 96),
           },
         };
-      } catch (error) {
-        console.error("Failed to queue prompt:", error);
-        return null;
       } finally {
         setIsQueueingPrompt(false);
       }
@@ -616,6 +623,20 @@ export function ChorusWorkspaceProvider({
     [mutateWorkspace]
   );
 
+  const setDefaultModelSelection = useCallback(
+    async (model: ModelSelection | null): Promise<void> => {
+      await mutateWorkspace(
+        createWorkspaceMutation(
+          clientIdRef.current,
+          revisionRef.current,
+          "preference.default_model.set",
+          { model }
+        )
+      );
+    },
+    [mutateWorkspace]
+  );
+
   const addRecentModel = useCallback(
     (model: Parameters<WorkspaceContextValue["addRecentModel"]>[0]) => {
       mutateWorkspace(
@@ -727,6 +748,7 @@ export function ChorusWorkspaceProvider({
     sessionCommand,
     sessionStatus: status,
     setBoardModel,
+    setDefaultModelSelection,
     setBoardViewMode,
     setSpeechVoiceId,
     updateBoardColumns,

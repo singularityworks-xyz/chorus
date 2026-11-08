@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkspaceBoard } from "@chorus/contracts";
 import { WorkspaceStore } from "../workspace/store";
-import { BoardTaskService, SessionOwnershipError } from "./board-task-service";
+import {
+  BoardTaskService,
+  GlobalModelNotConfiguredError,
+  SessionOwnershipError,
+} from "./board-task-service";
 
 function makeMockBridge() {
   return {
@@ -33,7 +37,8 @@ const REPO = { directory: "/tmp/repo", sandboxes: [], worktree: "/tmp/repo" };
 async function seedBoard(
   workspaceStore: WorkspaceStore,
   session?: Partial<WorkspaceBoard["session"]>,
-  repo: { directory: string; worktree: string } = REPO
+  repo: { directory: string; worktree: string } = REPO,
+  configureGlobalModel = true
 ) {
   const created = await workspaceStore.applyMutation({
     baseRevision: null,
@@ -51,6 +56,16 @@ async function seedBoard(
   }
 
   const boardId = event.board.boardId;
+
+  if (configureGlobalModel) {
+    await workspaceStore.applyMutation({
+      baseRevision: null,
+      clientId: "task-test",
+      mutationId: `default-model-${crypto.randomUUID()}`,
+      payload: { model: { providerID: "anthropic", modelID: "claude" } },
+      type: "preference.default_model.set",
+    });
+  }
 
   if (session) {
     await workspaceStore.applyMutation({
@@ -198,9 +213,86 @@ describe("BoardTaskService", () => {
       sessionID: "sess-123",
       directory: "/tmp/repo",
       text: "build feature",
-      model: undefined,
+      model: { providerID: "anthropic", modelID: "claude" },
       agent: undefined,
     });
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("uses one application model across boards despite client model overrides", async () => {
+    const bridge = makeMockBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-board-global-model-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    let createdSessionCount = 0;
+    bridge.createSession.mockImplementation(() => {
+      createdSessionCount += 1;
+      return Promise.resolve({
+        id: `global-model-session-${String(createdSessionCount)}`,
+      });
+    });
+    const boardId = await seedBoard(workspaceStore, { state: "uninitialized" });
+    const secondBoardId = await seedBoard(workspaceStore, {
+      state: "uninitialized",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    await service.queuePrompt({
+      boardId,
+      directory: "/tmp/repo",
+      model: { providerID: "openai", modelID: "gpt-5" },
+      reviewMode: "auto",
+      text: "use the global provider",
+    });
+    await service.queuePrompt({
+      boardId: secondBoardId,
+      directory: "/tmp/repo",
+      reviewMode: "auto",
+      text: "use the same global provider on another board",
+    });
+
+    expect(bridge.promptSessionAsync).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        model: { providerID: "anthropic", modelID: "claude" },
+      })
+    );
+    expect(bridge.promptSessionAsync).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        model: { providerID: "anthropic", modelID: "claude" },
+      })
+    );
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("requires a global model before creating a session", async () => {
+    const bridge = makeMockBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-board-no-global-model-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(
+      workspaceStore,
+      { state: "uninitialized" },
+      REPO,
+      false
+    );
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    await expect(
+      service.queuePrompt({
+        boardId,
+        directory: "/tmp/repo",
+        reviewMode: "auto",
+        text: "do not silently use the project provider",
+      })
+    ).rejects.toBeInstanceOf(GlobalModelNotConfiguredError);
+    expect(bridge.createSession).not.toHaveBeenCalled();
+    expect(bridge.promptSessionAsync).not.toHaveBeenCalled();
 
     await workspaceStore.close();
     rmSync(dir, { force: true, recursive: true });
@@ -231,7 +323,7 @@ describe("BoardTaskService", () => {
       sessionID: "sess-123",
       directory: "/tmp/repo",
       text: "follow up",
-      model: undefined,
+      model: { providerID: "anthropic", modelID: "claude" },
       agent: undefined,
     });
 

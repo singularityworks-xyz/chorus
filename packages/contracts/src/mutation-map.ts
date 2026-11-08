@@ -25,6 +25,7 @@ import type { WorkspaceEventType } from "./events";
  * | board.review_mode.set                   | board.review_mode_set                |
  * | board.task.plan.update                  | board.task_plan_updated              |
  * | preference.recently_used_models.add     | preference.recent_model_added        |
+ * | preference.default_model.set            | preference.default_model_set        |
  * | preference.dismiss_composer_hint        | preference.composer_hint_dismissed   |
  * | preference.speech_voice.set             | preference.speech_voice_set          |
  * | preference.set_voice                    | preference.speech_voice_set          |
@@ -45,6 +46,7 @@ export const MUTATION_EVENT_MAP = {
   "board.review_mode.set": "board.review_mode_set",
   "board.task.plan.update": "board.task_plan_updated",
   "preference.recently_used_models.add": "preference.recent_model_added",
+  "preference.default_model.set": "preference.default_model_set",
   "preference.dismiss_composer_hint": "preference.composer_hint_dismissed",
   "preference.speech_voice.set": "preference.speech_voice_set",
   "preference.set_voice": "preference.speech_voice_set",
