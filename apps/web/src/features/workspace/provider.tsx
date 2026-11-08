@@ -23,6 +23,12 @@ import {
   workspaceReducer,
 } from "./reducer";
 import type { WorkspaceContextValue } from "./types";
+import {
+  OPEN_FOLDER_ERROR,
+  WORKSPACE_MUTATION_ERROR,
+  workspaceActionErrorMessage,
+  workspaceApiError,
+} from "./workspace-action-error";
 import { WorkspaceContext } from "./workspace-context";
 
 /**
@@ -87,6 +93,9 @@ export function ChorusWorkspaceProvider({
   const [isQueueingPrompt, setIsQueueingPrompt] = useState(false);
   const [authExpired, setAuthExpired] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [workspaceActionError, setWorkspaceActionError] = useState<
+    string | null
+  >(null);
   const [recentProjects, setRecentProjects] = useState<
     WorkspaceContextValue["recentProjects"]
   >([]);
@@ -218,6 +227,10 @@ export function ChorusWorkspaceProvider({
     [reportSyncUnauthorized]
   );
 
+  const dismissWorkspaceActionError = useCallback(() => {
+    setWorkspaceActionError(null);
+  }, []);
+
   /**
    * Sends one mutation.
    *
@@ -226,18 +239,33 @@ export function ChorusWorkspaceProvider({
    */
   const mutateWorkspace = useCallback(
     async (mutation: WorkspaceMutation): Promise<void> => {
-      const response = await fetch("/api/workspace", {
-        body: JSON.stringify(mutation),
-        headers: { "content-type": "application/json" },
-        method: "POST",
-      });
+      try {
+        const response = await fetch("/api/workspace", {
+          body: JSON.stringify(mutation),
+          headers: { "content-type": "application/json" },
+          method: "POST",
+          signal: AbortSignal.timeout(10_000),
+        });
 
-      if (reportUnauthorized(response)) {
-        throw new Error("unauthorized");
-      }
+        if (reportUnauthorized(response)) {
+          throw new ChorusApiError("unauthorized", "unauthorized");
+        }
 
-      if (!response.ok) {
-        throw new Error(`mutation failed: ${String(response.status)}`);
+        if (!response.ok) {
+          const payload: unknown = await response.json().catch(() => undefined);
+          throw workspaceApiError(payload, WORKSPACE_MUTATION_ERROR);
+        }
+
+        setWorkspaceActionError(null);
+      } catch (error) {
+        if (
+          !(error instanceof ChorusApiError && error.code === "unauthorized")
+        ) {
+          setWorkspaceActionError(
+            workspaceActionErrorMessage(error, WORKSPACE_MUTATION_ERROR)
+          );
+        }
+        throw error;
       }
     },
     [reportUnauthorized]
@@ -267,13 +295,22 @@ export function ChorusWorkspaceProvider({
 
   const openFolder = useCallback(async () => {
     setIsOpeningFolder(true);
+    setWorkspaceActionError(null);
 
     try {
       const response = await fetch("/api/projects/open-folder", {
         method: "POST",
       });
 
-      if (reportUnauthorized(response) || !response.ok) {
+      if (reportUnauthorized(response)) {
+        return;
+      }
+
+      if (!response.ok) {
+        const payload: unknown = await response.json().catch(() => undefined);
+        setWorkspaceActionError(
+          workspaceApiError(payload, OPEN_FOLDER_ERROR).message
+        );
         return;
       }
 
@@ -299,6 +336,11 @@ export function ChorusWorkspaceProvider({
       await loadProjects();
     } catch (error) {
       console.error("Failed to open folder:", error);
+      if (!(error instanceof ChorusApiError && error.code === "unauthorized")) {
+        setWorkspaceActionError(
+          workspaceActionErrorMessage(error, OPEN_FOLDER_ERROR)
+        );
+      }
     } finally {
       setIsOpeningFolder(false);
     }
@@ -701,6 +743,7 @@ export function ChorusWorkspaceProvider({
     boards,
     clearSelection,
     connectionError,
+    dismissWorkspaceActionError,
     hydrated,
     createBoardFromHistory,
     createBoardFromProject: createBoardFromRecentProject,
@@ -732,6 +775,7 @@ export function ChorusWorkspaceProvider({
     updateBoardColumns,
     updateBoardPosition,
     updateBoardReviewMode,
+    workspaceActionError,
   };
 
   return (

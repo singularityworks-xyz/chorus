@@ -56,6 +56,7 @@ export interface WorkspaceContextValue {
   createBoardFromHistory: (entry: WorkspaceHistoryEntry) => void;
   createBoardFromProject: (project: RepoProject) => void;
   dismissComposerHint: () => void;
+  dismissWorkspaceActionError: () => void;
   /** Focus a board on this device without changing the shared board selection. */
   focusBoardLocally: (boardId: string) => void;
   /**
@@ -111,4 +112,5 @@ export interface WorkspaceContextValue {
     boardId: string,
     reviewMode: "manual" | "auto"
   ) => Promise<void>;
+  workspaceActionError: string | null;
 }
