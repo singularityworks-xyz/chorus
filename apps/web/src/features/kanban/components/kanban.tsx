@@ -1188,21 +1188,30 @@ function defaultColumns(boardId = "board"): Columns {
 }
 
 function ReviewModeToggle({
+  pending,
   reviewMode,
   onToggle,
 }: {
+  pending: boolean;
   reviewMode: "manual" | "auto";
   onToggle: (mode: "manual" | "auto") => void;
 }) {
+  const modeLabel = reviewMode === "manual" ? "Manual" : "Auto";
+  let toggleTitle = "Switch to manual review";
+  if (pending) {
+    toggleTitle = "Saving review mode";
+  } else if (reviewMode === "manual") {
+    toggleTitle = "Switch to auto-accept";
+  }
+
   return (
     <button
+      aria-busy={pending}
+      aria-label={pending ? "Saving review mode" : `${modeLabel} review mode`}
       className="flex items-center gap-1.5 rounded-xs px-1.5 py-0.5 transition-colors hover:bg-white/5"
+      disabled={pending}
       onClick={() => onToggle(reviewMode === "manual" ? "auto" : "manual")}
-      title={
-        reviewMode === "manual"
-          ? "Switch to auto-accept"
-          : "Switch to manual review"
-      }
+      title={toggleTitle}
       type="button"
     >
       <span
@@ -1211,7 +1220,7 @@ function ReviewModeToggle({
           reviewMode === "manual" ? "text-amber-400" : "text-white/25"
         )}
       >
-        {reviewMode === "manual" ? "Manual" : "Auto"}
+        {pending ? "Saving…" : modeLabel}
       </span>
       <span
         className={cn(
@@ -1238,11 +1247,15 @@ function ColumnHeader({
   columnId,
   tasks,
   reviewMode,
+  reviewModeError,
+  reviewModePending,
   onReviewModeChange,
 }: {
   columnId: string;
   tasks: Task[];
   reviewMode: "manual" | "auto";
+  reviewModeError: string | null;
+  reviewModePending: boolean;
   onReviewModeChange: (mode: "manual" | "auto") => void;
 }) {
   const col = COLUMNS[columnId];
@@ -1270,26 +1283,34 @@ function ColumnHeader({
     : null;
 
   return (
-    <div className="flex items-center gap-2 px-1 pt-0.5 pb-0.5">
-      {col.icon}
-      <h3 className="truncate font-semibold text-[0.7rem] text-muted-foreground uppercase tracking-widest dark:text-white/40">
-        {col.title}
-      </h3>
-      <div className="ml-auto flex size-5 shrink-0 items-center justify-center rounded-full bg-white/6 font-semibold text-[10px] text-white/45">
-        {tasks.length}
+    <>
+      <div className="flex items-center gap-2 px-1 pt-0.5 pb-0.5">
+        {col.icon}
+        <h3 className="truncate font-semibold text-[0.7rem] text-muted-foreground uppercase tracking-widest dark:text-white/40">
+          {col.title}
+        </h3>
+        <div className="ml-auto flex size-5 shrink-0 items-center justify-center rounded-full bg-white/6 font-semibold text-[10px] text-white/45">
+          {tasks.length}
+        </div>
+        {isDone && doneTotals && doneTotals.fileCount > 0 && (
+          <span className="shrink-0 rounded-xs bg-white/5 px-1.5 py-0.5 font-mono text-[0.55rem] text-white/35">
+            {doneTotals.fileCount} file{doneTotals.fileCount === 1 ? "" : "s"}
+          </span>
+        )}
+        {isReview && (
+          <ReviewModeToggle
+            onToggle={onReviewModeChange}
+            pending={reviewModePending}
+            reviewMode={reviewMode}
+          />
+        )}
       </div>
-      {isDone && doneTotals && doneTotals.fileCount > 0 && (
-        <span className="shrink-0 rounded-xs bg-white/5 px-1.5 py-0.5 font-mono text-[0.55rem] text-white/35">
-          {doneTotals.fileCount} file{doneTotals.fileCount === 1 ? "" : "s"}
-        </span>
+      {isReview && reviewModeError && (
+        <p className="px-1 text-[0.62rem] text-rose-300/85" role="alert">
+          {reviewModeError}
+        </p>
       )}
-      {isReview && (
-        <ReviewModeToggle
-          onToggle={onReviewModeChange}
-          reviewMode={reviewMode}
-        />
-      )}
-    </div>
+    </>
   );
 }
 
@@ -1350,6 +1371,8 @@ function KanbanColumnRenderer({
   columnId,
   tasks,
   reviewMode,
+  reviewModeError,
+  reviewModePending,
   actionStates,
   onReviewModeChange,
   onApprove,
@@ -1364,6 +1387,8 @@ function KanbanColumnRenderer({
   columnId: string;
   tasks: Task[];
   reviewMode: "manual" | "auto";
+  reviewModeError: string | null;
+  reviewModePending: boolean;
   onReviewModeChange: (mode: "manual" | "auto") => void;
   actionStates?: Record<string, KanbanTaskActionState | undefined>;
   onApprove?: (
@@ -1397,6 +1422,8 @@ function KanbanColumnRenderer({
         onReviewModeChange={onReviewModeChange}
         onRun={onRun}
         reviewMode={reviewMode}
+        reviewModeError={reviewModeError}
+        reviewModePending={reviewModePending}
         tasks={tasks}
       />
     </ResizablePanel>
@@ -1416,6 +1443,8 @@ export function KanbanColumnBody({
   columnId,
   tasks,
   reviewMode,
+  reviewModeError,
+  reviewModePending,
   actionStates,
   onReviewModeChange,
   onApprove,
@@ -1430,6 +1459,8 @@ export function KanbanColumnBody({
   columnId: string;
   tasks: Task[];
   reviewMode: "manual" | "auto";
+  reviewModeError: string | null;
+  reviewModePending: boolean;
   onReviewModeChange: (mode: "manual" | "auto") => void;
   actionStates?: Record<string, KanbanTaskActionState | undefined>;
   onApprove?: (
@@ -1462,6 +1493,8 @@ export function KanbanColumnBody({
             columnId={columnId}
             onReviewModeChange={onReviewModeChange}
             reviewMode={reviewMode}
+            reviewModeError={reviewModeError}
+            reviewModePending={reviewModePending}
             tasks={tasks}
           />
 
@@ -1518,6 +1551,8 @@ export function KanbanColumnBody({
 export function KanbanCardContent({
   data,
   actionStates,
+  reviewModeError,
+  reviewModePending,
   onColumnsChange,
   onReviewModeChange,
   onApprove,
@@ -1530,8 +1565,10 @@ export function KanbanCardContent({
 }: {
   data: KanbanCardData;
   actionStates?: Record<string, KanbanTaskActionState | undefined>;
+  reviewModeError: string | null;
+  reviewModePending: boolean;
   onColumnsChange: (columns: Columns) => void;
-  onReviewModeChange?: (mode: "manual" | "auto") => void;
+  onReviewModeChange: (mode: "manual" | "auto") => void | Promise<void>;
   onApprove?: (
     taskId: string,
     plan: string,
@@ -1544,14 +1581,7 @@ export function KanbanCardContent({
   onPlanChange?: (taskId: string, plan: string) => void;
   onQuestionsAnswered?: (taskId: string, answers: string[]) => void;
 }) {
-  const [reviewMode, setReviewMode] = useState<"manual" | "auto">(
-    data.reviewMode ?? "auto"
-  );
-
-  const handleReviewModeChange = (mode: "manual" | "auto") => {
-    setReviewMode(mode);
-    onReviewModeChange?.(mode);
-  };
+  const reviewMode = data.reviewMode ?? "auto";
 
   return (
     <Kanban
@@ -1577,9 +1607,11 @@ export function KanbanCardContent({
                 onQuestionsAnswered={onQuestionsAnswered}
                 onReject={onReject}
                 onRetry={onRetry}
-                onReviewModeChange={handleReviewModeChange}
+                onReviewModeChange={onReviewModeChange}
                 onRun={onRun}
                 reviewMode={reviewMode}
+                reviewModeError={reviewModeError}
+                reviewModePending={reviewModePending}
                 tasks={tasks}
               />
               {index < arr.length - 1 && <ResizableHandle withHandle />}

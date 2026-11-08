@@ -371,7 +371,7 @@ function KanbanCardNodeComponent({
   selected,
 }: NodeProps<Node<Record<string, unknown>>>) {
   const cardData = rawData as unknown as KanbanCardNodeData;
-  const reviewMode = cardData.reviewMode ?? "auto";
+  const configuredReviewMode = cardData.reviewMode ?? "auto";
   const [localGitStatus, setLocalGitStatus] = useState<GitStatus | null>(
     cardData.gitStatus ?? null
   );
@@ -401,10 +401,14 @@ function KanbanCardNodeComponent({
     handleRetry,
     handleRun,
     handleReviewModeChange,
+    reviewMode,
+    reviewModeError,
+    reviewModePending,
   } = useKanbanCardActions({
     boardId: cardData.boardId,
     columns: cardData.columns,
     onUpdateColumns: cardData.onUpdateColumns,
+    reviewMode: configuredReviewMode,
     sessionId: cardData.sessionId,
   });
   const handleCreateTask = useCallback(() => {
@@ -606,6 +610,8 @@ function KanbanCardNodeComponent({
               onRetry={handleRetry}
               onReviewModeChange={handleReviewModeChange}
               onRun={handleRun}
+              reviewModeError={reviewModeError}
+              reviewModePending={reviewModePending}
             />
           </div>
         </div>

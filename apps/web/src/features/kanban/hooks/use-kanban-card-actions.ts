@@ -8,7 +8,7 @@ import {
   type Task,
 } from "@chorus/contracts";
 import posthog from "posthog-js";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 
 export interface KanbanTaskActionState {
@@ -30,9 +30,12 @@ export interface KanbanCardActions {
   handleQuestionsAnswered: (taskId: string, answers: string[]) => void;
   handleReject: (taskId: string) => Promise<void>;
   handleRetry: (taskId: string) => Promise<void>;
-  handleReviewModeChange: (mode: "manual" | "auto") => void;
+  handleReviewModeChange: (mode: "manual" | "auto") => Promise<void>;
   handleRun: (taskId: string) => Promise<void>;
   localColumns: Columns;
+  reviewMode: "manual" | "auto";
+  reviewModeError: string | null;
+  reviewModePending: boolean;
 }
 
 async function requireAccepted(response: Response, fallback: string) {
@@ -197,17 +200,24 @@ export function useKanbanCardActions({
   boardId,
   columns,
   onUpdateColumns,
+  reviewMode,
   sessionId,
 }: {
   boardId: string;
   columns: Columns;
   onUpdateColumns?: (boardId: string, columns: Columns) => void;
+  reviewMode: "manual" | "auto";
   sessionId?: string | undefined;
 }): KanbanCardActions {
   const [localColumns, setLocalColumns] = useState<Columns>(columns);
+  const [localReviewMode, setLocalReviewMode] = useState(reviewMode);
+  const [reviewModePending, setReviewModePending] = useState(false);
+  const [reviewModeError, setReviewModeError] = useState<string | null>(null);
   const [actionStates, setActionStates] = useState<
     Record<string, KanbanTaskActionState | undefined>
   >({});
+  const reviewModeRef = useRef(reviewMode);
+  const reviewModeCommandRef = useRef(0);
   const { updateBoardReviewMode } = useWorkspace();
 
   // Server events own lifecycle columns. The hook keeps no optimistic lifecycle
@@ -215,6 +225,19 @@ export function useKanbanCardActions({
   useEffect(() => {
     setLocalColumns(columns);
   }, [columns]);
+
+  useEffect(() => {
+    reviewModeRef.current = reviewMode;
+    setLocalReviewMode(reviewMode);
+    setReviewModeError(null);
+  }, [reviewMode]);
+
+  useEffect(
+    () => () => {
+      reviewModeCommandRef.current += 1;
+    },
+    []
+  );
 
   useEffect(() => {
     const approvalTaskIds = new Set(
@@ -448,9 +471,31 @@ export function useKanbanCardActions({
   );
 
   const handleReviewModeChange = useCallback(
-    (mode: "manual" | "auto") => {
+    async (mode: "manual" | "auto") => {
+      const commandId = reviewModeCommandRef.current + 1;
+      reviewModeCommandRef.current = commandId;
+      const previousMode = reviewModeRef.current;
+      reviewModeRef.current = mode;
+      setLocalReviewMode(mode);
+      setReviewModePending(true);
+      setReviewModeError(null);
       posthog.capture("kanban_review_mode_changed", { boardId, mode });
-      updateBoardReviewMode(boardId, mode);
+
+      try {
+        await updateBoardReviewMode(boardId, mode);
+      } catch {
+        if (reviewModeCommandRef.current === commandId) {
+          reviewModeRef.current = previousMode;
+          setLocalReviewMode(previousMode);
+          setReviewModeError(
+            "Could not save the review mode. Your previous setting was restored; try again."
+          );
+        }
+      } finally {
+        if (reviewModeCommandRef.current === commandId) {
+          setReviewModePending(false);
+        }
+      }
     },
     [boardId, updateBoardReviewMode]
   );
@@ -466,5 +511,8 @@ export function useKanbanCardActions({
     handleRun,
     handleReviewModeChange,
     localColumns,
+    reviewMode: localReviewMode,
+    reviewModeError,
+    reviewModePending,
   };
 }

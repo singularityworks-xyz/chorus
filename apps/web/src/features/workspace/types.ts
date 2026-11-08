@@ -110,5 +110,5 @@ export interface WorkspaceContextValue {
   updateBoardReviewMode: (
     boardId: string,
     reviewMode: "manual" | "auto"
-  ) => void;
+  ) => Promise<void>;
 }

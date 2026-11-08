@@ -1,7 +1,6 @@
 "use client";
 
 import type { Columns } from "@chorus/contracts";
-import { useEffect, useState } from "react";
 import { Kanban, KanbanColumnBody } from "@/features/kanban/components/kanban";
 import { useKanbanCardActions } from "@/features/kanban/hooks/use-kanban-card-actions";
 import { useWorkspace } from "@/features/workspace/workspace-context";
@@ -156,18 +155,9 @@ function MobileBoardBody({
     boardId,
     columns,
     onUpdateColumns,
+    reviewMode,
     sessionId,
   });
-
-  // `KanbanColumnBody` reads review mode as a prop rather than owning it, so the
-  // phone view has to echo the change back immediately: the mutation round trip
-  // is slow enough that a toggle which appears to do nothing is
-  // indistinguishable from a broken one. The server value wins once its event
-  // lands, which the effect below picks up.
-  const [mode, setMode] = useState<"manual" | "auto">(reviewMode);
-  useEffect(() => {
-    setMode(reviewMode);
-  }, [reviewMode]);
 
   return (
     <div
@@ -200,12 +190,11 @@ function MobileBoardBody({
               onQuestionsAnswered={actions.handleQuestionsAnswered}
               onReject={actions.handleReject}
               onRetry={actions.handleRetry}
-              onReviewModeChange={(nextMode) => {
-                setMode(nextMode);
-                actions.handleReviewModeChange(nextMode);
-              }}
+              onReviewModeChange={actions.handleReviewModeChange}
               onRun={actions.handleRun}
-              reviewMode={mode}
+              reviewMode={actions.reviewMode}
+              reviewModeError={actions.reviewModeError}
+              reviewModePending={actions.reviewModePending}
               tasks={actions.localColumns[lane] ?? []}
             />
           </section>

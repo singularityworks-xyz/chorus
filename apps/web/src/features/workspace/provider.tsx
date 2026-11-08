@@ -593,16 +593,14 @@ export function ChorusWorkspaceProvider({
       boardId: string,
       reviewMode: Parameters<WorkspaceContextValue["updateBoardReviewMode"]>[1]
     ) => {
-      mutateWorkspace(
+      return mutateWorkspace(
         createWorkspaceMutation(
           clientIdRef.current,
           revisionRef.current,
           "board.review_mode.set",
           { boardId, reviewMode }
         )
-      ).catch((error: unknown) => {
-        console.error("Failed to update board review mode:", error);
-      });
+      );
     },
     [mutateWorkspace]
   );
