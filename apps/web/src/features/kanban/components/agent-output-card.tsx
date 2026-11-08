@@ -22,6 +22,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
+import { copyTextToClipboard } from "../utils/copy-text-to-clipboard";
 import { type GroupedStep, groupSteps } from "../utils/group-steps";
 
 export type AgentStepKind =
@@ -58,6 +59,28 @@ export interface AgentRunContext {
 const EMPTY_AGENT_STEPS: AgentStep[] = [];
 const MARKDOWN_PLUGINS = [remarkGfm];
 const MARKDOWN_REFRESH_INTERVAL_MS = 100;
+const COPY_STATE_PRESENTATION = {
+  copying: {
+    iconClass: "text-white/30",
+    label: "Copy response",
+    title: "Copy response",
+  },
+  copied: {
+    iconClass: "text-emerald-400",
+    label: "Response copied",
+    title: "Response copied",
+  },
+  error: {
+    iconClass: "text-rose-400",
+    label: "Copy response failed",
+    title: "Could not copy. Select the response and copy it manually.",
+  },
+  idle: {
+    iconClass: "text-white/30",
+    label: "Copy response",
+    title: "Copy response",
+  },
+} as const;
 
 function useStreamedMarkdownContent(content: string, isStreaming: boolean) {
   const [displayedContent, setDisplayedContent] = useState(content);
@@ -188,6 +211,8 @@ function GroupedThinkingBlock({
 
         {hasContent && (
           <button
+            aria-expanded={expanded}
+            aria-label={`${expanded ? "Collapse" : "Expand"} thinking details`}
             className="shrink-0 rounded-xs p-0.5 transition-colors hover:bg-white/10"
             onClick={() => setExpanded(!expanded)}
             type="button"
@@ -227,7 +252,12 @@ function GroupedResponseBlock({
 }) {
   const isRunning = group.status === "running";
   const [expanded, setExpanded] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<
+    "idle" | "copying" | "copied" | "error"
+  >("idle");
+  const copyTimeout = useRef<number | null>(null);
+  const mounted = useRef(false);
+  const copyPresentation = COPY_STATE_PRESENTATION[copyState];
   const hasContent = group.content && group.content.length > 0;
   const stepCount = group.sourceSteps.length;
   const displayedContent = useStreamedMarkdownContent(
@@ -235,11 +265,45 @@ function GroupedResponseBlock({
     isRunning && expanded
   );
 
-  function handleCopy() {
-    if (group.content) {
-      navigator.clipboard.writeText(group.content);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (copyTimeout.current !== null) {
+        window.clearTimeout(copyTimeout.current);
+        copyTimeout.current = null;
+      }
+    };
+  }, []);
+
+  async function handleCopy() {
+    if (!group.content || copyState === "copying") {
+      return;
+    }
+
+    if (copyTimeout.current !== null) {
+      window.clearTimeout(copyTimeout.current);
+      copyTimeout.current = null;
+    }
+
+    setCopyState("copying");
+    try {
+      await copyTextToClipboard(
+        group.content,
+        typeof navigator === "undefined" ? undefined : navigator.clipboard
+      );
+      if (!mounted.current) {
+        return;
+      }
+      setCopyState("copied");
+      copyTimeout.current = window.setTimeout(() => {
+        setCopyState("idle");
+        copyTimeout.current = null;
+      }, 2000);
+    } catch {
+      if (mounted.current) {
+        setCopyState("error");
+      }
     }
   }
 
@@ -270,18 +334,18 @@ function GroupedResponseBlock({
         {hasContent && (
           <>
             <button
-              className="shrink-0 rounded-xs p-0.5 transition-colors hover:bg-white/10"
+              aria-label={copyPresentation.label}
+              className="shrink-0 rounded-xs p-0.5 transition-colors hover:bg-white/10 disabled:cursor-wait"
+              disabled={copyState === "copying"}
               onClick={handleCopy}
+              title={copyPresentation.title}
               type="button"
             >
-              <CopyIcon
-                className={cn(
-                  "size-3",
-                  copied ? "text-emerald-400" : "text-white/30"
-                )}
-              />
+              <CopyIcon className={cn("size-3", copyPresentation.iconClass)} />
             </button>
             <button
+              aria-expanded={expanded}
+              aria-label={`${expanded ? "Collapse" : "Expand"} response`}
               className="shrink-0 rounded-xs p-0.5 transition-colors hover:bg-white/10"
               onClick={() => setExpanded(!expanded)}
               type="button"
@@ -295,6 +359,17 @@ function GroupedResponseBlock({
           </>
         )}
       </div>
+
+      {copyState === "error" && (
+        <p className="ml-5 text-[0.65rem] text-rose-300/85" role="alert">
+          Could not copy the response. Select the text and copy it manually.
+        </p>
+      )}
+      {copyState === "copied" && (
+        <span className="sr-only" role="status">
+          Response copied to clipboard.
+        </span>
+      )}
 
       {expanded && hasContent && (
         <div className="ml-5 rounded-xs border border-sky-500/10 bg-sky-500/[0.03] px-3 py-2.5">
@@ -347,6 +422,7 @@ function ChangesBlock({ step }: { step: AgentStep }) {
 
         {canShowDiff && (
           <button
+            aria-expanded={showDiff}
             className={cn(
               "shrink-0 rounded-xs px-1.5 py-0.5 font-medium text-[0.6rem] transition-colors",
               showDiff
@@ -361,6 +437,8 @@ function ChangesBlock({ step }: { step: AgentStep }) {
         )}
 
         <button
+          aria-expanded={expanded}
+          aria-label={`${expanded ? "Collapse" : "Expand"} ${step.filePath ?? "file change"}`}
           className="shrink-0 rounded-xs p-0.5 transition-colors hover:bg-white/10"
           onClick={() => setExpanded(!expanded)}
           type="button"

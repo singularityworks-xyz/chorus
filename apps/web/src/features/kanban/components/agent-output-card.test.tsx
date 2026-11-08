@@ -31,4 +31,45 @@ describe("AgentOutputCard before the first provider event", () => {
 
     expect(markup).not.toContain('title="Interrupt agent"');
   });
+
+  test("gives icon-only output controls accessible names", () => {
+    const markup = renderToStaticMarkup(
+      <AgentOutputCard
+        boardId="board-1"
+        isActive={false}
+        run={{
+          elapsed: "1s",
+          model: "default",
+          steps: [
+            {
+              content: "The response text",
+              id: "response-1",
+              kind: "response",
+              status: "done",
+              summary: "Finished",
+            },
+            {
+              content: "const value = 1;",
+              filePath: "src/example.ts",
+              id: "edit-1",
+              kind: "file_edit",
+              linesAdded: 1,
+              linesRemoved: 0,
+              modifiedContent: "const value = 1;",
+              originalContent: "",
+              status: "done",
+              summary: "Updated example",
+            },
+          ],
+          taskTitle: "Accessibility controls",
+        }}
+        taskId="task-1"
+        taskTitle="Accessibility controls"
+      />
+    );
+
+    expect(markup).toContain('aria-label="Copy response"');
+    expect(markup).toContain('aria-label="Expand response"');
+    expect(markup).toContain('aria-label="Expand src/example.ts"');
+  });
 });

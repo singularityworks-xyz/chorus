@@ -573,6 +573,7 @@ function KanbanCardNodeComponent({
               <>
                 <span className="h-3.5 w-px bg-white/10" />
                 <button
+                  aria-label={`Remove ${cardData.title} board`}
                   className="rounded-xs p-1 text-white/25 transition-colors hover:bg-white/8 hover:text-white/60"
                   onClick={() => cardData.onRemove?.(id)}
                   type="button"
