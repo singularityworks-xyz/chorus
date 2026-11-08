@@ -1,6 +1,6 @@
 {
   "name": "@chorus/serve",
-  "version": "0.0.88",
+  "version": "0.0.89",
   "private": true,
   "scripts": {
     "dev": "bun run --watch src/index.ts",

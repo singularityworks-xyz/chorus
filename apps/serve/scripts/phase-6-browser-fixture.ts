@@ -42,6 +42,6 @@ process.stdout.write(
 await stopped;
 clearInterval(streamTimer);
 await harness.close();
-if (streamFailure !== undefined) {
-  process.exitCode = 1;
-}
+// Shutdown is explicit above; OpenCode SDK/socket handles can still keep Bun's
+// event loop alive after the servers are closed, so exit only after cleanup.
+process.exit(streamFailure === undefined ? 0 : 1);
