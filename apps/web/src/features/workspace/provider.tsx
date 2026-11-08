@@ -4,7 +4,6 @@ import {
   apiErrorSchema,
   type BoardSessionHistoryCommand,
   boardSeedSchema,
-  boardSessionHistoryCommandResponseSchema,
   type ModelSelection,
   projectListResponseSchema,
   queueBoardPromptResponseSchema,
@@ -15,6 +14,7 @@ import {
 } from "@chorus/contracts";
 import posthog from "posthog-js";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { sendBoardSessionHistoryCommand } from "@/features/kanban/board-session-history-client";
 import { useChorusSync } from "@/features/sync/use-chorus-sync";
 import { ChorusApiError } from "@/lib/chorus-api-error";
 import {
@@ -658,49 +658,14 @@ export function ChorusWorkspaceProvider({
   const sessionCommand = useCallback(
     async (boardId: string, command: BoardSessionHistoryCommand) => {
       try {
-        const response = await fetch(
-          `/api/boards/${encodeURIComponent(boardId)}/session/history/${command}`,
-          { method: "POST" }
-        );
-
-        if (reportUnauthorized(response)) {
-          return {
-            error:
-              "Your sign-in expired. Sign in again before changing repository history.",
-            ok: false,
-          };
-        }
-
-        const payload: unknown = await response.json().catch(() => undefined);
-        if (!response.ok) {
-          const apiError = apiErrorSchema.safeParse(payload);
-          return {
-            error: apiError.success
-              ? apiError.data.message
-              : `Could not ${command} repository changes. Check the board connection and try again.`,
-            ok: false,
-          };
-        }
-
-        const result =
-          boardSessionHistoryCommandResponseSchema.safeParse(payload);
-        if (
-          !result.success ||
-          result.data.boardId !== boardId ||
-          result.data.command !== command
-        ) {
-          return {
-            error:
-              "The server response did not confirm the history change. Refresh the board before retrying.",
-            ok: false,
-          };
-        }
+        const result = await sendBoardSessionHistoryCommand(boardId, command, {
+          onUnauthorized: reportUnauthorized,
+        });
 
         posthog.capture("session_command_success", {
           boardId,
           command,
-          sessionID: result.data.sessionId,
-          status: response.status,
+          sessionID: result.sessionId,
           timestamp: Date.now(),
         });
         sessionHistoryRevisionRef.current += 1;
@@ -718,7 +683,10 @@ export function ChorusWorkspaceProvider({
           timestamp: Date.now(),
         });
         return {
-          error: `Could not ${command} repository changes. Check the board connection and try again.`,
+          error:
+            error instanceof Error
+              ? error.message
+              : `Could not ${command} repository changes. Check the board connection and try again.`,
           ok: false,
         };
       }

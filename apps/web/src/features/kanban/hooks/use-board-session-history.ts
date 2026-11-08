@@ -1,18 +1,12 @@
 "use client";
 
-import {
-  apiErrorSchema,
-  type BoardSessionHistoryCommand,
-  type BoardSessionHistoryState,
-  boardSessionHistoryStateSchema,
+import type {
+  BoardSessionHistoryCommand,
+  BoardSessionHistoryState,
 } from "@chorus/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useWorkspace } from "@/features/workspace/workspace-context";
-
-function historyRequestError(payload: unknown, fallback: string): string {
-  const parsed = apiErrorSchema.safeParse(payload);
-  return parsed.success ? parsed.data.message : fallback;
-}
+import { loadBoardSessionHistory } from "../board-session-history-client";
 
 export function useBoardSessionHistory(
   boardId: string,
@@ -21,6 +15,8 @@ export function useBoardSessionHistory(
 ) {
   const { sessionCommand, sessionHistoryChange } = useWorkspace();
   const requestVersion = useRef(0);
+  const refreshController = useRef<AbortController | null>(null);
+  const pendingCommandRef = useRef<BoardSessionHistoryCommand | null>(null);
   const previousBoardBusy = useRef(boardBusy);
   const notifiedHistoryRevision = useRef<number | null>(null);
   const [history, setHistory] = useState<BoardSessionHistoryState | null>(null);
@@ -31,40 +27,21 @@ export function useBoardSessionHistory(
 
   const refresh = useCallback(async () => {
     const version = ++requestVersion.current;
+    refreshController.current?.abort();
+    const controller = new AbortController();
+    refreshController.current = controller;
     setIsLoading(true);
     setError(null);
 
     try {
-      const response = await fetch(
-        `/api/boards/${encodeURIComponent(boardId)}/session/history`,
-        { cache: "no-store" }
-      );
-      const payload: unknown = await response.json().catch(() => undefined);
-      if (!response.ok) {
-        throw new Error(
-          historyRequestError(
-            payload,
-            "Could not load repository history. Check the board connection and retry."
-          )
-        );
-      }
-
-      const parsed = boardSessionHistoryStateSchema.safeParse(payload);
-      if (
-        !parsed.success ||
-        parsed.data.boardId !== boardId ||
-        parsed.data.sessionId !== (sessionId ?? null)
-      ) {
-        throw new Error(
-          "The repository history response did not match this board. Refresh the workspace and retry."
-        );
-      }
-
+      const currentHistory = await loadBoardSessionHistory(boardId, sessionId, {
+        signal: controller.signal,
+      });
       if (requestVersion.current === version) {
-        setHistory(parsed.data);
+        setHistory(currentHistory);
       }
     } catch (cause) {
-      if (requestVersion.current === version) {
+      if (requestVersion.current === version && !controller.signal.aborted) {
         setError(
           cause instanceof Error
             ? cause.message
@@ -76,13 +53,22 @@ export function useBoardSessionHistory(
       if (requestVersion.current === version) {
         setIsLoading(false);
       }
+      if (refreshController.current === controller) {
+        refreshController.current = null;
+      }
     }
   }, [boardId, sessionId]);
 
   useEffect(() => {
+    setHistory(null);
+    setError(null);
+    setIsLoading(true);
+    pendingCommandRef.current = null;
+    setPendingCommand(null);
     refresh();
     return () => {
       requestVersion.current += 1;
+      refreshController.current?.abort();
     };
   }, [refresh]);
 
@@ -103,7 +89,7 @@ export function useBoardSessionHistory(
       return;
     }
     notifiedHistoryRevision.current = sessionHistoryChange.revision;
-    refresh().then(() => setPendingCommand(null));
+    refresh();
   }, [boardId, refresh, sessionHistoryChange]);
 
   useEffect(() => {
@@ -123,28 +109,50 @@ export function useBoardSessionHistory(
 
   const runCommand = useCallback(
     async (command: BoardSessionHistoryCommand) => {
-      if (pendingCommand) {
+      if (pendingCommandRef.current) {
         return;
       }
 
+      pendingCommandRef.current = command;
       setPendingCommand(command);
       setError(null);
-      const result = await sessionCommand(boardId, command);
-      if (!result.ok) {
+      try {
+        const result = await sessionCommand(boardId, command);
+        if (!result.ok) {
+          await refresh();
+          setError(result.error ?? `Could not ${command} repository changes.`);
+          return;
+        }
+
         await refresh();
-        setError(result.error ?? `Could not ${command} repository changes.`);
+      } catch (cause) {
+        await refresh();
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : `Could not ${command} repository changes. Refresh and retry.`
+        );
+      } finally {
+        pendingCommandRef.current = null;
         setPendingCommand(null);
       }
     },
-    [boardId, pendingCommand, refresh, sessionCommand]
+    [boardId, refresh, sessionCommand]
   );
 
+  const historyMatchesBoard =
+    history?.boardId === boardId && history.sessionId === (sessionId ?? null);
+
   return {
-    busy: boardBusy || Boolean(history?.busy),
-    canRedo: Boolean(history?.canRedo && !history.busy && !boardBusy),
-    canUndo: Boolean(history?.canUndo && !history.busy && !boardBusy),
+    busy: boardBusy || Boolean(historyMatchesBoard && history.busy),
+    canRedo: Boolean(
+      historyMatchesBoard && history.canRedo && !history.busy && !boardBusy
+    ),
+    canUndo: Boolean(
+      historyMatchesBoard && history.canUndo && !history.busy && !boardBusy
+    ),
     error,
-    isLoading,
+    isLoading: isLoading || !historyMatchesBoard,
     pendingCommand,
     refresh,
     runCommand,
