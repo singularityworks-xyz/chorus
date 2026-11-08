@@ -50,6 +50,7 @@ export class ProjectService {
   readonly #repositoryRegistry: RepositoryRegistry | undefined;
   readonly #folderPicker: FolderPicker;
   readonly #registerPickedRepository: (directory: string) => Promise<string>;
+  readonly #globalAdapter: OpenCodeAdapter;
   readonly #authLoginLauncher = new AuthLoginLauncher();
   readonly #credentialStore = new OpenCodeCredentialStore();
   readonly #engineAdapterForDirectory:
@@ -67,7 +68,8 @@ export class ProjectService {
     auth?: { password: string; username: string },
     repositoryRegistry?: RepositoryRegistry,
     engineAdapterForDirectory?: (directory: string) => Promise<OpenCodeAdapter>,
-    prepareEngineDirectory?: (directory: string) => Promise<void>
+    prepareEngineDirectory?: (directory: string) => Promise<void>,
+    globalAdapter?: OpenCodeAdapter
   ) {
     this.#baseUrl = baseUrl;
     this.#defaultDirectory = defaultDirectory;
@@ -77,6 +79,8 @@ export class ProjectService {
     this.#prepareEngineDirectory = prepareEngineDirectory;
     this.#folderPicker = folderPicker;
     this.#registerPickedRepository = registerPickedRepository;
+    this.#globalAdapter =
+      globalAdapter ?? OpenCodeAdapter.from({ auth, baseUrl });
   }
 
   async listProjects(): Promise<ProjectListResponse> {
@@ -118,7 +122,18 @@ export class ProjectService {
   }
 
   listModels(): Promise<OpencodeModelCatalog> {
-    return this.listModelsForDirectory(this.#defaultDirectory);
+    logger.debug("list-models:start", { directory: null });
+
+    return this.#globalAdapter.providers.listModels().then((catalog) => {
+      logger.info("list-models:done", {
+        defaultModel: catalog.defaultModel
+          ? `${catalog.defaultModel.providerID}/${catalog.defaultModel.modelID}`
+          : null,
+        modelCount: catalog.models.length,
+      });
+
+      return catalog;
+    });
   }
 
   listCredentials(): Promise<OpencodeCredentialCatalog> {
@@ -133,8 +148,8 @@ export class ProjectService {
 
   listConfiguredProviders(): Promise<OpencodeConfiguredProviderCatalog> {
     logger.debug("list-configured-providers:start");
-    return this.#adapterForDirectory(this.#defaultDirectory)
-      .then((adapter) => adapter.config.listConfiguredProviders())
+    return this.#globalAdapter.config
+      .listConfiguredProviders()
       .then((catalog) => {
         logger.info("list-configured-providers:done", {
           providerCount: catalog.providerIDs.length,
@@ -169,9 +184,7 @@ export class ProjectService {
       providerID: input.providerID,
     });
 
-    const adapter = await this.#adapterForDirectory(
-      input.directory ?? this.#defaultDirectory
-    );
+    const adapter = this.#globalAdapter;
 
     await adapter.config.configureGlobalProvider(input.providerID);
 
@@ -210,7 +223,19 @@ export class ProjectService {
   }
 
   listProviders(): Promise<OpencodeProviderCatalog> {
-    return this.listProvidersForDirectory(this.#defaultDirectory);
+    logger.debug("list-providers:start", { directory: null });
+
+    return this.#globalAdapter.providers.listProviders().then((catalog) => {
+      logger.info("list-providers:done", {
+        connectedCount: catalog.providers.filter(
+          (provider) => provider.connected
+        ).length,
+        directory: null,
+        providerCount: catalog.providers.length,
+      });
+
+      return catalog;
+    });
   }
 
   async listProvidersForDirectory(
