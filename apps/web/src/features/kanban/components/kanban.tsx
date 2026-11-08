@@ -953,7 +953,7 @@ function TaskCard({
               "transition-all duration-150 hover:border-emerald-500/30 hover:bg-emerald-500/20",
               "active:scale-[0.97]"
             )}
-            disabled={!!actionState?.pending || actionState?.awaitingEvent}
+            disabled={!!actionState?.pending || !!actionState?.awaitingEvent}
             onClick={handleApproveClick}
             title={isManualReview ? "Finalize & Implement" : "Approve"}
             type="button"
@@ -971,7 +971,7 @@ function TaskCard({
               "transition-all duration-150 hover:border-rose-500/30 hover:bg-rose-500/20",
               "active:scale-[0.97]"
             )}
-            disabled={!!actionState?.pending || actionState?.awaitingEvent}
+            disabled={!!actionState?.pending || !!actionState?.awaitingEvent}
             onClick={() => onReject?.(task.id)}
             title="Reject"
             type="button"

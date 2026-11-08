@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   getPendingQuestionApprovals,
   hasPendingQuestion,
+  shouldClearAwaitingTaskAction,
   shouldShowReviewActions,
 } from "./task-approval-state";
 
@@ -48,6 +49,43 @@ describe("task approval state", () => {
 
     expect(hasPendingQuestion(task)).toBe(false);
     expect(shouldShowReviewActions(task)).toBe(true);
+  });
+
+  test("keeps permission actions available after implementation is accepted", () => {
+    expect(
+      shouldShowReviewActions({
+        outcome: "awaiting_review",
+        pendingApproval: permissionApproval,
+        reviewApproved: true,
+      })
+    ).toBe(true);
+  });
+
+  test("clears the plan action wait when the server accepts the plan", () => {
+    expect(
+      shouldClearAwaitingTaskAction(
+        {
+          outcome: "awaiting_review",
+          pendingApproval: permissionApproval,
+          reviewApproved: true,
+        },
+        { awaitingEvent: { kind: "review" } }
+      )
+    ).toBe(true);
+  });
+
+  test("keeps a permission action pending until its request is resolved", () => {
+    const actionState = {
+      awaitingEvent: { kind: "approval" as const, requestId: "permission-1" },
+    };
+
+    expect(
+      shouldClearAwaitingTaskAction(
+        { pendingApproval: permissionApproval },
+        actionState
+      )
+    ).toBe(false);
+    expect(shouldClearAwaitingTaskAction({}, actionState)).toBe(true);
   });
 
   test("keeps manual plan review actions available", () => {

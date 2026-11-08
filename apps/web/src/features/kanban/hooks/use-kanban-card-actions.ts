@@ -9,6 +9,10 @@ import {
   type BoardTaskAction,
   requestBoardTaskCommand,
 } from "../task-command-client";
+import {
+  type AwaitingTaskActionEvent,
+  shouldClearAwaitingTaskAction,
+} from "../utils/task-approval-state";
 
 const TASK_ACTION_TIMEOUT_MS = 10_000;
 
@@ -23,7 +27,7 @@ function taskActionErrorMessage(error: unknown, fallback: string) {
 }
 
 export interface KanbanTaskActionState {
-  awaitingEvent?: boolean;
+  awaitingEvent?: AwaitingTaskActionEvent;
   error?: string;
   message?: string;
   pending?: "approve" | "reject" | "run" | "retry";
@@ -254,13 +258,14 @@ export function useKanbanCardActions({
   );
 
   useEffect(() => {
-    const approvalTaskIds = new Set(
-      (columns.approve ?? []).map((task) => task.id)
+    const approvalTasks = new Map(
+      (columns.approve ?? []).map((task) => [task.id, task])
     );
     const taskIdsToClear = Object.entries(actionStates)
       .filter(
         ([taskId, state]) =>
-          state?.awaitingEvent && !approvalTaskIds.has(taskId)
+          state?.awaitingEvent &&
+          shouldClearAwaitingTaskAction(approvalTasks.get(taskId), state)
       )
       .map(([taskId]) => taskId);
     if (taskIdsToClear.length === 0) {
@@ -320,6 +325,9 @@ export function useKanbanCardActions({
       setTaskActionState(taskId, { pending: "approve" });
 
       try {
+        const permissionRequestId = taskPendingApprovals(task).find(
+          (approval) => approval.kind === "permission"
+        )?.requestId;
         posthog.capture("kanban_review_approve_start", {
           boardId,
           hasAnswers: answers.some((answer) => answer.length > 0),
@@ -336,7 +344,9 @@ export function useKanbanCardActions({
         });
 
         setTaskActionState(taskId, {
-          awaitingEvent: true,
+          awaitingEvent: permissionRequestId
+            ? { kind: "approval", requestId: permissionRequestId }
+            : { kind: "review" },
           message: "Request accepted. Waiting for the agent to continue…",
         });
         posthog.capture("kanban_review_approve_success", {
@@ -388,10 +398,17 @@ export function useKanbanCardActions({
       inFlightTaskActionRef.current.add(taskId);
       setTaskActionState(taskId, { pending: "reject" });
       try {
+        const approvals = taskPendingApprovals(task);
+        const requestId =
+          approvals.find((approval) => approval.kind === "permission")
+            ?.requestId ??
+          approvals.find((approval) => approval.kind === "question")?.requestId;
         await submitTaskRejection({ boardId, sessionId, task });
 
         setTaskActionState(taskId, {
-          awaitingEvent: true,
+          awaitingEvent: requestId
+            ? { kind: "approval", requestId }
+            : { kind: "review" },
           message: "Request accepted. Waiting for the board to update…",
         });
       } catch (error) {

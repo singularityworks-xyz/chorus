@@ -7,10 +7,37 @@ export interface TaskApprovalState {
   reviewApproved?: boolean;
 }
 
+export type AwaitingTaskActionEvent =
+  | { kind: "approval"; requestId: string }
+  | { kind: "review" };
+
+export interface TaskActionEventState {
+  awaitingEvent?: AwaitingTaskActionEvent;
+}
+
 function pendingApprovals(task: TaskApprovalState): PendingApprovalRequest[] {
   return (
     task.pendingApprovals ??
     (task.pendingApproval ? [task.pendingApproval] : [])
+  );
+}
+
+export function shouldClearAwaitingTaskAction(
+  task: TaskApprovalState | undefined,
+  actionState: TaskActionEventState
+): boolean {
+  const { awaitingEvent } = actionState;
+  if (!awaitingEvent) {
+    return false;
+  }
+  if (!task) {
+    return true;
+  }
+  if (awaitingEvent.kind === "review") {
+    return task.reviewApproved === true;
+  }
+  return !pendingApprovals(task).some(
+    (approval) => approval.requestId === awaitingEvent.requestId
   );
 }
 
@@ -42,6 +69,9 @@ export function shouldShowReviewActions(task: TaskApprovalState): boolean {
 
   if (hasQuestion) {
     return hasPermission;
+  }
+  if (hasPermission) {
+    return true;
   }
   if (task.outcome === "awaiting_review") {
     return task.reviewApproved !== true;
