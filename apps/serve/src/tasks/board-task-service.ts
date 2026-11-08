@@ -584,7 +584,7 @@ export class BoardTaskService {
       });
       throw new BoardTaskCommandError(
         "session_history_unavailable",
-        "Could not load repository history for this board. Check the provider connection and retry."
+        "Could not load repository history for this board. Refresh the board and retry."
       );
     }
   }

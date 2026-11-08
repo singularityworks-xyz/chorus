@@ -128,6 +128,15 @@ describe("board session history client", () => {
     await expect(
       loadBoardSessionHistory("board-1", "session-1", {
         fetcher: () =>
+          Promise.resolve(new Response("not json", { status: 503 })),
+      })
+    ).rejects.toThrow(
+      "Could not load repository history. Refresh the board and retry."
+    );
+
+    await expect(
+      loadBoardSessionHistory("board-1", "session-1", {
+        fetcher: () =>
           Promise.reject(new DOMException("Timed out", "TimeoutError")),
       })
     ).rejects.toThrow("took too long to respond");

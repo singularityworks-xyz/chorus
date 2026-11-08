@@ -45,7 +45,7 @@ export function useBoardSessionHistory(
         setError(
           cause instanceof Error
             ? cause.message
-            : "Could not load repository history. Check the board connection and retry."
+            : "Could not load repository history. Refresh the board and retry."
         );
         setHistory(null);
       }

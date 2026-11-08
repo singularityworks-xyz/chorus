@@ -1,10 +1,11 @@
 import { startPhase6Harness } from "./phase-6-harness";
 
 const reasoningDeltas = [
-  " I’m checking the current board and task state.",
+  " Checking the current board and task state.",
   " The selected model is shared across these boards.",
-  " I’m tracing the requested action through its server command.",
+  " Tracing the requested action through its server command.",
   " The stream is arriving in ordered, incremental updates.",
+  " The visible response is keeping pace with the event stream.",
 ];
 
 const harness = await startPhase6Harness();

@@ -1558,6 +1558,33 @@ describe("BoardTaskService", () => {
     rmSync(dir, { force: true, recursive: true });
   });
 
+  test("session history reads return repository-specific retry guidance", async () => {
+    const bridge = makeMockBridge();
+    bridge.waitForSessionIdle.mockResolvedValue(true);
+    bridge.getSession.mockRejectedValue(new Error("engine unavailable"));
+    const dir = mkdtempSync(
+      join(tmpdir(), "chorus-session-history-read-failure-")
+    );
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      sessionId: "sess-123",
+      state: "active",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    await expect(service.getSessionHistoryState(boardId)).rejects.toMatchObject(
+      {
+        code: "session_history_unavailable",
+        message:
+          "Could not load repository history for this board. Refresh the board and retry.",
+      }
+    );
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
   test("session history failures return explicit retryable errors", async () => {
     const bridge = makeMockBridge();
     bridge.waitForSessionIdle.mockResolvedValue(true);

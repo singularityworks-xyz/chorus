@@ -820,6 +820,16 @@ export function applyEventToWorkspace(
     case "board.selected":
       return { ...workspace, selectedBoardId: event.boardId };
 
+    case "board.removed":
+      return workspace.selectedBoardId === event.boardId
+        ? {
+            ...workspace,
+            selectedBoardId:
+              workspace.boards.find((board) => board.boardId !== event.boardId)
+                ?.boardId ?? null,
+          }
+        : workspace;
+
     case "preference.composer_hint_dismissed":
       return {
         ...workspace,

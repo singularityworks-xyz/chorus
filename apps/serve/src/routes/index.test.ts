@@ -578,7 +578,7 @@ describe("HTTP routes", () => {
       boardTasks.getSessionHistoryState.mockRejectedValue(
         new BoardTaskCommandError(
           "session_history_unavailable",
-          "Check the provider connection and retry."
+          "Could not load repository history for this board. Refresh the board and retry."
         )
       );
       boardTasks.sessionHistoryCommand.mockRejectedValue(
@@ -600,7 +600,8 @@ describe("HTTP routes", () => {
       expect(stateResponse.status).toBe(503);
       expect(await stateResponse.json()).toEqual({
         code: "session_history_unavailable",
-        message: "Check the provider connection and retry.",
+        message:
+          "Could not load repository history for this board. Refresh the board and retry.",
       });
       expect(commandResponse.status).toBe(502);
       expect(await commandResponse.json()).toEqual({

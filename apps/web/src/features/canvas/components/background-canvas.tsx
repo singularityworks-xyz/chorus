@@ -17,6 +17,7 @@ import {
 } from "@xyflow/react";
 import { KeyboardIcon, MinusIcon, PlusIcon, XIcon } from "lucide-react";
 import {
+  Fragment,
   startTransition,
   useCallback,
   useEffect,
@@ -289,12 +290,12 @@ function KeyboardHelpPanel({ onClose }: { onClose: () => void }) {
                       i === 0 ? (
                         <Kbd key={key}>{key}</Kbd>
                       ) : (
-                        <>
+                        <Fragment key={key}>
                           <span className="text-[0.55rem] text-white/20">
                             or
                           </span>
-                          <Kbd key={key}>{key}</Kbd>
-                        </>
+                          <Kbd>{key}</Kbd>
+                        </Fragment>
                       )
                     )}
                   </div>

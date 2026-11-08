@@ -48,7 +48,7 @@ export async function loadBoardSessionHistory(
   } = {}
 ): Promise<BoardSessionHistoryState> {
   const fallback =
-    "Could not load repository history. Check the board connection and retry.";
+    "Could not load repository history. Refresh the board and retry.";
 
   try {
     const response = await (options.fetcher ?? fetch)(
