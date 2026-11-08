@@ -22,6 +22,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { BoardSessionHistoryControls } from "@/features/kanban/components/board-session-history-controls";
+import { DiffNotice } from "@/features/kanban/components/diff-notice";
 import { GitStatusFeedback } from "@/features/kanban/components/git-status-feedback";
 import {
   KanbanCardContent,
@@ -339,33 +340,6 @@ function useBoardDiffs(sessionId?: string) {
   };
 }
 
-function DiffNotice({
-  error,
-  notice,
-}: {
-  error: string | null;
-  notice: string | null;
-}) {
-  const message = error ?? notice;
-  if (!message) {
-    return null;
-  }
-
-  return (
-    <p
-      className={cn(
-        "border-b px-3 py-1.5 text-[0.68rem]",
-        error
-          ? "border-rose-500/15 bg-rose-500/[0.03] text-rose-300/85"
-          : "border-white/5 text-white/45"
-      )}
-      role={error ? "alert" : "status"}
-    >
-      {message}
-    </p>
-  );
-}
-
 function KanbanCardNodeComponent({
   data: rawData,
   draggable,
@@ -626,7 +600,12 @@ function KanbanCardNodeComponent({
           </div>
         </div>
 
-        <DiffNotice error={diffError} notice={diffNotice} />
+        <DiffNotice
+          error={diffError}
+          notice={diffNotice}
+          onRetry={handleViewDiffs}
+          retrying={isLoadingDiff}
+        />
 
         <div className="nodrag flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="min-h-0 min-w-0 flex-1 p-4">

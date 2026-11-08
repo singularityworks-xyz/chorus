@@ -138,10 +138,21 @@ export async function fetchDirectory(
 export async function fetchSessionDiff(
   sessionId: string
 ): Promise<SessionFileDiff[]> {
-  const response = await fetch(
-    `/api/sessions/${encodeURIComponent(sessionId)}/diff`,
-    { signal: AbortSignal.timeout(10_000) }
-  );
+  let response: Response;
+  try {
+    response = await fetch(
+      `/api/sessions/${encodeURIComponent(sessionId)}/diff`,
+      { signal: AbortSignal.timeout(10_000) }
+    );
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") {
+      throw new Error("Loading session diffs timed out. Retry.");
+    }
+    throw new Error(
+      "Could not reach Chorus to load session diffs. Check the connection and retry."
+    );
+  }
+
   const payload: unknown = await response.json().catch(() => undefined);
   if (!response.ok) {
     const error = apiErrorSchema.safeParse(payload);

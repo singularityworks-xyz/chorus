@@ -121,6 +121,24 @@ describe("session diff client", () => {
       "The server returned invalid diff data. Try again."
     );
   });
+
+  test("turns connection failures into an actionable retry message", async () => {
+    replaceFetch(() => Promise.reject(new TypeError("connection refused")));
+
+    await expect(fetchSessionDiff("session-1")).rejects.toThrow(
+      "Could not reach Chorus to load session diffs. Check the connection and retry."
+    );
+  });
+
+  test("reports a bounded timeout instead of leaving the diff request pending", async () => {
+    replaceFetch(() =>
+      Promise.reject(new DOMException("The request timed out", "TimeoutError"))
+    );
+
+    await expect(fetchSessionDiff("session-1")).rejects.toThrow(
+      "Loading session diffs timed out. Retry."
+    );
+  });
 });
 
 describe("repository status client", () => {
