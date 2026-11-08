@@ -110,3 +110,54 @@ describe("SessionManager session diff", () => {
     });
   });
 });
+
+describe("SessionManager repository history", () => {
+  test("revert checks and changes history in the requested checkout", async () => {
+    const directory = "/repo/board-one";
+    const userMessage = {
+      info: { id: "user-1", role: "user" },
+      parts: [],
+    };
+    const get = mock(async () => ({ data: { id: "session-1" } }));
+    const messages = mock(async () => ({ data: [userMessage] }));
+    const revert = mock(async () => ({ data: { id: "session-1" } }));
+    const manager = new SessionManager({
+      session: { get, messages, revert },
+    } as never);
+
+    await manager.revert({ sessionID: "session-1", directory });
+
+    expect(get).toHaveBeenCalledWith({ sessionID: "session-1", directory });
+    expect(messages).toHaveBeenCalledWith({
+      sessionID: "session-1",
+      limit: undefined,
+      directory,
+    });
+    expect(revert).toHaveBeenCalledWith({
+      sessionID: "session-1",
+      directory,
+      workspace: undefined,
+      messageID: "user-1",
+    });
+  });
+
+  test("unrevert checks and changes history in the requested checkout", async () => {
+    const directory = "/repo/board-one";
+    const get = mock(async () => ({
+      data: { id: "session-1", revert: { messageID: "user-1" } },
+    }));
+    const unrevert = mock(async () => ({ data: { id: "session-1" } }));
+    const manager = new SessionManager({
+      session: { get, unrevert },
+    } as never);
+
+    await manager.unrevert({ sessionID: "session-1", directory });
+
+    expect(get).toHaveBeenCalledWith({ sessionID: "session-1", directory });
+    expect(unrevert).toHaveBeenCalledWith({
+      sessionID: "session-1",
+      directory,
+      workspace: undefined,
+    });
+  });
+});

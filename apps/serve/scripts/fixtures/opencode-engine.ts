@@ -1,9 +1,12 @@
+import { rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Event, Session } from "@chorus/oc-adapter";
 import { z } from "zod";
 
 interface FixtureSession {
   approved: boolean;
   busy: boolean;
+  prompted: boolean;
   reasoning: string;
   session: Session;
   text: string;
@@ -13,6 +16,12 @@ const SESSION_ROUTE = /^\/session\/([^/]+)(?:\/(.+))?$/;
 const PERMISSION_ROUTE = /^\/permission\/permission-(session-\d+)\/reply$/;
 const createSchema = z.object({ title: z.string().optional() });
 const replySchema = z.object({ reply: z.enum(["once", "always", "reject"]) });
+const revertSchema = z.object({
+  messageID: z.string(),
+  partID: z.string().optional(),
+});
+const FIXTURE_CHANGE_PATH = "result.txt";
+const FIXTURE_CHANGE_CONTENT = "Scripted fixture change\n";
 
 /** Scripted external engine: every event crosses the actual SDK HTTP/SSE path. */
 export function startScriptedEngine() {
@@ -71,6 +80,11 @@ export function startScriptedEngine() {
 
   function begin(entry: FixtureSession) {
     const sessionID = entry.session.id;
+    entry.prompted = true;
+    writeFileSync(
+      join(entry.session.directory, FIXTURE_CHANGE_PATH),
+      `${sessionID}\n`
+    );
     status(entry, true);
     emit(entry.session.directory, {
       id: eventId(),
@@ -175,7 +189,7 @@ export function startScriptedEngine() {
     }
     return Response.json(true);
   }
-  function sessionRequest(url: URL, directory: string) {
+  async function sessionRequest(request: Request, url: URL, directory: string) {
     const match = SESSION_ROUTE.exec(url.pathname);
     const entry = match?.[1] ? sessions.get(match[1]) : undefined;
     if (!entry || entry.session.directory !== directory) {
@@ -191,17 +205,48 @@ export function startScriptedEngine() {
         status(entry, false);
         return Response.json(true);
       case "message":
-        return Response.json([]);
+        return Response.json(
+          entry.prompted
+            ? [
+                {
+                  info: {
+                    id: `user-${entry.session.id}`,
+                    sessionID: entry.session.id,
+                    role: "user",
+                    time: { created: entry.session.time.created },
+                    agent: "build",
+                    model: { providerID: "fixture", modelID: "scripted" },
+                  },
+                  parts: [],
+                },
+              ]
+            : []
+        );
+      case "revert": {
+        const body = revertSchema.parse(await request.json());
+        entry.session.revert = { messageID: body.messageID };
+        rmSync(join(entry.session.directory, FIXTURE_CHANGE_PATH), {
+          force: true,
+        });
+        return Response.json(entry.session);
+      }
+      case "unrevert":
+        entry.session.revert = undefined;
+        writeFileSync(
+          join(entry.session.directory, FIXTURE_CHANGE_PATH),
+          FIXTURE_CHANGE_CONTENT
+        );
+        return Response.json(entry.session);
       case "diff":
         return Response.json([
           {
             file: "result.txt",
             status: "added",
             before: "",
-            after: entry.text,
+            after: entry.text || FIXTURE_CHANGE_CONTENT,
             additions: 1,
             deletions: 0,
-            patch: `diff --git a/result.txt b/result.txt\nnew file mode 100644\n--- /dev/null\n+++ b/result.txt\n@@ -0,0 +1 @@\n+${entry.text.trimEnd()}\n`,
+            patch: `diff --git a/result.txt b/result.txt\nnew file mode 100644\n--- /dev/null\n+++ b/result.txt\n@@ -0,0 +1 @@\n+${(entry.text || FIXTURE_CHANGE_CONTENT).trimEnd()}\n`,
           },
         ]);
       default:
@@ -315,10 +360,13 @@ export function startScriptedEngine() {
         case "/file/content": {
           const entry = scopedSessions(directory)[0];
           const path = url.searchParams.get("path");
-          if (path !== "result.txt" || !entry) {
+          if (path !== FIXTURE_CHANGE_PATH || !entry) {
             return new Response(null, { status: 404 });
           }
-          return Response.json({ type: "text", content: entry.text });
+          return Response.json({
+            type: "text",
+            content: entry.text || FIXTURE_CHANGE_CONTENT,
+          });
         }
         case "/session": {
           if (request.method !== "POST") {
@@ -341,13 +389,14 @@ export function startScriptedEngine() {
             reasoning: "",
             busy: false,
             approved: false,
+            prompted: false,
           });
           return Response.json(session);
         }
         default:
           return url.pathname.startsWith("/permission/")
             ? permissionReply(request, url, directory)
-            : sessionRequest(url, directory);
+            : sessionRequest(request, url, directory);
       }
     },
   });

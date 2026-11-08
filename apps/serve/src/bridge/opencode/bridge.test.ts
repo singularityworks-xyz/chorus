@@ -4,6 +4,7 @@ import type {
   EventStreamHandle,
   EventStreamOptions,
   OpenCodeAdapter,
+  Session,
   SessionMessageWithParts,
 } from "@chorus/oc-adapter";
 import { OpenCodeBridge } from "./bridge";
@@ -90,6 +91,44 @@ describe("OpenCodeBridge", () => {
         ([directory]) => directory
       )
     ).toEqual(["/repo/first", "/repo/second", "/repo/first"]);
+  });
+
+  test("session reads pass the selected checkout into the SDK request", async () => {
+    const session: Session = {
+      directory: "/repo/board-one",
+      id: "session-board",
+      projectID: "fixture",
+      slug: "session-board",
+      time: { created: 1, updated: 1 },
+      title: "Board one",
+      version: "1.19.0",
+    };
+    const getSession = mock(async () => session);
+    const adapter = {
+      sessions: { get: getSession },
+    } as unknown as OpenCodeAdapter;
+    const engineProvider = {
+      adapterForDirectory: mock(async () => adapter),
+      markReconciled: mock(() => undefined),
+      markSessionActivity: mock(() => undefined),
+      markSubscribed: mock(() => undefined),
+      setEvictionHandler: mock(() => undefined),
+    };
+    const bridge = new OpenCodeBridge(
+      "http://127.0.0.1:4096",
+      "/repo",
+      undefined,
+      { engineProvider }
+    );
+
+    await expect(
+      bridge.getSession({
+        engineDirectory: "/repo/board-one",
+        sessionID: "session-board",
+      })
+    ).resolves.toBe(session);
+
+    expect(getSession).toHaveBeenCalledWith("session-board", "/repo/board-one");
   });
 
   test("waits for recovered history and pending requests to persist before marking reconciled", async () => {

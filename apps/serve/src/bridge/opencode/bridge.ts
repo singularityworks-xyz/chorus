@@ -492,10 +492,10 @@ export class OpenCodeBridge {
     engineDirectory?: string;
     sessionID: string;
   }) {
-    const adapter = await this.#adapterFor(
-      input.engineDirectory ?? input.directory ?? this.#defaultDirectory
-    );
-    return adapter.sessions.get(input.sessionID, input.directory);
+    const directory =
+      input.directory ?? input.engineDirectory ?? this.#defaultDirectory;
+    const adapter = await this.#adapterFor(directory);
+    return adapter.sessions.get(input.sessionID, directory);
   }
 
   async sessionMessages(sessionID: string, directory: string) {

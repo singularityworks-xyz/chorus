@@ -284,7 +284,7 @@ export class SessionManager {
       directory: input.directory,
     });
 
-    const sessionResult = await this.get(input.sessionID);
+    const sessionResult = await this.get(input.sessionID, input.directory);
     const hasExistingRevert = sessionResult?.revert != null;
 
     if (hasExistingRevert) {
@@ -326,7 +326,7 @@ export class SessionManager {
   }
 
   async unrevert(input: SessionRevertInput) {
-    const sessionResult = await this.get(input.sessionID);
+    const sessionResult = await this.get(input.sessionID, input.directory);
     const hasRevertState = sessionResult?.revert != null;
 
     if (!hasRevertState) {
