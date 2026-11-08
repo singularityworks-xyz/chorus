@@ -328,7 +328,7 @@ function ProviderStatusRow({ provider }: { provider: OpencodeProviderStatus }) {
                 : "border-white/8 bg-white/[0.04] text-white/38"
             )}
           >
-            {provider.connected ? "Live" : "Idle"}
+            {provider.connected ? "Authenticated" : "Not authenticated"}
           </span>
         </div>
         <div className="mt-1 truncate text-[10px] text-white/42">
@@ -587,9 +587,9 @@ function ProviderSettingsPanel({
 }) {
   return (
     <>
-      {!isLoading && connectedProviderCount === 0 ? (
+      {!(isLoading || settingsError) && connectedProviderCount === 0 ? (
         <div className="mt-2 border border-amber-400/12 bg-amber-400/[0.08] px-2.5 py-2 text-[10px] text-amber-100/78 leading-4">
-          No providers are active yet. Enable a stored credential or
+          No providers are authenticated yet. Enable a stored credential or
           authenticate a provider here.
         </div>
       ) : null}
@@ -628,7 +628,7 @@ function ProviderSettingsPanel({
               Loading provider status…
             </div>
           ) : null}
-          {!isLoading && providerStatus.length === 0 ? (
+          {!(isLoading || settingsError) && providerStatus.length === 0 ? (
             <div className="border border-white/8 bg-white/[0.025] px-2.5 py-2 text-[10px] text-white/42">
               No providers are currently loaded.
             </div>
@@ -1253,14 +1253,17 @@ function SettingsMenu() {
             </div>
             {settingsTab === "providers" ? (
               <div className="mt-2 grid grid-cols-3 gap-1.5">
-                <SettingsMetric label="Live" value={connectedProviderCount} />
+                <SettingsMetric
+                  label="Authenticated"
+                  value={settingsError ? "—" : connectedProviderCount}
+                />
                 <SettingsMetric
                   label="Providers"
-                  value={providerStatus.length}
+                  value={settingsError ? "—" : providerStatus.length}
                 />
                 <SettingsMetric
                   label="Stored"
-                  value={storedCredentials.length}
+                  value={settingsError ? "—" : storedCredentials.length}
                 />
               </div>
             ) : null}
