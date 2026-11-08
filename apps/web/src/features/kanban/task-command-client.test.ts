@@ -49,11 +49,53 @@ describe("board task command client", () => {
     expect(response.status).toBe("accepted");
   });
 
-  test("rejects acknowledgments for a different board or task", async () => {
+  test("rejects Run acknowledgments for a different board or task", async () => {
     for (const response of [
       acceptedResponse({ boardId: "board-2" }),
       acceptedResponse({ taskId: "task-2" }),
     ]) {
+      await expect(
+        requestBoardTaskCommand("board-1", "task-1", "run", () =>
+          Promise.resolve(response)
+        )
+      ).rejects.toThrow("did not confirm this task");
+    }
+  });
+
+  test("accepts a Retry acknowledgment for a linked child attempt", async () => {
+    const response = new Response(
+      JSON.stringify({
+        boardId: "board-1",
+        sessionId: "session-1",
+        status: "accepted",
+        taskId: "task-2",
+        retryOf: "task-1",
+        timestamp: 1,
+      }),
+      { status: 200 }
+    );
+
+    await expect(
+      requestBoardTaskCommand("board-1", "task-1", "retry", () =>
+        Promise.resolve(response)
+      )
+    ).resolves.toMatchObject({ taskId: "task-2", retryOf: "task-1" });
+  });
+
+  test("rejects Retry acknowledgments without the requested lineage", async () => {
+    for (const retryOf of [undefined, "task-3"]) {
+      const response = new Response(
+        JSON.stringify({
+          boardId: "board-1",
+          sessionId: "session-1",
+          status: "accepted",
+          taskId: "task-2",
+          ...(retryOf ? { retryOf } : {}),
+          timestamp: 1,
+        }),
+        { status: 200 }
+      );
+
       await expect(
         requestBoardTaskCommand("board-1", "task-1", "retry", () =>
           Promise.resolve(response)

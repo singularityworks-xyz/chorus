@@ -39,7 +39,9 @@ export async function requestBoardTaskCommand(
     if (
       !command.success ||
       command.data.boardId !== boardId ||
-      command.data.taskId !== taskId
+      (action === "run" && command.data.taskId !== taskId) ||
+      (action === "retry" &&
+        (command.data.taskId === taskId || command.data.retryOf !== taskId))
     ) {
       throw new Error(
         "The server response did not confirm this task. Refresh the board before trying again."

@@ -960,6 +960,7 @@ export class BoardTaskService {
       );
       return {
         boardId,
+        retryOf: taskId,
         sessionId: response.sessionId,
         status: "accepted",
         taskId: response.taskId,

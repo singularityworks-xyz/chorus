@@ -560,6 +560,7 @@ export const boardTaskCommandResponseSchema = z.object({
   sessionId: z.string().min(1),
   status: z.union([z.literal("accepted"), z.literal("already_running")]),
   taskId: z.string().min(1),
+  retryOf: z.string().min(1).optional(),
   timestamp: z.number(),
 });
 

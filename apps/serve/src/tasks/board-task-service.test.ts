@@ -476,8 +476,13 @@ describe("BoardTaskService", () => {
 
     const result = await service.retryTask(boardId, "task-finished-1");
     const retry = workspaceStore.getBoard(boardId)?.columns.queue[0];
+    if (!retry) {
+      throw new Error("retry task was not created");
+    }
 
     expect(result.status).toBe("accepted");
+    expect(result.taskId).toBe(retry.id);
+    expect(result.retryOf).toBe("task-finished-1");
     expect(retry).toMatchObject({ retryOf: "task-finished-1" });
     expect(retry?.promptInput?.text).toBe("retry prompt");
     expect(bridge.promptSessionAsync).toHaveBeenCalledWith(
