@@ -40,6 +40,7 @@ export function startScriptedEngine() {
   let eventNumber = 0;
   let activeReasoningCursor = 0;
   const pendingPlanTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const keepAliveTimers = new Set<ReturnType<typeof setInterval>>();
 
   function emit(directory: string, event: Event) {
     const frame = encoder.encode(`data: ${JSON.stringify(event)}\n\n`);
@@ -213,6 +214,7 @@ export function startScriptedEngine() {
   }
   function streamFor(directory: string) {
     let controller: ReadableStreamDefaultController<Uint8Array>;
+    let keepAlive: ReturnType<typeof setInterval> | undefined;
     return new ReadableStream<Uint8Array>({
       start(next) {
         controller = next;
@@ -220,8 +222,26 @@ export function startScriptedEngine() {
         listeners.add(next);
         streams.set(directory, listeners);
         next.enqueue(encoder.encode(": connected\n\n"));
+        // Bun closes otherwise-idle HTTP connections after its default idle
+        // timeout. Match the OpenCode SSE heartbeat so long plan reviews do not
+        // leave the fixture with a silently disconnected event stream.
+        keepAlive = setInterval(() => {
+          try {
+            next.enqueue(encoder.encode(": keepalive\n\n"));
+          } catch {
+            if (keepAlive) {
+              clearInterval(keepAlive);
+              keepAliveTimers.delete(keepAlive);
+            }
+          }
+        }, 5000);
+        keepAliveTimers.add(keepAlive);
       },
       cancel() {
+        if (keepAlive) {
+          clearInterval(keepAlive);
+          keepAliveTimers.delete(keepAlive);
+        }
         streams.get(directory)?.delete(controller);
       },
     });
@@ -541,6 +561,10 @@ export function startScriptedEngine() {
       status(entry, false);
     },
     async stop() {
+      for (const timer of keepAliveTimers) {
+        clearInterval(timer);
+      }
+      keepAliveTimers.clear();
       for (const timer of pendingPlanTimers.values()) {
         clearTimeout(timer);
       }

@@ -1,5 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -26,6 +32,7 @@ import { createHttpRoutes } from "../src/routes";
 import { createProjectRoutes } from "../src/routes/projects";
 import { createWorkspaceRoutes } from "../src/routes/workspace";
 import { BoardTaskService } from "../src/tasks/board-task-service";
+import { boardDirectory } from "../src/tasks/session-directory";
 import { WorkspaceStore } from "../src/workspace/store";
 import { createWsHandler } from "../src/ws/handler";
 import { WorkspaceHub } from "../src/ws/hub";
@@ -232,6 +239,34 @@ export async function startPhase6Harness({
       repositories[0] ?? root
     );
     bridge = engineBridge;
+    engineBridge.setRecoverySessionProvider((directory) => {
+      const canonicalDirectory = realpathSync(directory);
+      return workspace
+        .getSnapshot()
+        .boards.filter((board) => {
+          let boardCheckout: string;
+          try {
+            boardCheckout = realpathSync(boardDirectory(board));
+          } catch {
+            return false;
+          }
+          return (
+            boardCheckout === canonicalDirectory &&
+            board.session.currentTaskId !== undefined &&
+            (board.session.state === "active" ||
+              Object.values(board.columns)
+                .flat()
+                .some(
+                  (task) =>
+                    (task.pendingApprovals?.length ?? 0) > 0 ||
+                    task.pendingApproval !== undefined
+                ))
+          );
+        })
+        .flatMap((board) =>
+          board.session.sessionId ? [board.session.sessionId] : []
+        );
+    });
     engineBridge.subscribe(async (event) => {
       await workspace.applyAgentEvent(event);
     });

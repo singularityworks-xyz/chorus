@@ -96,6 +96,11 @@ test("manual review streams a plan and finalizes into an approved build run", as
     expect(existsSync(join(checkout, "result.txt"))).toBe(false);
 
     const finalizedPlan = `${reviewTask.plan}\n\nUser refinement: preserve current board behavior.`;
+    // Leave the plan idle longer than Bun's default HTTP idle timeout. The
+    // scripted engine sends SSE heartbeats, and the real bridge's reconnect
+    // reconciliation is registered in this harness, so plan review remains
+    // usable even when a browser waits before continuing.
+    await new Promise<void>((resolve) => setTimeout(resolve, 11_000));
     await harness.finalizeReview(boardId, run.taskId, finalizedPlan);
     await waitForQualification(
       () => {
