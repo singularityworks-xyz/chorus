@@ -16,6 +16,7 @@ import {
   MessageSquareIcon,
   SquareIcon,
   TerminalIcon,
+  TriangleAlertIcon,
   WrenchIcon,
 } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -54,6 +55,31 @@ export interface AgentRunContext {
   startedAt?: number;
   steps: AgentStep[];
   taskTitle: string;
+}
+
+export function getFilePreviewContent(step: AgentStep) {
+  return step.modifiedContent ?? step.content;
+}
+
+const FILE_CONTENT_UNAVAILABLE_MESSAGES: Record<AgentStepStatus, string> = {
+  done: "The agent completed this edit without sending file contents.",
+  error: "File contents are unavailable because this edit failed.",
+  running: "Waiting for the agent to send file contents.",
+};
+
+export function FileContentUnavailable({
+  status,
+}: {
+  status: AgentStepStatus;
+}) {
+  return (
+    <p
+      className="flex h-[200px] items-center justify-center px-4 text-center text-[0.7rem] text-white/40"
+      role={status === "error" ? "alert" : "status"}
+    >
+      {FILE_CONTENT_UNAVAILABLE_MESSAGES[status]}
+    </p>
+  );
 }
 
 const EMPTY_AGENT_STEPS: AgentStep[] = [];
@@ -383,12 +409,52 @@ function GroupedResponseBlock({
   );
 }
 
+export function FileEditContents({
+  canShowDiff,
+  filePath,
+  showDiff,
+  step,
+}: {
+  canShowDiff: boolean;
+  filePath: string;
+  showDiff: boolean;
+  step: AgentStep;
+}) {
+  if (
+    showDiff &&
+    canShowDiff &&
+    step.originalContent !== undefined &&
+    step.modifiedContent !== undefined
+  ) {
+    return (
+      <InlineDiffView
+        language={inferLanguage(filePath)}
+        modified={step.modifiedContent}
+        original={step.originalContent}
+      />
+    );
+  }
+
+  const fileContent = getFilePreviewContent(step);
+  if (fileContent === undefined) {
+    return <FileContentUnavailable status={step.status} />;
+  }
+
+  return (
+    <BorderlessFileView
+      filePath={filePath}
+      height="200px"
+      language={inferLanguage(filePath)}
+      value={fileContent}
+    />
+  );
+}
+
 function ChangesBlock({ step }: { step: AgentStep }) {
-  const isRunning = step.status === "running";
   const [expanded, setExpanded] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
-  const hasOriginal = step.originalContent && step.originalContent.length > 0;
-  const hasModified = step.modifiedContent && step.modifiedContent.length > 0;
+  const hasOriginal = step.originalContent !== undefined;
+  const hasModified = step.modifiedContent !== undefined;
   const hasActualChanges =
     (step.linesAdded ?? 0) > 0 || (step.linesRemoved ?? 0) > 0;
   const canShowDiff = hasOriginal && hasModified && hasActualChanges;
@@ -396,15 +462,25 @@ function ChangesBlock({ step }: { step: AgentStep }) {
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center gap-2">
-        {isRunning ? (
+        {step.status === "running" && (
           <Loader2Icon className="size-3 shrink-0 animate-spin text-emerald-400/60" />
-        ) : (
-          <CheckCircle2Icon className="size-3 shrink-0 text-white/20" />
+        )}
+        {step.status === "error" && (
+          <TriangleAlertIcon
+            aria-hidden="true"
+            className="size-3 shrink-0 text-red-400/80"
+          />
+        )}
+        {step.status === "done" && (
+          <CheckCircle2Icon
+            aria-hidden="true"
+            className="size-3 shrink-0 text-white/20"
+          />
         )}
 
         <FilePenLineIcon className="size-3 shrink-0 text-emerald-400" />
         <span className="font-medium text-[0.65rem] text-emerald-400 uppercase tracking-wider">
-          Edit
+          {step.status === "error" ? "Edit failed" : "Edit"}
         </span>
 
         <span className="min-w-0 flex-1 truncate font-mono text-[0.72rem] text-white/60">
@@ -453,27 +529,12 @@ function ChangesBlock({ step }: { step: AgentStep }) {
 
       {expanded && step.filePath && (
         <div className="ml-5 overflow-hidden rounded-xs border border-white/5 bg-[#0d0d0d]">
-          {showDiff &&
-          canShowDiff &&
-          step.originalContent &&
-          step.modifiedContent ? (
-            <InlineDiffView
-              language={inferLanguage(step.filePath)}
-              modified={step.modifiedContent}
-              original={step.originalContent}
-            />
-          ) : (
-            <BorderlessFileView
-              filePath={step.filePath}
-              height="200px"
-              language={inferLanguage(step.filePath)}
-              value={
-                step.modifiedContent ??
-                step.content ??
-                `// File: ${step.filePath}\n// Content will appear here once the agent provides it`
-              }
-            />
-          )}
+          <FileEditContents
+            canShowDiff={canShowDiff}
+            filePath={step.filePath}
+            showDiff={showDiff}
+            step={step}
+          />
         </div>
       )}
     </div>
