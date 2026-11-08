@@ -348,7 +348,7 @@ export function ChorusWorkspaceProvider({
 
   const removeBoard = useCallback(
     (boardId: string) => {
-      mutateWorkspace(
+      return mutateWorkspace(
         createWorkspaceMutation(
           clientIdRef.current,
           revisionRef.current,
@@ -357,9 +357,7 @@ export function ChorusWorkspaceProvider({
             boardId,
           }
         )
-      ).catch((error: unknown) => {
-        console.error("Failed to remove board:", error);
-      });
+      );
     },
     [mutateWorkspace]
   );

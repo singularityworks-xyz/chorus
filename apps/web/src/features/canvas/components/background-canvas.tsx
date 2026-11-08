@@ -96,19 +96,10 @@ export const CANVAS_SHORTCUTS = [
       { keys: ["Esc"], label: "Deselect / dismiss" },
     ],
   },
-  {
-    group: "Review",
-    shortcuts: [
-      { keys: ["A"], label: "Approve selected" },
-      { keys: ["R"], label: "Reject selected" },
-    ],
-  },
 ] as const;
 
 interface KeyboardShortcutsProps {
-  onApproveSelected?: () => void;
   onNewTask?: () => void;
-  onRejectSelected?: () => void;
   onRemoveSelected?: () => void;
   onToggleHelp?: () => void;
 }
@@ -116,8 +107,6 @@ interface KeyboardShortcutsProps {
 function KeyboardShortcuts({
   onNewTask,
   onRemoveSelected,
-  onApproveSelected,
-  onRejectSelected,
   onToggleHelp,
 }: KeyboardShortcutsProps) {
   const { setViewport, zoomIn, zoomOut, fitView } = useReactFlow();
@@ -170,18 +159,6 @@ function KeyboardShortcuts({
 
       case "Escape":
         // Let React Flow handle deselection natively; no preventDefault
-        break;
-
-      case "a":
-      case "A":
-        event.preventDefault();
-        onApproveSelected?.();
-        break;
-
-      case "r":
-      case "R":
-        event.preventDefault();
-        onRejectSelected?.();
         break;
 
       case "?":
@@ -337,6 +314,7 @@ function createKanbanCardNode(
   selected: boolean,
   onRemove: (id: string) => void,
   onUpdateColumns: (id: string, columns: Columns) => void,
+  removingBoardId: string | null,
   // The optimistic guess wins over `board.position` until the server confirms,
   // otherwise the board snaps back to its old spot for the length of the
   // mutation round trip -- exactly what the guess exists to prevent.
@@ -359,6 +337,7 @@ function createKanbanCardNode(
       reviewMode: board.reviewMode ?? "auto",
       sessionId: board.session.sessionId,
       sessionState: board.session.state,
+      isRemoving: board.boardId === removingBoardId,
       onRemove,
       onUpdateColumns,
     },
@@ -382,6 +361,7 @@ function reconcileNodes(
   selectedBoardId: string | null,
   onRemove: (id: string) => void,
   onUpdateColumns: (id: string, columns: Columns) => void,
+  removingBoardId: string | null,
   positionOf: (board: WorkspaceBoard) => { x: number; y: number }
 ): Node<KanbanCardNodeData>[] {
   const currentNodesById = new Map(currentNodes.map((node) => [node.id, node]));
@@ -393,6 +373,7 @@ function reconcileNodes(
       board.boardId === selectedBoardId,
       onRemove,
       onUpdateColumns,
+      removingBoardId,
       positionOf(board)
     );
     const currentNode = currentNodesById.get(board.boardId);
@@ -423,6 +404,7 @@ export function BackgroundCanvas() {
     pendingDrags,
     boardLayoutVersion,
     clearSelection,
+    focusBoardLocally,
     preferences,
     removeBoard,
     selectedBoardId,
@@ -435,6 +417,10 @@ export function BackgroundCanvas() {
   const [showHelp, setShowHelp] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
   const [fitViewToken, setFitViewToken] = useState(0);
+  const [removingBoardId, setRemovingBoardId] = useState<string | null>(null);
+  const [boardRemovalError, setBoardRemovalError] = useState<string | null>(
+    null
+  );
   const [canvasSize, setCanvasSize] = useState({
     height: 0,
     width: 0,
@@ -450,6 +436,7 @@ export function BackgroundCanvas() {
     WorkspacePreferences["boardViewMode"] | null
   >(null);
   const isNodeClickRef = useRef(false);
+  const removeInFlightRef = useRef(false);
 
   useEffect(() => {
     setIsMounted(true);
@@ -561,40 +548,55 @@ export function BackgroundCanvas() {
     [updateBoardColumns]
   );
 
+  useEffect(() => {
+    if (
+      !removingBoardId ||
+      boards.some((board) => board.boardId === removingBoardId)
+    ) {
+      return;
+    }
+
+    removeInFlightRef.current = false;
+    setRemovingBoardId(null);
+  }, [boards, removingBoardId]);
+
   const handleRemoveBoard = useCallback(
-    (boardId: string) => {
-      removeBoard(boardId);
-      setNodes((currentNodes) =>
-        currentNodes.filter((node) => node.id !== boardId)
-      );
-      setEdges((currentEdges) =>
-        currentEdges.filter(
-          (edge) => edge.source !== boardId && edge.target !== boardId
-        )
-      );
+    async (boardId: string) => {
+      if (removeInFlightRef.current) {
+        return;
+      }
+
+      removeInFlightRef.current = true;
+      setRemovingBoardId(boardId);
+      setBoardRemovalError(null);
+      try {
+        await removeBoard(boardId);
+      } catch {
+        removeInFlightRef.current = false;
+        setRemovingBoardId(null);
+        setBoardRemovalError(
+          "Could not remove this board. It remains open; try again."
+        );
+      }
     },
     [removeBoard]
   );
 
-  /**
-   * Remove whichever card is currently selected (first selected node).
-   * When real selection state is wired, pass the selected node id here.
-   */
   const handleRemoveSelected = useCallback(() => {
-    // Future: derive from selected nodes. For now this is a no-op placeholder.
-  }, []);
-
-  const handleApproveSelected = useCallback(() => {
-    // Future: approve the card currently in the `approve` lane that is selected.
-  }, []);
-
-  const handleRejectSelected = useCallback(() => {
-    // Future: reject the card currently in the `approve` lane that is selected.
-  }, []);
+    if (selectedBoardId) {
+      return handleRemoveBoard(selectedBoardId);
+    }
+  }, [handleRemoveBoard, selectedBoardId]);
 
   const handleNewTask = useCallback(() => {
-    // Future: open the "Create Task" modal / focus the queue column's create button.
-  }, []);
+    if (!selectedBoardId) {
+      return;
+    }
+    focusBoardLocally(selectedBoardId);
+    window.requestAnimationFrame(() => {
+      document.getElementById("chorus-prompt-input")?.focus();
+    });
+  }, [focusBoardLocally, selectedBoardId]);
 
   const handleToggleHelp = useCallback(() => {
     setShowHelp((v) => !v);
@@ -685,6 +687,7 @@ export function BackgroundCanvas() {
           selectedBoardId,
           handleRemoveBoard,
           handleUpdateColumns,
+          removingBoardId,
           positionOfBoard
         )
       );
@@ -696,8 +699,21 @@ export function BackgroundCanvas() {
     handleRemoveBoard,
     handleUpdateColumns,
     positionOfBoard,
+    removingBoardId,
     selectedBoardId,
   ]);
+
+  useEffect(() => {
+    const boardIds = new Set(boards.map((board) => board.boardId));
+    setEdges((currentEdges) => {
+      const retainedEdges = currentEdges.filter(
+        (edge) => boardIds.has(edge.source) && boardIds.has(edge.target)
+      );
+      return retainedEdges.length === currentEdges.length
+        ? currentEdges
+        : retainedEdges;
+    });
+  }, [boards]);
 
   useEffect(() => {
     if (fitViewToken === 0 || nodes.length === 0) {
@@ -748,6 +764,7 @@ export function BackgroundCanvas() {
         <ReactFlow
           className="background-flow dark"
           defaultViewport={DEFAULT_VIEWPORT}
+          deleteKeyCode={null}
           edges={edges}
           edgesFocusable={true}
           elementsSelectable={true}
@@ -790,12 +807,29 @@ export function BackgroundCanvas() {
           zoomOnScroll={false}
         >
           <KeyboardShortcuts
-            onApproveSelected={handleApproveSelected}
             onNewTask={handleNewTask}
-            onRejectSelected={handleRejectSelected}
             onRemoveSelected={handleRemoveSelected}
             onToggleHelp={handleToggleHelp}
           />
+
+          {boardRemovalError && (
+            <Panel className="!left-4 !top-4" position="top-left">
+              <div
+                className="flex max-w-md items-start gap-3 rounded-sm border border-rose-500/25 bg-[#180d0d]/95 px-3 py-2.5 text-rose-200 text-xs shadow-xl"
+                role="alert"
+              >
+                <span className="flex-1">{boardRemovalError}</span>
+                <button
+                  aria-label="Dismiss board removal error"
+                  className="rounded-xs p-0.5 text-rose-200/60 hover:bg-white/10 hover:text-rose-100"
+                  onClick={() => setBoardRemovalError(null)}
+                  type="button"
+                >
+                  <XIcon className="size-3.5" />
+                </button>
+              </div>
+            </Panel>
+          )}
 
           <CanvasControls />
           <Background

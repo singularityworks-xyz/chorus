@@ -85,7 +85,7 @@ export interface WorkspaceContextValue {
     text: string;
   }) => Promise<PromptSubmissionResult | null>;
   recentProjects: WorkspaceProject[];
-  removeBoard: (boardId: string) => void;
+  removeBoard: (boardId: string) => Promise<void>;
   restoredPrompt: string;
   restorePrompt: (text: string) => void;
   selectBoard: (boardId: string) => void;
