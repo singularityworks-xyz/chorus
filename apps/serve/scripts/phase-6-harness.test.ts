@@ -17,6 +17,37 @@ test("eight scripted agent runs finish in isolated checkouts with ten converged 
   }
 }, 30_000);
 
+test("interactive browser fixture starts with idle boards and one shared default model", async () => {
+  const harness = await startPhase6Harness({ interactive: true });
+  try {
+    const snapshot = harness.store.getSnapshot();
+    expect(harness.runs).toHaveLength(0);
+    expect(harness.boardIds).toHaveLength(8);
+    expect(snapshot.preferences.defaultModelSelection).toEqual({
+      modelID: "scripted",
+      providerID: "fixture",
+    });
+    expect(snapshot.boards).toHaveLength(8);
+    expect(
+      snapshot.boards.every(
+        (board) =>
+          board.columns.queue.length === 0 &&
+          board.columns.in_progress.length === 0 &&
+          board.columns.approve.length === 0 &&
+          board.columns.done.length === 0
+      )
+    ).toBe(true);
+    expect(() => harness.appendBatch(1)).toThrow(
+      "appendBatch requires prepopulated qualification runs"
+    );
+    await expect(harness.complete()).rejects.toThrow(
+      "complete requires prepopulated qualification runs"
+    );
+  } finally {
+    await harness.close();
+  }
+}, 30_000);
+
 test("scripted provider catalog and reasoning deltas cross the real SDK and projector", async () => {
   const harness = await startPhase6Harness();
   try {

@@ -153,7 +153,11 @@ function readSnapshotHash(value: unknown): string {
 }
 
 /** Real repositories, SDK, HTTP commands, SQLite writer and authenticated WS mirrors. */
-export async function startPhase6Harness() {
+export async function startPhase6Harness({
+  interactive = false,
+}: {
+  interactive?: boolean;
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), "chorus-qualification-"));
   const repositories: string[] = [];
   let store: WorkspaceStore | undefined;
@@ -405,44 +409,56 @@ export async function startPhase6Harness() {
     await waitForQualification(() =>
       mirrors.every((mirror) => mirror.initialized)
     );
-    const runs = await Promise.all(
-      boardIds.map(async (boardId) => {
-        const board = workspace.getBoard(boardId);
-        const response = queueBoardPromptResponseSchema.parse(
-          await request("/tasks", {
-            boardId,
-            directory: board?.repo.worktree ?? board?.repo.directory,
-            text: "Scripted isolated change",
-            reviewMode: "auto",
+    const runs = interactive
+      ? []
+      : await Promise.all(
+          boardIds.map(async (boardId) => {
+            const board = workspace.getBoard(boardId);
+            const response = queueBoardPromptResponseSchema.parse(
+              await request("/tasks", {
+                boardId,
+                directory: board?.repo.worktree ?? board?.repo.directory,
+                text: "Scripted isolated change",
+                reviewMode: "auto",
+              })
+            );
+            return { boardId, sessionId: response.sessionId };
           })
         );
-        return { boardId, sessionId: response.sessionId };
-      })
-    );
-    await waitForQualification(
-      () =>
-        boardIds.every(
-          (boardId) =>
-            (workspace.getBoard(boardId)?.columns.approve?.length ?? 0) === 1
-        ),
-      5000,
-      () =>
-        boardIds.map((boardId) => {
-          const board = workspace.getBoard(boardId);
-          return {
-            boardId,
-            columns: board?.columns,
-            session: board?.session,
-          };
-        })
-    );
-    await Promise.all(
-      runs.map((run) =>
-        request(`/tasks/${run.sessionId}/approve`, {
-          requestID: `permission-${run.sessionId}`,
-        })
-      )
-    );
+    if (!interactive) {
+      await waitForQualification(
+        () =>
+          boardIds.every(
+            (boardId) =>
+              (workspace.getBoard(boardId)?.columns.approve?.length ?? 0) === 1
+          ),
+        5000,
+        () =>
+          boardIds.map((boardId) => {
+            const board = workspace.getBoard(boardId);
+            return {
+              boardId,
+              columns: board?.columns,
+              session: board?.session,
+            };
+          })
+      );
+      await Promise.all(
+        runs.map((run) =>
+          request(`/tasks/${run.sessionId}/approve`, {
+            requestID: `permission-${run.sessionId}`,
+          })
+        )
+      );
+    }
+
+    function requirePrepopulatedRuns(operation: string): void {
+      if (runs.length === 0) {
+        throw new Error(
+          `${operation} requires prepopulated qualification runs; use the browser to dispatch interactive fixture tasks`
+        );
+      }
+    }
 
     function completeRun(run: QualificationRun): void {
       const board = workspace.getBoard(run.boardId);
@@ -555,12 +571,14 @@ export async function startPhase6Harness() {
       close,
       engine,
       runs,
+      boardIds,
       mirrors,
       store: workspace,
       root,
       serveBaseUrl: base,
       accessToken: token,
       appendBatch(count: number) {
+        requirePrepopulatedRuns("appendBatch");
         for (let index = 0; index < count; index += 1) {
           const run = runs[index % runs.length];
           if (run) {
@@ -569,6 +587,7 @@ export async function startPhase6Harness() {
         }
       },
       appendReasoningBatch(count: number) {
+        requirePrepopulatedRuns("appendReasoningBatch");
         for (let index = 0; index < count; index += 1) {
           const run = runs[index % runs.length];
           if (run) {
@@ -580,6 +599,7 @@ export async function startPhase6Harness() {
         }
       },
       async complete(settleTimeoutMs = 5000) {
+        requirePrepopulatedRuns("complete");
         await Promise.all(runs.map(completeRun));
         await waitForQualification(
           () =>

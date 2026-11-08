@@ -8,7 +8,7 @@ const reasoningDeltas = [
   " The visible response is keeping pace with the event stream.",
 ];
 
-const harness = await startPhase6Harness();
+const harness = await startPhase6Harness({ interactive: true });
 let deltaIndex = 0;
 let streamFailure: unknown;
 let resolveShutdown: (() => void) | undefined;
@@ -34,7 +34,8 @@ const streamTimer = setInterval(() => {
 process.stdout.write(
   `${JSON.stringify({
     accessToken: harness.accessToken,
-    boardIds: harness.runs.map((run) => run.boardId),
+    boardIds: harness.boardIds,
+    mode: "interactive",
     serveBaseUrl: harness.serveBaseUrl,
     webOrigin:
       process.env.CHORUS_BROWSER_FIXTURE_ORIGIN ?? "http://localhost:3001",
