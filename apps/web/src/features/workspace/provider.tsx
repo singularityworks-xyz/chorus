@@ -15,6 +15,7 @@ import posthog from "posthog-js";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { useKanbanHistory } from "@/features/kanban/hooks/use-kanban-history";
 import { useChorusSync } from "@/features/sync/use-chorus-sync";
+import { ChorusApiError } from "@/lib/chorus-api-error";
 import {
   DRAG_TIMEOUT_MS,
   INITIAL_WORKSPACE_STATE,
@@ -441,12 +442,13 @@ export function ChorusWorkspaceProvider({
           const errorPayload = apiErrorSchema.safeParse(
             await response.json().catch(() => undefined)
           );
-          throw new Error(
-            errorPayload.success &&
-              errorPayload.data.code === "global_model_not_configured"
-              ? errorPayload.data.code
-              : "prompt_request_failed"
-          );
+          if (errorPayload.success) {
+            throw new ChorusApiError(
+              errorPayload.data.code,
+              errorPayload.data.message
+            );
+          }
+          throw new Error("prompt_request_failed");
         }
 
         const payload = queueBoardPromptResponseSchema.parse(
@@ -459,7 +461,7 @@ export function ChorusWorkspaceProvider({
         return {
           ...payload,
           task: {
-            id: `pending-${payload.timestamp}`,
+            id: payload.taskId,
             label:
               selectedBoard.repo.projectName ??
               selectedBoard.repo.directory.split("/").filter(Boolean).at(-1) ??

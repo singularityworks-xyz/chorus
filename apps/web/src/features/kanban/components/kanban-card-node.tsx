@@ -1,15 +1,13 @@
 "use client";
 
-import { BorderlessFileView, DiffFloatingWindow } from "@chorus/monaco";
+import { DiffFloatingWindow } from "@chorus/monaco";
 import type { Node, NodeProps } from "@xyflow/react";
 import {
   ChevronDownIcon,
   Code2Icon,
   GitBranchIcon,
-  GlobeIcon,
   GripVerticalIcon,
   LoaderCircleIcon,
-  MonitorIcon,
   Redo2Icon,
   TriangleAlertIcon,
   Undo2Icon,
@@ -60,6 +58,16 @@ export interface KanbanCardNodeData {
 
 const kanbanHeaderControlClass =
   "flex h-6 items-center rounded-xs font-medium text-[0.65rem] leading-none";
+
+function focusBoardPrompt(
+  boardId: string,
+  focusBoardLocally: (boardId: string) => void
+) {
+  focusBoardLocally(boardId);
+  window.requestAnimationFrame(() => {
+    document.getElementById("chorus-prompt-input")?.focus();
+  });
+}
 
 function FilePath({ path }: { path: string }) {
   const parts = path.split("/");
@@ -262,6 +270,91 @@ function inferLanguage(path?: string): string {
   return ext ? (langMap[ext] ?? "plaintext") : "plaintext";
 }
 
+function useBoardDiffs(sessionId?: string) {
+  const [diffVisible, setDiffVisible] = useState(false);
+  const [diffFiles, setDiffFiles] = useState<SessionFileDiff[]>([]);
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [diffNotice, setDiffNotice] = useState<string | null>(null);
+  const [selectedDiffFile, setSelectedDiffFile] =
+    useState<SessionFileDiff | null>(null);
+  const [isLoadingDiff, setIsLoadingDiff] = useState(false);
+
+  const handleViewDiffs = useCallback(async () => {
+    if (!sessionId) {
+      return;
+    }
+    setIsLoadingDiff(true);
+    setDiffError(null);
+    setDiffNotice(null);
+    try {
+      const diffs = await fetchSessionDiff(sessionId);
+      setDiffFiles(diffs);
+      if (diffs.length > 0) {
+        setSelectedDiffFile(diffs[0]);
+        setDiffVisible(true);
+      } else {
+        setDiffNotice("No file changes are available for this session.");
+      }
+    } catch (error) {
+      setDiffError(
+        error instanceof Error
+          ? error.message
+          : "Could not load session diffs. Try again."
+      );
+    } finally {
+      setIsLoadingDiff(false);
+    }
+  }, [sessionId]);
+
+  const handleSelectDiffFile = useCallback((diff: SessionFileDiff) => {
+    setSelectedDiffFile(diff);
+    setDiffVisible(true);
+  }, []);
+
+  const handleCloseDiff = useCallback(() => {
+    setDiffVisible(false);
+  }, []);
+
+  return {
+    diffError,
+    diffFiles,
+    diffNotice,
+    diffVisible,
+    handleCloseDiff,
+    handleSelectDiffFile,
+    handleViewDiffs,
+    isLoadingDiff,
+    selectedDiffFile,
+  };
+}
+
+function DiffNotice({
+  error,
+  notice,
+}: {
+  error: string | null;
+  notice: string | null;
+}) {
+  const message = error ?? notice;
+  if (!message) {
+    return null;
+  }
+
+  return (
+    <p
+      className={cn(
+        "border-b px-3 py-1.5 text-[0.68rem]",
+        error
+          ? "border-rose-500/15 bg-rose-500/[0.03] text-rose-300/85"
+          : "border-white/5 text-white/45"
+      )}
+      role={error ? "alert" : "status"}
+    >
+      {message}
+    </p>
+  );
+}
+
 function KanbanCardNodeComponent({
   data: rawData,
   draggable,
@@ -269,33 +362,48 @@ function KanbanCardNodeComponent({
   selected,
 }: NodeProps<Node<Record<string, unknown>>>) {
   const cardData = rawData as unknown as KanbanCardNodeData;
-  const [editorMode, setEditorMode] = useState<"kanban" | "file" | null>(null);
-  const [diffVisible, setDiffVisible] = useState(false);
-  const [diffFiles, setDiffFiles] = useState<SessionFileDiff[]>([]);
-  const [selectedDiffFile, setSelectedDiffFile] =
-    useState<SessionFileDiff | null>(null);
-  const [isLoadingDiff, setIsLoadingDiff] = useState(false);
+  const reviewMode = cardData.reviewMode ?? "auto";
   const [localGitStatus, setLocalGitStatus] = useState<GitStatus | null>(
     cardData.gitStatus ?? null
   );
+  const {
+    diffError,
+    diffFiles,
+    diffNotice,
+    diffVisible,
+    handleCloseDiff,
+    handleSelectDiffFile,
+    handleViewDiffs,
+    isLoadingDiff,
+    selectedDiffFile,
+  } = useBoardDiffs(cardData.sessionId);
 
-  const { kanbanHistory, restorePrompt } = useWorkspace();
+  const { focusBoardLocally, kanbanHistory, restorePrompt } = useWorkspace();
 
   // Approve, reject, column moves and review mode live in one hook so the phone
   // lane list runs the same code as this card rather than a copy of it.
   const {
+    actionStates,
     handleApprove,
     handleColumnsChange,
+    handleHistoryColumnsChange,
     handlePlanChange,
     handleQuestionsAnswered,
     handleReject,
+    handleRetry,
+    handleRun,
     handleReviewModeChange,
   } = useKanbanCardActions({
     boardId: cardData.boardId,
     columns: cardData.columns,
     onUpdateColumns: cardData.onUpdateColumns,
+    reviewMode,
     sessionId: cardData.sessionId,
   });
+
+  const handleCreateTask = useCallback(() => {
+    focusBoardPrompt(cardData.boardId, focusBoardLocally);
+  }, [cardData.boardId, focusBoardLocally]);
 
   const filePath = cardData.filePath ?? cardData.projectName ?? cardData.title;
 
@@ -327,9 +435,9 @@ function KanbanCardNodeComponent({
       return;
     }
 
-    handleColumnsChange(result.columns);
+    handleHistoryColumnsChange(result.columns);
     restorePrompt(result.prompt);
-  }, [handleColumnsChange, kanbanHistory, restorePrompt]);
+  }, [handleHistoryColumnsChange, kanbanHistory, restorePrompt]);
 
   const handleRedo = useCallback(() => {
     const result = kanbanHistory.redo();
@@ -337,48 +445,8 @@ function KanbanCardNodeComponent({
       return;
     }
 
-    handleColumnsChange(result.columns);
-  }, [handleColumnsChange, kanbanHistory]);
-
-  const handleOpenHere = useCallback(() => {
-    setEditorMode("file");
-  }, []);
-
-  const handleOpenLocally = useCallback(() => {
-    setEditorMode("kanban");
-  }, []);
-
-  const handleCloseEditor = useCallback(() => {
-    setEditorMode(null);
-  }, []);
-
-  const handleViewDiffs = useCallback(async () => {
-    if (!cardData.sessionId) {
-      return;
-    }
-    setIsLoadingDiff(true);
-    try {
-      const diffs = await fetchSessionDiff(cardData.sessionId);
-      setDiffFiles(diffs);
-      if (diffs.length > 0) {
-        setSelectedDiffFile(diffs[0]);
-        setDiffVisible(true);
-      }
-    } catch (error) {
-      console.error("Failed to fetch diffs:", error);
-    } finally {
-      setIsLoadingDiff(false);
-    }
-  }, [cardData.sessionId]);
-
-  const handleSelectDiffFile = useCallback((diff: SessionFileDiff) => {
-    setSelectedDiffFile(diff);
-    setDiffVisible(true);
-  }, []);
-
-  const handleCloseDiff = useCallback(() => {
-    setDiffVisible(false);
-  }, []);
+    handleHistoryColumnsChange(result.columns);
+  }, [handleHistoryColumnsChange, kanbanHistory]);
 
   return (
     <>
@@ -488,27 +556,13 @@ function KanbanCardNodeComponent({
                 )}
               >
                 <Code2Icon className="size-3" />
-                <span>Open in Editor</span>
+                <span>Review Changes</span>
                 <ChevronDownIcon className="size-3 text-white/50" />
               </DropdownMenuTrigger>
               <DropdownMenuContent
                 align="end"
                 className="w-40 border-white/10 bg-[#1e1e1e] p-1.5 text-white/90 shadow-2xl"
               >
-                <DropdownMenuItem
-                  className="flex cursor-pointer items-center gap-2 rounded-xs px-2 py-1.5 text-white/80 text-xs transition-colors focus:bg-white/10 focus:text-white"
-                  onClick={handleOpenLocally}
-                >
-                  <MonitorIcon className="size-3.5" />
-                  <span>Open Locally</span>
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  className="flex cursor-pointer items-center gap-2 rounded-xs px-2 py-1.5 text-white/80 text-xs transition-colors focus:bg-white/10 focus:text-white"
-                  onClick={handleOpenHere}
-                >
-                  <GlobeIcon className="size-3.5" />
-                  <span>Open Here</span>
-                </DropdownMenuItem>
                 <DropdownMenuItem
                   className="flex cursor-pointer items-center gap-2 rounded-xs px-2 py-1.5 text-white/80 text-xs transition-colors focus:bg-white/10 focus:text-white"
                   disabled={!cardData.sessionId || isLoadingDiff}
@@ -553,16 +607,6 @@ function KanbanCardNodeComponent({
               </DropdownMenuContent>
             </DropdownMenu>
 
-            {editorMode !== null && (
-              <button
-                className="rounded-xs bg-white/10 px-2 py-1 font-medium text-[0.65rem] text-white transition-all hover:bg-white/20 active:scale-95"
-                onClick={handleCloseEditor}
-                type="button"
-              >
-                Back to Kanban
-              </button>
-            )}
-
             {cardData.onRemove && (
               <>
                 <span className="h-3.5 w-px bg-white/10" />
@@ -578,31 +622,29 @@ function KanbanCardNodeComponent({
           </div>
         </div>
 
+        <DiffNotice error={diffError} notice={diffNotice} />
+
         <div className="nodrag flex min-h-0 min-w-0 flex-1 flex-col">
-          {editorMode === "file" && filePath ? (
-            <BorderlessFileView
-              filePath={filePath}
-              language={inferLanguage(filePath)}
-              value={`// File: ${filePath}\n// Connect to LSP to see live content`}
+          <div className="min-h-0 min-w-0 flex-1 p-4">
+            <KanbanCardContent
+              actionStates={actionStates}
+              data={{
+                id: cardData.boardId,
+                title: cardData.title,
+                columns: cardData.columns,
+                reviewMode,
+              }}
+              onApprove={handleApprove}
+              onColumnsChange={handleColumnsChange}
+              onCreateTask={handleCreateTask}
+              onPlanChange={handlePlanChange}
+              onQuestionsAnswered={handleQuestionsAnswered}
+              onReject={handleReject}
+              onRetry={handleRetry}
+              onReviewModeChange={handleReviewModeChange}
+              onRun={handleRun}
             />
-          ) : (
-            <div className="min-h-0 min-w-0 flex-1 p-4">
-              <KanbanCardContent
-                data={{
-                  id: cardData.boardId,
-                  title: cardData.title,
-                  columns: cardData.columns,
-                  reviewMode: cardData.reviewMode ?? "auto",
-                }}
-                onApprove={handleApprove}
-                onColumnsChange={handleColumnsChange}
-                onPlanChange={handlePlanChange}
-                onQuestionsAnswered={handleQuestionsAnswered}
-                onReject={handleReject}
-                onReviewModeChange={handleReviewModeChange}
-              />
-            </div>
-          )}
+          </div>
         </div>
       </div>
 

@@ -1,11 +1,15 @@
 import { resolve } from "node:path";
 import type {
+  BoardTaskCommandResponse,
   QueueBoardPromptInput,
   QueueBoardPromptResponse,
   WorkspaceBoard,
   WorkspaceMutation,
 } from "@chorus/contracts";
-import { queueBoardPromptInputSchema } from "@chorus/contracts";
+import {
+  findTaskInColumns,
+  queueBoardPromptInputSchema,
+} from "@chorus/contracts";
 import { createLogger } from "@chorus/logger";
 import type { OpenCodeBridge } from "../bridge/opencode/bridge";
 import { resolveInside, SandboxEscapeError } from "../paths/sandbox";
@@ -49,6 +53,22 @@ export class GlobalModelNotConfiguredError extends Error {
   constructor() {
     super("Choose one provider and model in Settings before starting a task.");
     this.name = "GlobalModelNotConfiguredError";
+  }
+}
+
+export class BoardTaskCommandError extends Error {
+  readonly code:
+    | "board_busy"
+    | "task_not_found"
+    | "task_not_queued"
+    | "task_not_retryable"
+    | "task_prompt_missing"
+    | "prompt_dispatch_failed";
+
+  constructor(code: BoardTaskCommandError["code"], message: string) {
+    super(message);
+    this.name = "BoardTaskCommandError";
+    this.code = code;
   }
 }
 
@@ -353,14 +373,18 @@ export class BoardTaskService {
    * discarded without a log line. `card.created` is also the only projector
    * branch that sets `currentTaskId`.
    *
-   * Idempotent: a board that already has a live current task reuses it rather
-   * than stacking a second card for the same run.
+   * A fresh prompt or retry creates one card. Run targets the existing queued
+   * card and passes its taskId so the server does not create a duplicate.
    */
   async #ensureQueuedCard(
     input: QueueBoardPromptInput,
-    sessionId: string
-  ): Promise<void> {
-    const taskId = `task-${crypto.randomUUID()}`;
+    sessionId: string,
+    options: { retryOf?: string; taskId?: string } = {}
+  ): Promise<string> {
+    const taskId = options.taskId ?? `task-${crypto.randomUUID()}`;
+    if (options.taskId) {
+      return taskId;
+    }
     const title = input.text.slice(0, 120);
 
     // The "does this board already have a live task" decision is made inside the
@@ -384,6 +408,7 @@ export class BoardTaskService {
               reviewMode: input.reviewMode,
               text: input.text,
             },
+            ...(options.retryOf ? { retryOf: options.retryOf } : {}),
             title,
           },
           taskId,
@@ -400,6 +425,23 @@ export class BoardTaskService {
       sessionId,
       taskId,
     });
+
+    if (commit) {
+      return taskId;
+    }
+
+    // A lost duplicate card creation is safe to resolve only to the task that
+    // already owns the board's live session. Public queueing rejects a busy
+    // board; this fallback is for a concurrent event that won the store queue.
+    const currentTaskId = this.#workspaceStore.getBoard(input.boardId)?.session
+      .currentTaskId;
+    if (!currentTaskId) {
+      throw new BoardTaskCommandError(
+        "board_busy",
+        "This board already has work in progress. Wait for it to finish before starting another task."
+      );
+    }
+    return currentTaskId;
   }
 
   /**
@@ -566,12 +608,159 @@ export class BoardTaskService {
     this.assertBoardOpen(parsed.boardId);
     return this.#withBoardOperation(parsed.boardId, () => {
       this.assertBoardOpen(parsed.boardId);
+      const board = this.#workspaceStore.getBoard(parsed.boardId);
+      if (!board) {
+        throw new Error(`no such board: ${parsed.boardId}`);
+      }
+      if (hasLiveTask(board)) {
+        throw new BoardTaskCommandError(
+          "board_busy",
+          "This board already has work in progress. Wait for it to finish before starting another task."
+        );
+      }
       return this.#queuePromptParsed(parsed);
     });
   }
 
+  runQueuedTask(
+    boardId: string,
+    taskId: string
+  ): Promise<BoardTaskCommandResponse> {
+    this.assertBoardOpen(boardId);
+    return this.#withBoardOperation(boardId, async () => {
+      this.assertBoardOpen(boardId);
+      const board = this.#workspaceStore.getBoard(boardId);
+      if (!board) {
+        throw new BoardTaskCommandError(
+          "task_not_found",
+          "This task is no longer on the board. Refresh and try again."
+        );
+      }
+      const task = findTaskInColumns(board.columns, taskId);
+      if (!task) {
+        throw new BoardTaskCommandError(
+          "task_not_found",
+          "This task is no longer on the board. Refresh and try again."
+        );
+      }
+      if (!(board.columns.queue ?? []).some((entry) => entry.id === taskId)) {
+        throw new BoardTaskCommandError(
+          "task_not_queued",
+          "Only a queued task can be started."
+        );
+      }
+      if (!task.promptInput) {
+        throw new BoardTaskCommandError(
+          "task_prompt_missing",
+          "This older task does not contain its original prompt and cannot be run again."
+        );
+      }
+      if (
+        board.session.currentTaskId === taskId &&
+        board.session.state === "active"
+      ) {
+        const sessionId = board.session.sessionId;
+        if (sessionId) {
+          return {
+            boardId,
+            sessionId,
+            status: "already_running",
+            taskId,
+            timestamp: Date.now(),
+          };
+        }
+      }
+      if (hasLiveTask(board) && board.session.currentTaskId !== taskId) {
+        throw new BoardTaskCommandError(
+          "board_busy",
+          "Another task is already running on this board. Wait for it to finish before starting this one."
+        );
+      }
+
+      const response = await this.#queuePromptParsed(
+        this.#inputFromTask(board, task.promptInput),
+        { taskId }
+      );
+      return {
+        boardId,
+        sessionId: response.sessionId,
+        status: "accepted",
+        taskId,
+        timestamp: response.timestamp,
+      };
+    });
+  }
+
+  retryTask(
+    boardId: string,
+    taskId: string
+  ): Promise<BoardTaskCommandResponse> {
+    this.assertBoardOpen(boardId);
+    return this.#withBoardOperation(boardId, async () => {
+      this.assertBoardOpen(boardId);
+      const board = this.#workspaceStore.getBoard(boardId);
+      const task = board ? findTaskInColumns(board.columns, taskId) : null;
+      if (!(board && task)) {
+        throw new BoardTaskCommandError(
+          "task_not_found",
+          "This task is no longer on the board. Refresh and try again."
+        );
+      }
+      if (!(board.columns.done ?? []).some((entry) => entry.id === taskId)) {
+        throw new BoardTaskCommandError(
+          "task_not_retryable",
+          "Only a finished task can be retried."
+        );
+      }
+      if (!task.promptInput) {
+        throw new BoardTaskCommandError(
+          "task_prompt_missing",
+          "This older task does not contain its original prompt and cannot be retried."
+        );
+      }
+      if (hasLiveTask(board)) {
+        throw new BoardTaskCommandError(
+          "board_busy",
+          "Another task is already running on this board. Wait for it to finish before retrying."
+        );
+      }
+
+      const response = await this.#queuePromptParsed(
+        this.#inputFromTask(board, task.promptInput),
+        { retryOf: taskId }
+      );
+      return {
+        boardId,
+        sessionId: response.sessionId,
+        status: "accepted",
+        taskId: response.taskId,
+        timestamp: response.timestamp,
+      };
+    });
+  }
+
+  #inputFromTask(
+    board: WorkspaceBoard,
+    promptInput: NonNullable<
+      WorkspaceBoard["columns"][string][number]["promptInput"]
+    >
+  ): QueueBoardPromptInput {
+    return {
+      agent: promptInput.agent,
+      boardId: board.boardId,
+      directory: boardDirectory(board),
+      model: promptInput.model,
+      parts: promptInput.parts,
+      projectId: board.repo.projectId,
+      reviewMode: promptInput.reviewMode,
+      sessionId: board.session.sessionId,
+      text: promptInput.text,
+    };
+  }
+
   async #queuePromptParsed(
-    parsed: QueueBoardPromptInput
+    parsed: QueueBoardPromptInput,
+    options: { retryOf?: string; taskId?: string } = {}
   ): Promise<QueueBoardPromptResponse> {
     const existing = this.#registry.get(parsed.boardId);
     const persistedBoard = this.#workspaceStore.getBoard(parsed.boardId);
@@ -643,46 +832,70 @@ export class BoardTaskService {
       state: "active",
     });
 
-    await this.#ensureQueuedCard(input, sessionId);
+    const taskId = await this.#ensureQueuedCard(input, sessionId, options);
 
     const sdkParts = input.parts
       ? convertPartsToSdk(input.parts, input.directory)
       : [];
 
-    if (input.reviewMode === "manual") {
-      logger.info("queue-prompt:manual-review-mode", {
-        sessionId,
+    try {
+      if (input.reviewMode === "manual") {
+        logger.info("queue-prompt:manual-review-mode", {
+          sessionId,
+          boardId: input.boardId,
+        });
+
+        await this.#workspaceStore.updateBoardReviewMode(
+          input.boardId,
+          "manual"
+        );
+
+        await this.#bridge.promptSessionAsync({
+          sessionID: sessionId,
+          directory: input.directory,
+          text: input.text,
+          model: input.model,
+          agent: "plan",
+          parts: sdkParts.length > 0 ? sdkParts : undefined,
+        });
+      } else {
+        logger.info("queue-prompt:sending-async", {
+          sessionId,
+          boardId: input.boardId,
+          directory: input.directory,
+          model: input.model
+            ? `${input.model.providerID}/${input.model.modelID}`
+            : undefined,
+        });
+
+        await this.#bridge.promptSessionAsync({
+          sessionID: sessionId,
+          directory: input.directory,
+          text: input.text,
+          model: input.model,
+          agent: input.agent,
+          parts: sdkParts.length > 0 ? sdkParts : undefined,
+        });
+      }
+    } catch (error) {
+      const message =
+        "Chorus could not confirm that the provider accepted this task. Your prompt is saved on the board; check the provider session before retrying.";
+      logger.error("queue-prompt:dispatch-failed", {
         boardId: input.boardId,
-      });
-
-      await this.#workspaceStore.updateBoardReviewMode(input.boardId, "manual");
-
-      await this.#bridge.promptSessionAsync({
-        sessionID: sessionId,
-        directory: input.directory,
-        text: input.text,
-        model: input.model,
-        agent: "plan",
-        parts: sdkParts.length > 0 ? sdkParts : undefined,
-      });
-    } else {
-      logger.info("queue-prompt:sending-async", {
+        error: error instanceof Error ? error.message : String(error),
         sessionId,
-        boardId: input.boardId,
-        directory: input.directory,
-        model: input.model
-          ? `${input.model.providerID}/${input.model.modelID}`
-          : undefined,
+        taskId,
       });
-
-      await this.#bridge.promptSessionAsync({
-        sessionID: sessionId,
-        directory: input.directory,
-        text: input.text,
-        model: input.model,
-        agent: input.agent,
-        parts: sdkParts.length > 0 ? sdkParts : undefined,
-      });
+      await this.#workspaceStore.applyBoardEvents(input.boardId, [
+        {
+          boardId: input.boardId,
+          error: message,
+          taskId,
+          ts: Date.now(),
+          type: "card.failed",
+        },
+      ]);
+      throw new BoardTaskCommandError("prompt_dispatch_failed", message);
     }
 
     this.#watchdog?.start(sessionId, {
@@ -698,6 +911,7 @@ export class BoardTaskService {
     return {
       boardId: input.boardId,
       sessionId,
+      taskId,
       createdSession,
       accepted: true,
       timestamp: Date.now(),

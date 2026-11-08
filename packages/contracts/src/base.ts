@@ -45,6 +45,10 @@ export const apiErrorSchema = z.object({
   message: z.string().min(1),
 });
 
+export const acceptedCommandResponseSchema = z.object({
+  accepted: z.boolean(),
+});
+
 export const opencodeModelSummarySchema = z.object({
   attachment: z.boolean().default(false),
   connected: z.boolean(),
@@ -233,6 +237,19 @@ export const reviewModeSchema = z.union([
   z.literal("auto"),
 ]);
 
+export const questionOptionSchema = z.object({
+  description: z.string(),
+  label: z.string(),
+});
+
+export const questionInfoSchema = z.object({
+  custom: z.boolean().optional(),
+  header: z.string(),
+  multiple: z.boolean().optional(),
+  options: z.array(questionOptionSchema),
+  question: z.string(),
+});
+
 export const pendingApprovalRequestSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("permission"),
@@ -241,20 +258,21 @@ export const pendingApprovalRequestSchema = z.discriminatedUnion("kind", [
   }),
   z.object({
     kind: z.literal("question"),
-    questions: z.array(
-      z.object({
-        custom: z.boolean().optional(),
-        header: z.string(),
-        multiple: z.boolean().optional(),
-        options: z.array(
-          z.object({ description: z.string(), label: z.string() })
-        ),
-        question: z.string(),
-      })
-    ),
+    questions: z.array(questionInfoSchema),
     requestId: z.string().min(1).optional(),
   }),
 ]);
+
+export const pendingQuestionSchema = z.object({
+  id: z.string().min(1),
+  questions: z.array(questionInfoSchema),
+  sessionID: z.string().min(1),
+});
+
+export const pendingQuestionsResponseSchema = z.object({
+  questions: z.array(pendingQuestionSchema),
+  timestamp: z.number(),
+});
 
 export type PendingApprovalRequest = z.infer<
   typeof pendingApprovalRequestSchema
@@ -311,6 +329,7 @@ export const taskSchema = z.object({
   ]),
   linesAdded: z.number().optional(),
   linesRemoved: z.number().optional(),
+  errorMessage: z.string().optional(),
   plan: z.string().optional(),
   pendingApproval: pendingApprovalRequestSchema.optional(),
   pendingApprovals: z.array(pendingApprovalRequestSchema).optional(),
@@ -509,8 +528,17 @@ export const queueBoardPromptInputSchema = z.object({
 export const queueBoardPromptResponseSchema = z.object({
   boardId: z.string().min(1),
   sessionId: z.string().min(1),
+  taskId: z.string().min(1),
   createdSession: z.boolean(),
   accepted: z.boolean(),
+  timestamp: z.number(),
+});
+
+export const boardTaskCommandResponseSchema = z.object({
+  boardId: z.string().min(1),
+  sessionId: z.string().min(1),
+  status: z.union([z.literal("accepted"), z.literal("already_running")]),
+  taskId: z.string().min(1),
   timestamp: z.number(),
 });
 
@@ -561,6 +589,8 @@ export type AgentStep = z.infer<typeof agentStepSchema>;
 export type AgentRunContext = z.infer<typeof agentRunContextSchema>;
 export type TaskPromptInput = z.infer<typeof taskPromptInputSchema>;
 export type TaskOutcome = z.infer<typeof taskOutcomeSchema>;
+export type PendingQuestion = z.infer<typeof pendingQuestionSchema>;
+export type QuestionInfo = z.infer<typeof questionInfoSchema>;
 export type Task = z.infer<typeof taskSchema>;
 export type Columns = z.infer<typeof columnsSchema>;
 export type BoardViewMode = z.infer<typeof boardViewModeSchema>;
@@ -576,4 +606,7 @@ export type WorkspaceMutation = z.infer<typeof workspaceMutationSchema>;
 export type QueueBoardPromptInput = z.infer<typeof queueBoardPromptInputSchema>;
 export type QueueBoardPromptResponse = z.infer<
   typeof queueBoardPromptResponseSchema
+>;
+export type BoardTaskCommandResponse = z.infer<
+  typeof boardTaskCommandResponseSchema
 >;

@@ -39,6 +39,7 @@ function makeMockBoardTasks() {
     queuePrompt: mock(async () => ({
       boardId: "board-1",
       sessionId: "sess-123",
+      taskId: "task-123",
       createdSession: true,
       accepted: true,
       timestamp: 123,

@@ -510,6 +510,7 @@ describe("card lifecycle events", () => {
     expect(next.session.state).toBe("error");
     expect(next.session.errorMessage).toBe("boom");
     expect(columnOf(next, "done")[0]?.outcome).toBe("failed");
+    expect(columnOf(next, "done")[0]?.errorMessage).toBe("boom");
   });
 
   test("moves are idempotent — re-applying a move is a no-op", () => {
@@ -850,6 +851,7 @@ describe("session events", () => {
     expect(next.session.errorMessage).toBe("exploded");
     expect(next.session.currentTaskId).toBeUndefined();
     expect(columnOf(next, "done")[0]?.outcome).toBe("failed");
+    expect(columnOf(next, "done")[0]?.errorMessage).toBe("exploded");
   });
 
   test("session.timeout moves the card to done but keeps the session state", () => {
@@ -864,6 +866,7 @@ describe("session events", () => {
     expect(next.session.state).toBe("active");
     expect(next.session.errorMessage).toBe("no activity");
     expect(columnOf(next, "done")[0]?.outcome).toBe("timed_out");
+    expect(columnOf(next, "done")[0]?.errorMessage).toBe("no activity");
   });
 });
 

@@ -1,6 +1,19 @@
 # Chorus core functionality implementation plan
 
-Date: 8 November 2026. Status: proposed implementation plan, based on repository inspection and a focused test baseline. Application behavior has not been changed as part of this planning task.
+Date: 8 November 2026. Status: implementation in progress. The roadmap below was created before code changes began; this progress record distinguishes landed slices from production gates that still need work.
+
+## Execution progress
+
+| Slice | State | Evidence / remaining gate |
+| --- | --- | --- |
+| Application-wide provider and default model | Implemented and committed | Settings stores one shared default; board prompts inherit it. Continue with cross-engine propagation and migration coverage in Phase 2. |
+| Saved prompts and terminal outcomes | Implemented and committed | Task prompts are retained, and failed/timed-out outcomes remain visible and retryable. |
+| Board commands and graceful UI feedback | Implemented in the current change | Run, Retry, approval, question, stop, and diff commands validate acknowledgments; failures stay visible and preserve input. A board permits one live task. |
+| Stream presentation | Initial fixes implemented | Removed fabricated sample output before the first event and stabilized streamed row identities. Performance budgets, replay/load coverage, auto-follow behavior, and expanded-content retention remain pending. |
+| Board editor menu | Placeholder actions removed | The menu now exposes diff review, which has a real server-backed result. Opening a folder in an OS editor is not supported by the web app. |
+| Validation | Partial | `bun run check`, `bun run check-types`, and the focused route/task/projector/WebSocket/approval-state suite pass (175 tests, 380 assertions). The full unit run had 22 environment failures: sandboxed loopback listeners, inaccessible `~/.chorus`, macOS `/var` versus `/private/var` path expectations, and unavailable PostHog network access. Production Playwright startup remained at Next compile without progress and was interrupted; browser coverage is still required in CI or an unrestricted local environment. |
+
+No phase is considered production-complete until its acceptance gate passes. The implementation work is still subject to the remaining migration, browser, engine-compatibility, load, and recovery gates below.
 
 ## Intended result
 

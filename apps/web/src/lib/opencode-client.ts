@@ -1,4 +1,5 @@
 import {
+  apiErrorSchema,
   type SessionFileDiff,
   sessionFileDiffsSchema,
 } from "@chorus/contracts";
@@ -170,38 +171,25 @@ export async function fetchDirectory(
 export async function fetchSessionDiff(
   sessionId: string
 ): Promise<SessionFileDiff[]> {
-  try {
-    const response = await fetch(`/api/sessions/${sessionId}/diff`, {
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) {
-      console.error("[opencode-client] Failed to fetch session diff", {
-        sessionId,
-        status: response.status,
-      });
-      return [];
-    }
-    const text = await response.text();
-    if (!text) {
-      return [];
-    }
-    const parsed = sessionFileDiffsSchema.safeParse(JSON.parse(text));
-    if (!parsed.success) {
-      console.error("[opencode-client] Invalid session diff response", {
-        sessionId,
-      });
-      return [];
-    }
-    return parsed.data;
-  } catch (error) {
-    if (IS_DEV) {
-      console.error("[opencode-client] Fetch session diff failed", {
-        sessionId,
-        errorMessage: error instanceof Error ? error.message : String(error),
-      });
-    }
-    return [];
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/diff`,
+    { signal: AbortSignal.timeout(10_000) }
+  );
+  const payload: unknown = await response.json().catch(() => undefined);
+  if (!response.ok) {
+    const error = apiErrorSchema.safeParse(payload);
+    throw new Error(
+      error.success
+        ? error.data.message
+        : "Could not load session diffs. Try again."
+    );
   }
+
+  const parsed = sessionFileDiffsSchema.safeParse(payload);
+  if (!parsed.success) {
+    throw new Error("The server returned invalid diff data. Try again.");
+  }
+  return parsed.data;
 }
 
 export interface GitStatus {

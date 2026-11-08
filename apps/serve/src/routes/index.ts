@@ -12,6 +12,7 @@ import { getRevertState } from "../snapshot/session-revert";
 import type { BoardTaskService } from "../tasks/board-task-service";
 import {
   BoardLifecycleError,
+  BoardTaskCommandError,
   GlobalModelNotConfiguredError,
   SessionOwnershipError,
 } from "../tasks/board-task-service";
@@ -28,6 +29,19 @@ const logger = createLogger(
   },
   "ROUTES"
 );
+
+function boardTaskCommandStatus(error: BoardTaskCommandError): number {
+  switch (error.code) {
+    case "task_not_found":
+      return 404;
+    case "task_prompt_missing":
+      return 422;
+    case "prompt_dispatch_failed":
+      return 502;
+    default:
+      return 409;
+  }
+}
 
 /**
  * Validates a client-supplied `directory` against the boards the workspace
@@ -115,6 +129,11 @@ export function createHttpRoutes(
           return { code: error.code, message: error.message };
         }
 
+        if (error instanceof BoardTaskCommandError) {
+          set.status = boardTaskCommandStatus(error);
+          return { code: error.code, message: error.message };
+        }
+
         return undefined;
       })
       .get("/health", () => ({
@@ -142,6 +161,22 @@ export function createHttpRoutes(
         },
         {
           body: t.Any(),
+        }
+      )
+
+      .post(
+        "/boards/:boardID/tasks/:taskID/run",
+        ({ params }) => boardTasks.runQueuedTask(params.boardID, params.taskID),
+        {
+          params: t.Object({ boardID: t.String(), taskID: t.String() }),
+        }
+      )
+
+      .post(
+        "/boards/:boardID/tasks/:taskID/retry",
+        ({ params }) => boardTasks.retryTask(params.boardID, params.taskID),
+        {
+          params: t.Object({ boardID: t.String(), taskID: t.String() }),
         }
       )
 
@@ -316,6 +351,7 @@ export function createHttpRoutes(
           return {
             sessionID: params.sessionID,
             requestID: params.requestID,
+            accepted: true,
             timestamp: Date.now(),
           };
         },
@@ -351,6 +387,7 @@ export function createHttpRoutes(
           return {
             sessionID: params.sessionID,
             requestID: params.requestID,
+            accepted: true,
             timestamp: Date.now(),
           };
         },

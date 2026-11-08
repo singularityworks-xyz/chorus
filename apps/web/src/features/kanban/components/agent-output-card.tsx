@@ -1,5 +1,9 @@
 "use client";
 
+import {
+  acceptedCommandResponseSchema,
+  apiErrorSchema,
+} from "@chorus/contracts";
 import { BorderlessFileView, InlineDiffView } from "@chorus/monaco";
 import {
   BrainIcon,
@@ -14,7 +18,7 @@ import {
   TerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
@@ -50,66 +54,6 @@ export interface AgentRunContext {
   steps: AgentStep[];
   taskTitle: string;
 }
-
-export const PLACEHOLDER_RUN: AgentRunContext = {
-  sessionId: "session_placeholder_001",
-  taskTitle: "Implement real-time collaborative cursor tracking via WebSocket",
-  model: "claude-sonnet-4-5",
-  elapsed: "2m 03s",
-  steps: [
-    {
-      id: "step-1",
-      kind: "thinking",
-      status: "done",
-      summary: "Planning WebSocket cursor broadcast architecture",
-      content:
-        "I'll implement a shared cursor state using a WebSocket server. Each client will broadcast cursor position on mousemove with debouncing, and receive cursor positions of all other connected clients. I'll use a Map<sessionId, {x, y, userId}> on the server to track state.",
-    },
-    {
-      id: "step-2",
-      kind: "tool_call",
-      status: "done",
-      summary: "read_file(apps/serve/src/ws/handler.ts)",
-    },
-    {
-      id: "step-3",
-      kind: "file_edit",
-      status: "done",
-      summary: "apps/serve/src/ws/cursor-handler.ts",
-      filePath: "apps/serve/src/ws/cursor-handler.ts",
-      linesAdded: 64,
-      linesRemoved: 0,
-      originalContent:
-        "// Original file content here\n// This will be replaced by the diff editor",
-      modifiedContent:
-        "// New file content here\n// With cursor tracking logic added",
-    },
-    {
-      id: "step-4",
-      kind: "file_edit",
-      status: "done",
-      summary: "apps/web/src/hooks/use-cursors.ts",
-      filePath: "apps/web/src/hooks/use-cursors.ts",
-      linesAdded: 38,
-      linesRemoved: 5,
-    },
-    {
-      id: "step-5",
-      kind: "command",
-      status: "done",
-      summary: "bun run check-types",
-      content: "Found 0 errors.",
-    },
-    {
-      id: "step-6",
-      kind: "response",
-      status: "running",
-      summary: "Writing implementation summary…",
-      content:
-        "I've implemented shared cursor tracking. The server broadcasts cursor positions via WebSocket, and the `useCursors` hook handles debounced emission and remote-cursor rendering. Types are clean.",
-    },
-  ],
-};
 
 const STEP_META: Record<
   AgentStepKind,
@@ -472,18 +416,42 @@ export function AgentOutputCard({
 }: AgentOutputCardProps) {
   const doneCount = run.steps.filter((s) => s.status === "done").length;
   const isLive = run.steps.some((s) => s.status === "running");
-  const groupedSteps = groupSteps(run.steps);
+  const groupedSteps = useMemo(() => groupSteps(run.steps), [run.steps]);
   const [aborting, setAborting] = useState(false);
+  const [abortError, setAbortError] = useState<string | null>(null);
 
   const handleAbort = useCallback(async () => {
     if (!run.sessionId || aborting) {
       return;
     }
     setAborting(true);
+    setAbortError(null);
     try {
-      await fetch(`/api/tasks/${run.sessionId}/abort`, { method: "POST" });
-    } catch {
-      // abort failed — UI will update via WS events regardless
+      const response = await fetch(
+        `/api/tasks/${encodeURIComponent(run.sessionId)}/abort`,
+        { method: "POST" }
+      );
+      const payload: unknown = await response.json().catch(() => undefined);
+      if (!response.ok) {
+        const error = apiErrorSchema.safeParse(payload);
+        throw new Error(
+          error.success
+            ? error.data.message
+            : "Could not stop this task. Try again."
+        );
+      }
+      const accepted = acceptedCommandResponseSchema.safeParse(payload);
+      if (accepted.success && !accepted.data.accepted) {
+        throw new Error(
+          "The engine did not accept the stop request. The task is still running."
+        );
+      }
+    } catch (error) {
+      setAbortError(
+        error instanceof Error
+          ? error.message
+          : "Could not stop this task. Try again."
+      );
     } finally {
       setAborting(false);
     }
@@ -542,13 +510,18 @@ export function AgentOutputCard({
             group.kind === "thinking" || group.kind === "response"
               ? group.id
               : group.step.id;
-          const uniqueKey =
-            "sourceSteps" in group
-              ? `${stepId}-${group.sourceSteps.length}-${group.sourceSteps[0]?.id}`
-              : `${stepId}-${group.step.content?.slice(0, 50)}`;
-          return <GroupedStepRow group={group} key={uniqueKey} />;
+          return <GroupedStepRow group={group} key={stepId} />;
         })}
       </div>
+
+      {abortError && (
+        <p
+          className="border-rose-500/15 border-t bg-rose-500/[0.03] px-3 py-2 text-[0.68rem] text-rose-300/85"
+          role="alert"
+        >
+          {abortError}
+        </p>
+      )}
 
       <div className="flex items-center gap-3 border-white/5 border-t px-3 py-2">
         <div className="h-1 flex-1 overflow-hidden rounded-full bg-white/8">

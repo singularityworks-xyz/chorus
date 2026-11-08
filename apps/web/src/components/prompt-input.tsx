@@ -31,6 +31,7 @@ import {
   useAutocomplete,
 } from "@/hooks/use-autocomplete";
 import { useVoiceRecording } from "@/hooks/use-voice-recording";
+import { ChorusApiError } from "@/lib/chorus-api-error";
 import { extractLineRange, formatLineRange } from "@/lib/line-range";
 import { cn } from "@/lib/utils";
 
@@ -61,6 +62,16 @@ function getBoardRepoName(board: WorkspaceBoard) {
     getRepoBaseName(board.repo.directory) ||
     board.title
   );
+}
+
+function promptSubmissionErrorMessage(error: unknown): string {
+  if (!(error instanceof ChorusApiError)) {
+    return "We could not confirm whether the task started. Check the board before retrying; your draft is still here.";
+  }
+  if (error.code === "global_model_not_configured") {
+    return "Choose one provider and model in Settings before starting a task.";
+  }
+  return error.message;
 }
 
 let partIdCounter = 0;
@@ -373,12 +384,7 @@ export function PromptInput() {
         parts: structuredParts,
       });
     } catch (error) {
-      setSubmitError(
-        error instanceof Error &&
-          error.message === "global_model_not_configured"
-          ? "Choose one provider and model in Settings before starting a task."
-          : "We could not confirm whether the task started. Check the board before retrying; your draft is still here."
-      );
+      setSubmitError(promptSubmissionErrorMessage(error));
       return;
     }
 

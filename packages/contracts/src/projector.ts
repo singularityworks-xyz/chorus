@@ -526,6 +526,7 @@ function applyCardEvent(
           pendingApproval: undefined,
           pendingApprovals: [],
           outcome: "succeeded",
+          errorMessage: undefined,
         })
       );
       const releasesTask = board.session.currentTaskId === event.taskId;
@@ -551,6 +552,7 @@ function applyCardEvent(
             ...task,
             pendingApproval: undefined,
             pendingApprovals: [],
+            errorMessage: event.error,
             outcome: "failed",
           })
         ),
@@ -693,6 +695,7 @@ function applySessionEvent(
                 ...task,
                 pendingApproval: undefined,
                 pendingApprovals: [],
+                errorMessage: event.error,
                 outcome: "failed",
               })
             )
@@ -718,6 +721,7 @@ function applySessionEvent(
                 ...task,
                 pendingApproval: undefined,
                 pendingApprovals: [],
+                errorMessage: event.error,
                 outcome: "timed_out",
               })
             )

@@ -29,8 +29,13 @@ import { useWorkspace } from "@/features/workspace/workspace-context";
 const LANES = ["queue", "in_progress", "approve", "done"] as const;
 
 export function MobileLaneList() {
-  const { boards, selectBoard, selectedBoardId, updateBoardColumns } =
-    useWorkspace();
+  const {
+    boards,
+    focusBoardLocally,
+    selectBoard,
+    selectedBoardId,
+    updateBoardColumns,
+  } = useWorkspace();
 
   const active =
     boards.find((board) => board.boardId === selectedBoardId) ?? boards[0];
@@ -111,6 +116,12 @@ export function MobileLaneList() {
         boardId={active.boardId}
         columns={active.columns}
         key={active.boardId}
+        onCreateTask={() => {
+          focusBoardLocally(active.boardId);
+          window.requestAnimationFrame(() => {
+            document.getElementById("chorus-prompt-input")?.focus();
+          });
+        }}
         onUpdateColumns={updateBoardColumns}
         reviewMode={active.reviewMode ?? "auto"}
         sessionId={active.session?.sessionId}
@@ -132,18 +143,21 @@ function MobileBoardBody({
   onUpdateColumns,
   reviewMode,
   sessionId,
+  onCreateTask,
 }: {
   boardId: string;
   columns: Columns;
   onUpdateColumns: (boardId: string, columns: Columns) => void;
   reviewMode: "manual" | "auto";
   sessionId: string | undefined;
+  onCreateTask: () => void;
 }) {
   const actions = useKanbanCardActions({
     boardId,
     columns,
     onUpdateColumns,
     sessionId,
+    reviewMode,
   });
 
   // `KanbanColumnBody` reads review mode as a prop rather than owning it, so the
@@ -178,15 +192,19 @@ function MobileBoardBody({
             key={lane}
           >
             <KanbanColumnBody
+              actionStates={actions.actionStates}
               columnId={lane}
               onApprove={actions.handleApprove}
+              onCreateTask={onCreateTask}
               onPlanChange={actions.handlePlanChange}
               onQuestionsAnswered={actions.handleQuestionsAnswered}
               onReject={actions.handleReject}
+              onRetry={actions.handleRetry}
               onReviewModeChange={(nextMode) => {
                 setMode(nextMode);
                 actions.handleReviewModeChange(nextMode);
               }}
+              onRun={actions.handleRun}
               reviewMode={mode}
               tasks={actions.localColumns[lane] ?? []}
             />

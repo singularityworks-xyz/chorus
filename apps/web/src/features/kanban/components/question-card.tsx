@@ -1,105 +1,163 @@
 "use client";
 
+import {
+  acceptedCommandResponseSchema,
+  apiErrorSchema,
+  type PendingQuestion,
+  pendingQuestionsResponseSchema,
+} from "@chorus/contracts";
 import { CheckIcon, Loader2Icon, MessageSquareIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
-
-export interface QuestionOption {
-  description: string;
-  label: string;
-}
-
-export interface QuestionInfo {
-  custom?: boolean;
-  header: string;
-  multiple?: boolean;
-  options: QuestionOption[];
-  question: string;
-}
-
-interface PendingQuestion {
-  id: string;
-  questions: QuestionInfo[];
-  sessionID: string;
-}
 
 interface QuestionCardProps {
   sessionID: string;
 }
 
+async function requireAcceptedQuestionCommand(
+  response: Response,
+  fallback: string
+): Promise<void> {
+  const payload: unknown = await response.json().catch(() => undefined);
+  if (!response.ok) {
+    const error = apiErrorSchema.safeParse(payload);
+    throw new Error(error.success ? error.data.message : fallback);
+  }
+
+  const accepted = acceptedCommandResponseSchema.safeParse(payload);
+  if (!(accepted.success && accepted.data.accepted)) {
+    throw new Error(
+      "The server did not accept this answer. Refresh and retry."
+    );
+  }
+}
+
+async function fetchPendingQuestions(
+  sessionID: string,
+  signal?: AbortSignal
+): Promise<PendingQuestion[]> {
+  const response = await fetch(
+    `/api/tasks/${encodeURIComponent(sessionID)}/questions`,
+    { cache: "no-store", signal }
+  );
+  const payload: unknown = await response.json().catch(() => undefined);
+  if (!response.ok) {
+    const error = apiErrorSchema.safeParse(payload);
+    throw new Error(
+      error.success
+        ? error.data.message
+        : "Could not load the agent's question. Try again."
+    );
+  }
+
+  const parsed = pendingQuestionsResponseSchema.safeParse(payload);
+  if (!parsed.success) {
+    throw new Error(
+      "The server returned an invalid question response. Refresh the board and try again."
+    );
+  }
+  return parsed.data.questions;
+}
+
 export function QuestionCard({ sessionID }: QuestionCardProps) {
   const [questions, setQuestions] = useState<PendingQuestion[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selected, setSelected] = useState<Record<number, number[]>>({});
-  const [customAnswers, setCustomAnswers] = useState<Record<number, string>>(
+  const [selected, setSelected] = useState<Record<string, number[]>>({});
+  const [customAnswers, setCustomAnswers] = useState<Record<string, string>>(
     {}
   );
   const [submitting, setSubmitting] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function fetchQuestions() {
+  const loadQuestions = useCallback(
+    async (signal?: AbortSignal) => {
+      setLoading(true);
+      setLoadError(null);
+      setQuestions([]);
       try {
-        const res = await fetch(`/api/tasks/${sessionID}/questions`);
-        const data = await res.json();
-        if (!cancelled) {
-          setQuestions(data.questions ?? []);
+        const pending = await fetchPendingQuestions(sessionID, signal);
+        if (!signal?.aborted) {
+          setQuestions(pending);
         }
-      } catch {
-        if (!cancelled) {
-          setQuestions([]);
+      } catch (error) {
+        if (!signal?.aborted) {
+          setLoadError(
+            error instanceof Error
+              ? error.message
+              : "Could not load the agent's question. Try again."
+          );
         }
       } finally {
-        if (!cancelled) {
+        if (!signal?.aborted) {
           setLoading(false);
         }
       }
-    }
+    },
+    [sessionID]
+  );
 
-    fetchQuestions();
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionID]);
+  useEffect(() => {
+    const controller = new AbortController();
+    loadQuestions(controller.signal);
+    return () => controller.abort();
+  }, [loadQuestions]);
 
   const handleOptionToggle = useCallback(
-    (qIndex: number, oIndex: number, _multiple?: boolean) => {
+    (answerKey: string, oIndex: number, multiple?: boolean) => {
       setSelected((prev) => {
-        const current = prev[qIndex] ?? [];
-        if (_multiple) {
+        const current = prev[answerKey] ?? [];
+        if (multiple) {
           const next = current.includes(oIndex)
             ? current.filter((i) => i !== oIndex)
             : [...current, oIndex];
-          return { ...prev, [qIndex]: next };
+          return { ...prev, [answerKey]: next };
         }
-        return { ...prev, [qIndex]: [oIndex] };
+        return { ...prev, [answerKey]: [oIndex] };
       });
     },
     []
   );
 
-  const handleCustomChange = useCallback((qIndex: number, value: string) => {
-    setCustomAnswers((prev) => ({ ...prev, [qIndex]: value }));
+  const handleCustomChange = useCallback((answerKey: string, value: string) => {
+    setCustomAnswers((prev) => ({ ...prev, [answerKey]: value }));
   }, []);
 
   const handleSubmit = useCallback(
     async (question: PendingQuestion) => {
       setSubmitting(true);
+      setActionError(null);
+      setActionMessage(null);
       try {
-        const answers = question.questions.map((_q, qIndex) => ({
-          questionIndex: qIndex,
-          optionIndices: selected[qIndex] ?? [],
-          customAnswer: customAnswers[qIndex] || undefined,
-        }));
-
-        await fetch(`/api/tasks/${sessionID}/questions/${question.id}/reply`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ answers }),
+        const answers = question.questions.map((_q, qIndex) => {
+          const answerKey = `${question.id}:${qIndex}`;
+          return {
+            questionIndex: qIndex,
+            optionIndices: selected[answerKey] ?? [],
+            customAnswer: customAnswers[answerKey] || undefined,
+          };
         });
-      } catch {
-        // Error will be handled by event stream
+
+        const response = await fetch(
+          `/api/tasks/${encodeURIComponent(sessionID)}/questions/${encodeURIComponent(question.id)}/reply`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ answers }),
+          }
+        );
+        await requireAcceptedQuestionCommand(
+          response,
+          "Could not send your answer. Your selections are still here; try again."
+        );
+        setActionMessage("Answer sent. Waiting for the agent to continue…");
+      } catch (error) {
+        setActionError(
+          error instanceof Error
+            ? error.message
+            : "Could not send your answer. Your selections are still here; try again."
+        );
       } finally {
         setSubmitting(false);
       }
@@ -110,12 +168,26 @@ export function QuestionCard({ sessionID }: QuestionCardProps) {
   const handleReject = useCallback(
     async (question: PendingQuestion) => {
       setSubmitting(true);
+      setActionError(null);
+      setActionMessage(null);
       try {
-        await fetch(`/api/tasks/${sessionID}/questions/${question.id}/reject`, {
-          method: "POST",
-        });
-      } catch {
-        // Error will be handled by event stream
+        const response = await fetch(
+          `/api/tasks/${encodeURIComponent(sessionID)}/questions/${encodeURIComponent(question.id)}/reject`,
+          { method: "POST" }
+        );
+        await requireAcceptedQuestionCommand(
+          response,
+          "Could not dismiss the agent's question. Try again."
+        );
+        setActionMessage(
+          "Question dismissed. Waiting for the agent to continue…"
+        );
+      } catch (error) {
+        setActionError(
+          error instanceof Error
+            ? error.message
+            : "Could not dismiss the agent's question. Try again."
+        );
       } finally {
         setSubmitting(false);
       }
@@ -132,15 +204,46 @@ export function QuestionCard({ sessionID }: QuestionCardProps) {
     );
   }
 
+  if (loadError) {
+    return (
+      <div className="flex flex-col gap-2 rounded-xs border border-rose-500/15 bg-rose-500/[0.03] px-3 py-2.5">
+        <p className="text-[0.7rem] text-rose-300/85" role="alert">
+          {loadError}
+        </p>
+        <button
+          className="self-start rounded-xs border border-white/10 px-2 py-1 text-[0.65rem] text-white/60 hover:bg-white/5"
+          onClick={() => loadQuestions()}
+          type="button"
+        >
+          Retry loading
+        </button>
+      </div>
+    );
+  }
+
   if (questions.length === 0) {
     return null;
   }
 
   return (
     <div className="flex flex-col gap-2">
+      {actionError && (
+        <p
+          className="rounded-xs border border-rose-500/15 bg-rose-500/[0.03] px-3 py-2 text-[0.68rem] text-rose-300/85"
+          role="alert"
+        >
+          {actionError}
+        </p>
+      )}
+      {actionMessage && (
+        <p className="text-[0.68rem] text-white/45" role="status">
+          {actionMessage}
+        </p>
+      )}
       {questions.map((q) =>
         q.questions.map((qi, qiIdx) => {
           const questionKey = `${q.id}-q${qiIdx}-${qi.header}`;
+          const answerKey = `${q.id}:${qiIdx}`;
           return (
             <div
               className="flex flex-col gap-2 rounded-xs border border-amber-500/10 bg-amber-500/[0.03] px-3 py-2.5"
@@ -161,7 +264,9 @@ export function QuestionCard({ sessionID }: QuestionCardProps) {
               {qi.options.length > 0 && (
                 <div className="flex flex-col gap-1 pl-5">
                   {qi.options.map((opt, oIdx) => {
-                    const isSelected = (selected[qiIdx] ?? []).includes(oIdx);
+                    const isSelected = (selected[answerKey] ?? []).includes(
+                      oIdx
+                    );
                     return (
                       <button
                         className={cn(
@@ -172,7 +277,7 @@ export function QuestionCard({ sessionID }: QuestionCardProps) {
                         )}
                         key={`${q.id}-${qi.header}-opt-${opt.label}`}
                         onClick={() =>
-                          handleOptionToggle(qiIdx, oIdx, qi.multiple)
+                          handleOptionToggle(answerKey, oIdx, qi.multiple)
                         }
                         type="button"
                       >
@@ -205,10 +310,12 @@ export function QuestionCard({ sessionID }: QuestionCardProps) {
               {qi.custom !== false && (
                 <textarea
                   className="w-full resize-none rounded-xs border border-white/5 bg-white/2 px-2.5 py-1.5 font-mono text-[0.68rem] text-white/60 placeholder:text-white/20 focus:border-amber-500/30 focus:outline-none focus:ring-1 focus:ring-amber-500/20"
-                  onChange={(e) => handleCustomChange(qiIdx, e.target.value)}
+                  onChange={(e) =>
+                    handleCustomChange(answerKey, e.target.value)
+                  }
                   placeholder="Type a custom answer…"
                   rows={2}
-                  value={customAnswers[qiIdx] ?? ""}
+                  value={customAnswers[answerKey] ?? ""}
                 />
               )}
 
@@ -225,7 +332,11 @@ export function QuestionCard({ sessionID }: QuestionCardProps) {
                   title="Skip question"
                   type="button"
                 >
-                  <XIcon className="size-3" />
+                  {submitting ? (
+                    <Loader2Icon className="size-3 animate-spin" />
+                  ) : (
+                    <XIcon className="size-3" />
+                  )}
                   Skip
                 </button>
                 <button
@@ -240,8 +351,12 @@ export function QuestionCard({ sessionID }: QuestionCardProps) {
                   title="Submit answer"
                   type="button"
                 >
-                  <CheckIcon className="size-3" />
-                  {submitting ? "Sending" : "Answer"}
+                  {submitting ? (
+                    <Loader2Icon className="size-3 animate-spin" />
+                  ) : (
+                    <CheckIcon className="size-3" />
+                  )}
+                  {submitting ? "Sending…" : "Answer"}
                 </button>
               </div>
             </div>

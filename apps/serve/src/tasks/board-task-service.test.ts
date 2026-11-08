@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { WorkspaceBoard } from "@chorus/contracts";
 import { WorkspaceStore } from "../workspace/store";
 import {
+  BoardTaskCommandError,
   BoardTaskService,
   GlobalModelNotConfiguredError,
   SessionOwnershipError,
@@ -80,10 +81,135 @@ async function seedBoard(
   return boardId;
 }
 
+async function addSavedTask(
+  store: WorkspaceStore,
+  boardId: string,
+  taskId: string,
+  text = "saved prompt"
+) {
+  await store.applyBoardEvents(boardId, [
+    {
+      boardId,
+      column: "queue",
+      task: {
+        id: taskId,
+        label: text,
+        labelVariant: "info-light",
+        promptInput: { reviewMode: "auto", text },
+        title: text,
+      },
+      taskId,
+      ts: Date.now(),
+      type: "card.created",
+    },
+  ]);
+}
+
 const NO_SUCH_BOARD = /no such board/;
 const BOARD_IS_CLOSING = /board is closing/;
 
 describe("BoardTaskService", () => {
+  test("runs the saved prompt for an explicitly targeted queued card once", async () => {
+    const bridge = makeMockBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-board-task-run-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, { state: "uninitialized" });
+    await addSavedTask(
+      workspaceStore,
+      boardId,
+      "task-run-1",
+      "saved run prompt"
+    );
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    const first = await service.runQueuedTask(boardId, "task-run-1");
+    const duplicate = await service.runQueuedTask(boardId, "task-run-1");
+
+    expect(first).toMatchObject({ status: "accepted", taskId: "task-run-1" });
+    expect(duplicate).toMatchObject({
+      status: "already_running",
+      taskId: "task-run-1",
+    });
+    expect(bridge.promptSessionAsync).toHaveBeenCalledTimes(1);
+    expect(bridge.promptSessionAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "saved run prompt" })
+    );
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("retry creates a child card with the persisted prompt", async () => {
+    const bridge = makeMockBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-board-task-retry-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, { state: "uninitialized" });
+    await addSavedTask(
+      workspaceStore,
+      boardId,
+      "task-finished-1",
+      "retry prompt"
+    );
+    await workspaceStore.applyBoardEvents(boardId, [
+      {
+        boardId,
+        taskId: "task-finished-1",
+        ts: Date.now(),
+        type: "card.completed",
+      },
+    ]);
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    const result = await service.retryTask(boardId, "task-finished-1");
+    const retry = workspaceStore.getBoard(boardId)?.columns.queue[0];
+
+    expect(result.status).toBe("accepted");
+    expect(retry).toMatchObject({ retryOf: "task-finished-1" });
+    expect(retry?.promptInput?.text).toBe("retry prompt");
+    expect(bridge.promptSessionAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "retry prompt" })
+    );
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("provider dispatch failure leaves a visible failed card with its prompt", async () => {
+    const bridge = makeMockBridge();
+    bridge.promptSessionAsync.mockRejectedValue(
+      new Error("provider unavailable")
+    );
+    const dir = mkdtempSync(join(tmpdir(), "chorus-board-task-failure-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, { state: "uninitialized" });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    await expect(
+      service.queuePrompt({
+        boardId,
+        directory: "/tmp/repo",
+        reviewMode: "auto",
+        text: "keep this prompt",
+      })
+    ).rejects.toMatchObject({ code: "prompt_dispatch_failed" });
+    const failed = workspaceStore.getBoard(boardId)?.columns.done[0];
+
+    expect(failed).toMatchObject({
+      errorMessage: expect.stringContaining("could not confirm"),
+      outcome: "failed",
+      promptInput: { text: "keep this prompt" },
+    });
+    expect(workspaceStore.getBoard(boardId)?.session.errorMessage).toContain(
+      "could not confirm"
+    );
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
   test("aborts the board session before committing removal", async () => {
     const bridge = makeMockBridge();
     const dir = mkdtempSync(join(tmpdir(), "chorus-board-remove-"));
@@ -405,7 +531,7 @@ describe("BoardTaskService", () => {
     rmSync(dir, { force: true, recursive: true });
   });
 
-  test("a second prompt on a live board reuses the card instead of stacking one", async () => {
+  test("a second prompt on a live board is rejected rather than attached to that run", async () => {
     const bridge = makeMockBridge();
     const dir = mkdtempSync(join(tmpdir(), "chorus-board-task-card2-"));
     const workspaceStore = new WorkspaceStore(dir);
@@ -421,16 +547,19 @@ describe("BoardTaskService", () => {
     });
     const firstTaskId = workspaceStore.getBoard(boardId)?.session.currentTaskId;
 
-    await service.queuePrompt({
-      boardId,
-      directory: "/tmp/repo",
-      text: "second prompt",
-      reviewMode: "auto",
-    });
+    await expect(
+      service.queuePrompt({
+        boardId,
+        directory: "/tmp/repo",
+        text: "second prompt",
+        reviewMode: "auto",
+      })
+    ).rejects.toBeInstanceOf(BoardTaskCommandError);
 
     const board = workspaceStore.getBoard(boardId);
     expect(board?.columns.queue).toHaveLength(1);
     expect(board?.session.currentTaskId).toBe(firstTaskId);
+    expect(bridge.promptSessionAsync).toHaveBeenCalledTimes(1);
 
     await workspaceStore.close();
     rmSync(dir, { force: true, recursive: true });
@@ -609,6 +738,18 @@ describe("BoardTaskService", () => {
         text: "first",
         reviewMode: "auto",
       });
+      const currentTaskId =
+        workspaceStore.getBoard(boardId)?.session.currentTaskId;
+      if (currentTaskId) {
+        await workspaceStore.applyBoardEvents(boardId, [
+          {
+            boardId,
+            taskId: currentTaskId,
+            ts: Date.now(),
+            type: "card.completed",
+          },
+        ]);
+      }
       // The registry recorded `/tmp/repo`; the board now resolves through a
       // trailing separator. Same tree, so no fork.
       bridge.getSession.mockResolvedValue({
@@ -753,10 +894,9 @@ describe("BoardTaskService", () => {
       rmSync(dir, { force: true, recursive: true });
     });
   });
-  test("two prompts queued at once still produce exactly one card", async () => {
-    // A double submit is the ordinary way this happens. The card-existence check
-    // lives inside the store's queue now, so the second caller observes the first
-    // one's commit rather than reading the same empty state and stacking a card.
+  test("two prompts queued at once dispatch only the first and reject the second", async () => {
+    // Per-board operations serialize so a double submit cannot dispatch two
+    // prompts into one session or pretend the second was queued.
     const bridge = makeMockBridge();
     const dir = mkdtempSync(join(tmpdir(), "chorus-card-race-"));
     const workspaceStore = new WorkspaceStore(dir);
@@ -765,7 +905,7 @@ describe("BoardTaskService", () => {
 
     const service = new BoardTaskService(bridge as never, workspaceStore);
 
-    await Promise.all([
+    const results = await Promise.allSettled([
       service.queuePrompt({
         boardId,
         directory: "/tmp/repo",
@@ -783,6 +923,13 @@ describe("BoardTaskService", () => {
     const board = workspaceStore.getBoard(boardId);
     expect(board?.columns.queue).toHaveLength(1);
     expect(board?.session.currentTaskId).toBeDefined();
+    expect(
+      results.filter((result) => result.status === "fulfilled")
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === "rejected")
+    ).toHaveLength(1);
+    expect(bridge.promptSessionAsync).toHaveBeenCalledTimes(1);
 
     await workspaceStore.close();
     rmSync(dir, { force: true, recursive: true });

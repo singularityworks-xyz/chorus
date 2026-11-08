@@ -1,6 +1,9 @@
 import { describe, expect, mock, test } from "bun:test";
 import { Elysia } from "elysia";
-import { GlobalModelNotConfiguredError } from "../tasks/board-task-service";
+import {
+  BoardTaskCommandError,
+  GlobalModelNotConfiguredError,
+} from "../tasks/board-task-service";
 import { createHttpRoutes } from "./index";
 
 function makeMockBridge() {
@@ -23,6 +26,9 @@ function makeMockBridge() {
       },
     ]),
     replyPermission: mock(async () => true),
+    replyQuestion: mock(async () => undefined),
+    rejectQuestion: mock(async () => undefined),
+    listQuestions: mock(async () => []),
     forkSession: mock(async () => ({ id: "sess-forked" })),
     getStatus: mock(() => ({
       connected: true,
@@ -51,8 +57,23 @@ function makeMockBoardTasks() {
     queuePrompt: mock(async (input: unknown) => ({
       boardId: (input as { boardId: string }).boardId,
       sessionId: "sess-123",
+      taskId: "task-123",
       createdSession: true,
       accepted: true,
+      timestamp: 123,
+    })),
+    runQueuedTask: mock(async (boardId: string, taskId: string) => ({
+      boardId,
+      sessionId: "sess-123",
+      status: "accepted" as const,
+      taskId,
+      timestamp: 123,
+    })),
+    retryTask: mock(async (boardId: string, taskId: string) => ({
+      boardId,
+      sessionId: "sess-123",
+      status: "accepted" as const,
+      taskId,
       timestamp: 123,
     })),
   };
@@ -181,6 +202,7 @@ describe("HTTP routes", () => {
       expect(body).toEqual({
         boardId: "board-1",
         sessionId: "sess-123",
+        taskId: "task-123",
         createdSession: true,
         accepted: true,
         timestamp: 123,
@@ -331,6 +353,50 @@ describe("HTTP routes", () => {
     });
   });
 
+  describe("board task commands", () => {
+    test("routes Run and Retry with explicit board and task identities", async () => {
+      const { app, boardTasks } = makeApp();
+
+      const runResponse = await app.handle(
+        new Request("http://localhost/boards/board-1/tasks/task-1/run", {
+          method: "POST",
+        })
+      );
+      const retryResponse = await app.handle(
+        new Request("http://localhost/boards/board-1/tasks/task-2/retry", {
+          method: "POST",
+        })
+      );
+
+      expect(runResponse.status).toBe(200);
+      expect(retryResponse.status).toBe(200);
+      expect(boardTasks.runQueuedTask).toHaveBeenCalledWith(
+        "board-1",
+        "task-1"
+      );
+      expect(boardTasks.retryTask).toHaveBeenCalledWith("board-1", "task-2");
+    });
+
+    test("returns a recoverable conflict when another task is active", async () => {
+      const { app, boardTasks } = makeApp();
+      boardTasks.runQueuedTask.mockRejectedValue(
+        new BoardTaskCommandError("board_busy", "This board is busy.")
+      );
+
+      const response = await app.handle(
+        new Request("http://localhost/boards/board-1/tasks/task-1/run", {
+          method: "POST",
+        })
+      );
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        code: "board_busy",
+        message: "This board is busy.",
+      });
+    });
+  });
+
   describe("POST /tasks/:sessionID/reject", () => {
     test("rejects a permission request", async () => {
       const { app, bridge } = makeApp();
@@ -360,6 +426,63 @@ describe("HTTP routes", () => {
         reply: "reject",
         message: undefined,
       });
+    });
+  });
+
+  describe("question commands", () => {
+    test("answers a question with an explicit accepted acknowledgment", async () => {
+      const { app, bridge } = makeApp();
+
+      const response = await app.handle(
+        new Request(
+          "http://localhost/tasks/sess-1/questions/question-1/reply",
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              answers: [
+                { questionIndex: 0, optionIndices: [1], customAnswer: "" },
+              ],
+            }),
+          }
+        )
+      );
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        accepted: true,
+        requestID: "question-1",
+        sessionID: "sess-1",
+        timestamp: expect.any(Number),
+      });
+      expect(bridge.replyQuestion).toHaveBeenCalledWith({
+        answers: [{ questionIndex: 0, optionIndices: [1], customAnswer: "" }],
+        directory: BOARD_WORKTREE,
+        requestID: "question-1",
+      });
+    });
+
+    test("rejects a question with an explicit accepted acknowledgment", async () => {
+      const { app, bridge } = makeApp();
+
+      const response = await app.handle(
+        new Request(
+          "http://localhost/tasks/sess-1/questions/question-1/reject",
+          { method: "POST" }
+        )
+      );
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        accepted: true,
+        requestID: "question-1",
+        sessionID: "sess-1",
+        timestamp: expect.any(Number),
+      });
+      expect(bridge.rejectQuestion).toHaveBeenCalledWith(
+        "question-1",
+        BOARD_WORKTREE
+      );
     });
   });
 
