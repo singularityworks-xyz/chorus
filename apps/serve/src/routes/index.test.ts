@@ -96,6 +96,23 @@ function makeMockBoardTasks() {
       taskId,
       timestamp: 123,
     })),
+    getSessionHistoryState: mock(async (boardId: string) => ({
+      boardId,
+      canRedo: false,
+      canUndo: true,
+      busy: false,
+      sessionId: "sess-123",
+      timestamp: 123,
+    })),
+    sessionHistoryCommand: mock(
+      async (boardId: string, command: "undo" | "redo") => ({
+        accepted: true as const,
+        boardId,
+        command,
+        sessionId: "sess-123",
+        timestamp: 123,
+      })
+    ),
   };
 }
 
@@ -375,6 +392,86 @@ describe("HTTP routes", () => {
   });
 
   describe("board task commands", () => {
+    test("reads and changes history through the explicit board session", async () => {
+      const { app, boardTasks } = makeApp();
+
+      const stateResponse = await app.handle(
+        new Request("http://localhost/boards/board-1/session/history")
+      );
+      const commandResponse = await app.handle(
+        new Request("http://localhost/boards/board-1/session/history/undo", {
+          method: "POST",
+        })
+      );
+
+      expect(stateResponse.status).toBe(200);
+      expect(await stateResponse.json()).toMatchObject({
+        boardId: "board-1",
+        canUndo: true,
+        canRedo: false,
+      });
+      expect(boardTasks.getSessionHistoryState).toHaveBeenCalledWith("board-1");
+      expect(commandResponse.status).toBe(200);
+      expect(await commandResponse.json()).toMatchObject({
+        accepted: true,
+        boardId: "board-1",
+        command: "undo",
+      });
+      expect(boardTasks.sessionHistoryCommand).toHaveBeenCalledWith(
+        "board-1",
+        "undo"
+      );
+    });
+
+    test("rejects unsupported board session history commands", async () => {
+      const { app, boardTasks } = makeApp();
+
+      const response = await app.handle(
+        new Request("http://localhost/boards/board-1/session/history/reset", {
+          method: "POST",
+        })
+      );
+
+      expect(response.status).toBe(422);
+      expect(boardTasks.sessionHistoryCommand).not.toHaveBeenCalled();
+    });
+
+    test("maps session history failures to actionable HTTP errors", async () => {
+      const { app, boardTasks } = makeApp();
+      boardTasks.getSessionHistoryState.mockRejectedValue(
+        new BoardTaskCommandError(
+          "session_history_unavailable",
+          "Check the provider connection and retry."
+        )
+      );
+      boardTasks.sessionHistoryCommand.mockRejectedValue(
+        new BoardTaskCommandError(
+          "session_command_failed",
+          "Refresh repository history before trying again."
+        )
+      );
+
+      const stateResponse = await app.handle(
+        new Request("http://localhost/boards/board-1/session/history")
+      );
+      const commandResponse = await app.handle(
+        new Request("http://localhost/boards/board-1/session/history/undo", {
+          method: "POST",
+        })
+      );
+
+      expect(stateResponse.status).toBe(503);
+      expect(await stateResponse.json()).toEqual({
+        code: "session_history_unavailable",
+        message: "Check the provider connection and retry.",
+      });
+      expect(commandResponse.status).toBe(502);
+      expect(await commandResponse.json()).toEqual({
+        code: "session_command_failed",
+        message: "Refresh repository history before trying again.",
+      });
+    });
+
     test("routes Run and Retry with explicit board and task identities", async () => {
       const { app, boardTasks } = makeApp();
 

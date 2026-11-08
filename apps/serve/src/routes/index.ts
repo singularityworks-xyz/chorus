@@ -1,4 +1,5 @@
 import {
+  boardSessionHistoryCommandSchema,
   queueBoardPromptInputSchema,
   sessionFileDiffsSchema,
 } from "@chorus/contracts";
@@ -7,6 +8,7 @@ import { Elysia, t } from "elysia";
 import { assertRegisteredRoot, UnregisteredRootError } from "../auth/roots";
 import type { OpenCodeBridge } from "../bridge/opencode/bridge";
 import { EngineUnavailableError } from "../opencode/process-manager";
+import { RepositoryRegistryError } from "../projects/repository-registry";
 import { getDiff, getGitStatus, restore, track } from "../snapshot";
 import { getRevertState } from "../snapshot/session-revert";
 import type { BoardTaskService } from "../tasks/board-task-service";
@@ -32,16 +34,71 @@ const logger = createLogger(
 
 function boardTaskCommandStatus(error: BoardTaskCommandError): number {
   switch (error.code) {
+    case "board_not_found":
     case "task_not_found":
       return 404;
     case "task_prompt_missing":
     case "task_review_invalid":
       return 422;
     case "prompt_dispatch_failed":
+    case "session_command_failed":
       return 502;
+    case "session_history_unavailable":
+      return 503;
     default:
       return 409;
   }
+}
+
+function mapRouteError(error: unknown): {
+  code: string;
+  message: string;
+  status: number;
+} | null {
+  if (!(error instanceof Error)) {
+    return null;
+  }
+  if (error instanceof EngineUnavailableError) {
+    return { code: error.code, message: error.message, status: 503 };
+  }
+  if (error instanceof UnknownSessionError) {
+    return { code: "unknown_session", message: error.message, status: 404 };
+  }
+  if (error instanceof UnregisteredRootError) {
+    return { code: "unregistered_root", message: error.message, status: 400 };
+  }
+  if (error instanceof RepositoryRegistryError) {
+    return {
+      code: error.code,
+      message: error.message,
+      status: error.code === "unregistered_repository_root" ? 403 : 400,
+    };
+  }
+  if (error instanceof SessionOwnershipError) {
+    return {
+      code: error.code,
+      message: error.message,
+      status: error.code === "session_directory_unknown" ? 503 : 409,
+    };
+  }
+  if (error instanceof BoardLifecycleError) {
+    return {
+      code: error.code,
+      message: error.message,
+      status: error.code === "board_abort_failed" ? 504 : 409,
+    };
+  }
+  if (error instanceof GlobalModelNotConfiguredError) {
+    return { code: error.code, message: error.message, status: 409 };
+  }
+  if (error instanceof BoardTaskCommandError) {
+    return {
+      code: error.code,
+      message: error.message,
+      status: boardTaskCommandStatus(error),
+    };
+  }
+  return null;
 }
 
 /**
@@ -101,41 +158,12 @@ export function createHttpRoutes(
        * fault and hides the actionable message from anything keying on status.
        */
       .onError(({ error, set }) => {
-        if (error instanceof EngineUnavailableError) {
-          set.status = 503;
-          return { code: error.code, message: error.message };
+        const mappedError = mapRouteError(error);
+        if (!mappedError) {
+          return undefined;
         }
-        if (error instanceof UnknownSessionError) {
-          set.status = 404;
-          return { code: "unknown_session", message: error.message };
-        }
-
-        if (error instanceof UnregisteredRootError) {
-          set.status = 400;
-          return { code: "unregistered_root", message: error.message };
-        }
-
-        if (error instanceof SessionOwnershipError) {
-          set.status = error.code === "session_directory_unknown" ? 503 : 409;
-          return { code: error.code, message: error.message };
-        }
-
-        if (error instanceof BoardLifecycleError) {
-          set.status = error.code === "board_abort_failed" ? 504 : 409;
-          return { code: error.code, message: error.message };
-        }
-
-        if (error instanceof GlobalModelNotConfiguredError) {
-          set.status = 409;
-          return { code: error.code, message: error.message };
-        }
-
-        if (error instanceof BoardTaskCommandError) {
-          set.status = boardTaskCommandStatus(error);
-          return { code: error.code, message: error.message };
-        }
-
-        return undefined;
+        set.status = mappedError.status;
+        return { code: mappedError.code, message: mappedError.message };
       })
       .get("/health", () => ({
         status: "ok",
@@ -216,6 +244,40 @@ export function createHttpRoutes(
         ({ params }) => boardTasks.rejectReview(params.boardID, params.taskID),
         {
           params: t.Object({ boardID: t.String(), taskID: t.String() }),
+        }
+      )
+
+      .get(
+        "/boards/:boardID/session/history",
+        ({ params }) => boardTasks.getSessionHistoryState(params.boardID),
+        {
+          params: t.Object({ boardID: t.String() }),
+        }
+      )
+
+      .post(
+        "/boards/:boardID/session/history/:command",
+        ({ params, set }) => {
+          const parsedCommand = boardSessionHistoryCommandSchema.safeParse(
+            params.command
+          );
+          if (!parsedCommand.success) {
+            set.status = 422;
+            return {
+              code: "invalid_session_history_command",
+              message: "Choose either undo or redo.",
+            };
+          }
+          return boardTasks.sessionHistoryCommand(
+            params.boardID,
+            parsedCommand.data
+          );
+        },
+        {
+          params: t.Object({
+            boardID: t.String(),
+            command: t.String(),
+          }),
         }
       )
 

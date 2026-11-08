@@ -12,10 +12,18 @@ import {
 } from "./board-task-service";
 
 function makeMockBridge() {
+  const session = {
+    directory: "/tmp/repo",
+    id: "sess-123",
+    revert: undefined as { messageID: string } | undefined,
+  };
   return {
     createSession: mock(async () => ({ id: "sess-123" })),
     forkSession: mock(async () => ({ id: "sess-forked" })),
-    getSession: mock(async () => ({ directory: "/tmp/repo", id: "sess-123" })),
+    getSession: mock(async () => session),
+    sessionMessages: mock(async () => [{ info: { role: "user" as const } }]),
+    revertSession: mock(async () => ({ messageID: "message-1" })),
+    unrevertSession: mock(async () => undefined),
     abortSession: mock(async () => true),
     waitForSessionIdle: mock(
       async (_sessionId: string, _directory: string, timeoutMs: number) =>
@@ -1307,6 +1315,224 @@ describe("BoardTaskService", () => {
     expect(queued).toBeDefined();
     expect(queued?.id).not.toBe(firstTaskId);
     expect(board?.session.currentTaskId).toBe(queued?.id);
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("session history enables undo for an idle board session", async () => {
+    const bridge = makeMockBridge();
+    bridge.waitForSessionIdle.mockResolvedValue(true);
+    const dir = mkdtempSync(join(tmpdir(), "chorus-session-history-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      sessionId: "sess-123",
+      state: "active",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    const state = await service.getSessionHistoryState(boardId);
+
+    expect(state).toMatchObject({
+      boardId,
+      canRedo: false,
+      canUndo: true,
+      busy: false,
+      sessionId: "sess-123",
+    });
+    expect(bridge.getSession).toHaveBeenCalledWith({
+      engineDirectory: "/tmp/repo",
+      sessionID: "sess-123",
+    });
+    expect(bridge.sessionMessages).toHaveBeenCalledWith(
+      "sess-123",
+      "/tmp/repo"
+    );
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("an empty session has no undo action", async () => {
+    const bridge = makeMockBridge();
+    bridge.waitForSessionIdle.mockResolvedValue(true);
+    bridge.sessionMessages.mockResolvedValue([]);
+    const dir = mkdtempSync(join(tmpdir(), "chorus-session-empty-history-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      sessionId: "sess-123",
+      state: "active",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    await expect(
+      service.getSessionHistoryState(boardId)
+    ).resolves.toMatchObject({ canRedo: false, canUndo: false, busy: false });
+    await expect(
+      service.sessionHistoryCommand(boardId, "undo")
+    ).rejects.toMatchObject({ code: "session_nothing_to_undo" });
+    expect(bridge.revertSession).not.toHaveBeenCalled();
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("undo and redo use the board session without changing task history", async () => {
+    const bridge = makeMockBridge();
+    bridge.waitForSessionIdle.mockResolvedValue(true);
+    let reverted = false;
+    bridge.getSession.mockImplementation(async () => ({
+      directory: "/tmp/repo",
+      id: "sess-123",
+      revert: reverted ? { messageID: "message-1" } : undefined,
+    }));
+    bridge.revertSession.mockImplementation(() => {
+      reverted = true;
+      return Promise.resolve({ messageID: "message-1" });
+    });
+    bridge.unrevertSession.mockImplementation(() => {
+      reverted = false;
+      return Promise.resolve(undefined);
+    });
+    const dir = mkdtempSync(join(tmpdir(), "chorus-session-command-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      sessionId: "sess-123",
+      state: "active",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+    const before = workspaceStore.getBoard(boardId)?.columns;
+
+    const undone = await service.sessionHistoryCommand(boardId, "undo");
+
+    expect(undone).toMatchObject({
+      accepted: true,
+      boardId,
+      command: "undo",
+      sessionId: "sess-123",
+    });
+    expect(bridge.revertSession).toHaveBeenCalledWith("sess-123", "/tmp/repo");
+    expect(workspaceStore.getBoard(boardId)?.columns).toEqual(before);
+    await expect(
+      service.getSessionHistoryState(boardId)
+    ).resolves.toMatchObject({
+      canRedo: true,
+      canUndo: false,
+    });
+
+    const redone = await service.sessionHistoryCommand(boardId, "redo");
+
+    expect(redone.command).toBe("redo");
+    expect(bridge.unrevertSession).toHaveBeenCalledWith(
+      "sess-123",
+      "/tmp/repo"
+    );
+    expect(workspaceStore.getBoard(boardId)?.columns).toEqual(before);
+    await expect(
+      service.getSessionHistoryState(boardId)
+    ).resolves.toMatchObject({
+      canRedo: false,
+      canUndo: true,
+    });
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("session history reports redo when OpenCode has an active revert", async () => {
+    const bridge = makeMockBridge();
+    bridge.waitForSessionIdle.mockResolvedValue(true);
+    bridge.getSession.mockResolvedValue({
+      directory: "/tmp/repo",
+      id: "sess-123",
+      revert: { messageID: "message-1" },
+    });
+    const dir = mkdtempSync(join(tmpdir(), "chorus-session-redo-state-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      sessionId: "sess-123",
+      state: "active",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    const state = await service.getSessionHistoryState(boardId);
+
+    expect(state).toMatchObject({ canRedo: true, canUndo: false, busy: false });
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("session history refuses busy work without reverting the session", async () => {
+    const bridge = makeMockBridge();
+    bridge.waitForSessionIdle.mockResolvedValue(false);
+    const dir = mkdtempSync(join(tmpdir(), "chorus-session-busy-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      sessionId: "sess-123",
+      state: "active",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    await expect(
+      service.getSessionHistoryState(boardId)
+    ).resolves.toMatchObject({ busy: true, canUndo: false, canRedo: false });
+    await expect(
+      service.sessionHistoryCommand(boardId, "undo")
+    ).rejects.toMatchObject({ code: "session_busy" });
+    expect(bridge.revertSession).not.toHaveBeenCalled();
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("session history refuses sessions owned by another checkout", async () => {
+    const bridge = makeMockBridge();
+    bridge.waitForSessionIdle.mockResolvedValue(true);
+    bridge.getSession.mockResolvedValue({
+      directory: "/tmp/other-repo",
+      id: "sess-123",
+      revert: undefined,
+    });
+    const dir = mkdtempSync(join(tmpdir(), "chorus-session-owner-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      sessionId: "sess-123",
+      state: "active",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    await expect(
+      service.sessionHistoryCommand(boardId, "undo")
+    ).rejects.toMatchObject({ code: "session_ownership_conflict" });
+    expect(bridge.revertSession).not.toHaveBeenCalled();
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("session history failures return explicit retryable errors", async () => {
+    const bridge = makeMockBridge();
+    bridge.waitForSessionIdle.mockResolvedValue(true);
+    bridge.revertSession.mockRejectedValue(new Error("engine unavailable"));
+    const dir = mkdtempSync(join(tmpdir(), "chorus-session-history-failure-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      sessionId: "sess-123",
+      state: "active",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    await expect(
+      service.sessionHistoryCommand(boardId, "undo")
+    ).rejects.toMatchObject({ code: "session_command_failed" });
 
     await workspaceStore.close();
     rmSync(dir, { force: true, recursive: true });

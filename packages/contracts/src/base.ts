@@ -49,6 +49,25 @@ export const acceptedCommandResponseSchema = z.object({
   accepted: z.boolean(),
 });
 
+export const boardSessionHistoryCommandSchema = z.enum(["undo", "redo"]);
+
+export const boardSessionHistoryStateSchema = z.object({
+  boardId: z.string().min(1),
+  canRedo: z.boolean(),
+  canUndo: z.boolean(),
+  busy: z.boolean(),
+  sessionId: z.string().min(1).nullable(),
+  timestamp: z.number(),
+});
+
+export const boardSessionHistoryCommandResponseSchema = z.object({
+  accepted: z.literal(true),
+  boardId: z.string().min(1),
+  command: boardSessionHistoryCommandSchema,
+  sessionId: z.string().min(1),
+  timestamp: z.number(),
+});
+
 export const opencodeModelSummarySchema = z.object({
   attachment: z.boolean().default(false),
   connected: z.boolean(),
@@ -554,6 +573,15 @@ export type RepoContext = z.infer<typeof repoContextSchema>;
 export type BoardSeed = z.infer<typeof boardSeedSchema>;
 export type ProjectListResponse = z.infer<typeof projectListResponseSchema>;
 export type ModelSelection = z.infer<typeof modelSelectionSchema>;
+export type BoardSessionHistoryCommand = z.infer<
+  typeof boardSessionHistoryCommandSchema
+>;
+export type BoardSessionHistoryState = z.infer<
+  typeof boardSessionHistoryStateSchema
+>;
+export type BoardSessionHistoryCommandResponse = z.infer<
+  typeof boardSessionHistoryCommandResponseSchema
+>;
 export type OpencodeModelSummary = z.infer<typeof opencodeModelSummarySchema>;
 export type OpencodeModelCatalog = z.infer<typeof opencodeModelCatalogSchema>;
 export type OpencodeProviderStatus = z.infer<

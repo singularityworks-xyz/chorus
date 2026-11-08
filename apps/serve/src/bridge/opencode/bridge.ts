@@ -498,6 +498,11 @@ export class OpenCodeBridge {
     return adapter.sessions.get(input.sessionID, input.directory);
   }
 
+  async sessionMessages(sessionID: string, directory: string) {
+    const adapter = await this.#adapterFor(directory);
+    return adapter.sessions.messages(sessionID, { directory, limit: 200 });
+  }
+
   async promptSession(input: SessionPromptInput) {
     const adapter = await this.#adapterFor(
       input.directory ?? this.#defaultDirectory
