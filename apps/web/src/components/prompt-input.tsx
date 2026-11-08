@@ -24,6 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { providerCatalogInvalidator } from "@/features/settings/provider-catalog-invalidator";
 import type { WorkspaceBoard } from "@/features/workspace/types";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 import {
@@ -72,6 +73,25 @@ function promptSubmissionErrorMessage(error: unknown): string {
     return "Choose one provider and model in Settings before starting a task.";
   }
   return error.message;
+}
+
+function modelCatalogLoadErrorMessage(error: unknown) {
+  if (error instanceof Error && error.name === "TimeoutError") {
+    return "Loading models timed out. Check provider settings and retry.";
+  }
+  return "Could not load models. Check provider settings and retry.";
+}
+
+function preserveAvailableModelSelection(
+  currentValue: string,
+  models: OpencodeModelSummary[]
+) {
+  if (currentValue === "") {
+    return currentValue;
+  }
+  return models.some((model) => createModelKey(model) === currentValue)
+    ? currentValue
+    : "";
 }
 
 let partIdCounter = 0;
@@ -171,24 +191,28 @@ export function PromptInput() {
 
   useEffect(() => {
     let isCancelled = false;
+    let activeController: AbortController | undefined;
 
     async function loadModels() {
+      activeController?.abort();
+      const controller = new AbortController();
+      activeController = controller;
       setIsLoadingModels(true);
 
       try {
         const response = await fetch("/api/models", {
           cache: "no-store",
+          signal: AbortSignal.any([
+            controller.signal,
+            AbortSignal.timeout(10_000),
+          ]),
         });
 
         if (!response.ok) {
           throw new Error(`model_catalog_http_${String(response.status)}`);
         }
-        if (isCancelled) {
-          return;
-        }
-
         const payload = opencodeModelCatalogSchema.parse(await response.json());
-        if (isCancelled) {
+        if (isCancelled || controller.signal.aborted) {
           return;
         }
 
@@ -196,31 +220,37 @@ export function PromptInput() {
         setDefaultModel(payload.defaultModel);
         setModelSelectionError(null);
         setSelectedModelKey((currentValue) =>
-          currentValue === "" ||
-          payload.models.some((model) => createModelKey(model) === currentValue)
-            ? currentValue
-            : ""
+          preserveAvailableModelSelection(currentValue, payload.models)
         );
       } catch (error) {
-        console.error("Failed to load OpenCode models", error);
-        if (!isCancelled) {
-          setModelSelectionError(
-            "Could not load models. Check provider settings and retry."
-          );
+        if (isCancelled || controller.signal.aborted) {
+          return;
         }
+        setModelSelectionError(modelCatalogLoadErrorMessage(error));
       } finally {
-        if (!isCancelled) {
+        if (!(isCancelled || controller.signal.aborted)) {
           setIsLoadingModels(false);
         }
       }
     }
 
-    loadModels().catch((error) => {
-      console.error("Failed to load OpenCode models", error);
+    function refreshModels() {
+      loadModels().catch((error: unknown) => {
+        if (!isCancelled) {
+          setModelSelectionError(modelCatalogLoadErrorMessage(error));
+        }
+      });
+    }
+
+    const unsubscribe = providerCatalogInvalidator.subscribe(() => {
+      refreshModels();
     });
+    refreshModels();
 
     return () => {
       isCancelled = true;
+      activeController?.abort();
+      unsubscribe();
     };
   }, []);
 

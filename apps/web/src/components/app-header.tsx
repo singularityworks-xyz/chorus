@@ -54,6 +54,7 @@ import {
 import { DeviceAccessPanel } from "@/features/auth/device-access-panel";
 import { PushSettings } from "@/features/notifications/push-settings";
 import { GlobalModelSettings } from "@/features/settings/global-model-settings";
+import { providerCatalogInvalidator } from "@/features/settings/provider-catalog-invalidator";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 import { useVoiceConfig } from "@/hooks/use-voice-config";
 import { cn } from "@/lib/utils";
@@ -494,6 +495,7 @@ function useProviderSettings() {
     ).length,
     providerStatus,
     refreshProviderStatus: () => {
+      providerCatalogInvalidator.invalidate();
       setProviderStatusRefreshTick((tick) => tick + 1);
     },
     async configureCredentialProvider(providerID: string) {
@@ -504,6 +506,7 @@ function useProviderSettings() {
           `Enabled ${providerID} in global OpenCode settings.`
         );
         setSettingsError(null);
+        providerCatalogInvalidator.invalidate();
         setProviderStatusRefreshTick((tick) => tick + 1);
       } catch (error) {
         setSettingsError(
@@ -534,6 +537,7 @@ function useProviderSettings() {
       setAuthLoginNotice(
         "Auth login completed. If no provider appears yet, enable one of the stored global credentials below for Chorus."
       );
+      providerCatalogInvalidator.invalidate();
       setProviderStatusRefreshTick((tick) => tick + 1);
     },
     async openOpencodeModels() {
