@@ -494,6 +494,7 @@ describe("card lifecycle events", () => {
 
     expect(laneOf(next, TASK)).toBe("done");
     expect(next.session.currentTaskId).toBeUndefined();
+    expect(columnOf(next, "done")[0]?.outcome).toBe("succeeded");
   });
 
   test("card.failed moves to done and marks the session errored", () => {
@@ -508,6 +509,7 @@ describe("card lifecycle events", () => {
     expect(laneOf(next, TASK)).toBe("done");
     expect(next.session.state).toBe("error");
     expect(next.session.errorMessage).toBe("boom");
+    expect(columnOf(next, "done")[0]?.outcome).toBe("failed");
   });
 
   test("moves are idempotent — re-applying a move is a no-op", () => {
@@ -785,6 +787,7 @@ describe("session events", () => {
     expect(laneOf(next, TASK)).toBe("done");
     expect(next.session.currentTaskId).toBeUndefined();
     expect(next.session.state).toBe("active");
+    expect(columnOf(next, "done")[0]?.outcome).toBe("succeeded");
   });
 
   test("session.idle in manual review moves the card to approve and stores the plan", () => {
@@ -824,6 +827,7 @@ describe("session events", () => {
 
     expect(laneOf(next, TASK)).toBe("approve");
     expect(columnOf(next, "approve")[0].plan).toBe("the plan");
+    expect(columnOf(next, "approve")[0].outcome).toBe("awaiting_review");
   });
 
   test("session.idle with no current task is a no-op", () => {
@@ -845,6 +849,7 @@ describe("session events", () => {
     expect(next.session.state).toBe("error");
     expect(next.session.errorMessage).toBe("exploded");
     expect(next.session.currentTaskId).toBeUndefined();
+    expect(columnOf(next, "done")[0]?.outcome).toBe("failed");
   });
 
   test("session.timeout moves the card to done but keeps the session state", () => {
@@ -858,6 +863,7 @@ describe("session events", () => {
     expect(laneOf(next, TASK)).toBe("done");
     expect(next.session.state).toBe("active");
     expect(next.session.errorMessage).toBe("no activity");
+    expect(columnOf(next, "done")[0]?.outcome).toBe("timed_out");
   });
 });
 

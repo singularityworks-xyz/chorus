@@ -260,6 +260,36 @@ export type PendingApprovalRequest = z.infer<
   typeof pendingApprovalRequestSchema
 >;
 
+export const promptFilePartSchema = z.object({
+  type: z.literal("file"),
+  filename: z.string(),
+  path: z.string(),
+  mime: z.string().optional(),
+  isDirectory: z.boolean().optional(),
+  lineRange: z.object({ start: z.number(), end: z.number() }).optional(),
+});
+
+export const promptPartSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("text"), text: z.string() }),
+  promptFilePartSchema,
+]);
+
+export const taskPromptInputSchema = z.object({
+  agent: z.string().min(1).optional(),
+  model: modelSelectionSchema.optional(),
+  parts: z.array(promptPartSchema).optional(),
+  reviewMode: reviewModeSchema,
+  text: z.string().min(1),
+});
+
+export const taskOutcomeSchema = z.enum([
+  "succeeded",
+  "failed",
+  "aborted",
+  "timed_out",
+  "awaiting_review",
+]);
+
 export const taskSchema = z.object({
   changedFiles: z
     .array(
@@ -284,9 +314,12 @@ export const taskSchema = z.object({
   plan: z.string().optional(),
   pendingApproval: pendingApprovalRequestSchema.optional(),
   pendingApprovals: z.array(pendingApprovalRequestSchema).optional(),
+  promptInput: taskPromptInputSchema.optional(),
   questions: z.array(z.string()).optional(),
+  retryOf: z.string().min(1).optional(),
   run: agentRunContextSchema.optional(),
   runId: z.string().min(1).optional(),
+  outcome: taskOutcomeSchema.optional(),
   summary: z.string().optional(),
   taggedFiles: z.array(z.string()).optional(),
   title: z.string().min(1),
@@ -461,20 +494,6 @@ export const workspaceMutationSchema = z.discriminatedUnion("type", [
   }),
 ]);
 
-export const promptFilePartSchema = z.object({
-  type: z.literal("file"),
-  filename: z.string(),
-  path: z.string(),
-  mime: z.string().optional(),
-  isDirectory: z.boolean().optional(),
-  lineRange: z.object({ start: z.number(), end: z.number() }).optional(),
-});
-
-export const promptPartSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("text"), text: z.string() }),
-  promptFilePartSchema,
-]);
-
 export const queueBoardPromptInputSchema = z.object({
   boardId: z.string().min(1),
   directory: z.string().min(1),
@@ -540,6 +559,8 @@ export type OpencodeProviderOauthCallbackInput = z.infer<
 >;
 export type AgentStep = z.infer<typeof agentStepSchema>;
 export type AgentRunContext = z.infer<typeof agentRunContextSchema>;
+export type TaskPromptInput = z.infer<typeof taskPromptInputSchema>;
+export type TaskOutcome = z.infer<typeof taskOutcomeSchema>;
 export type Task = z.infer<typeof taskSchema>;
 export type Columns = z.infer<typeof columnsSchema>;
 export type BoardViewMode = z.infer<typeof boardViewModeSchema>;

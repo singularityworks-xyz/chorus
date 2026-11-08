@@ -377,6 +377,13 @@ export class BoardTaskService {
             id: taskId,
             label: title,
             labelVariant: "primary-light",
+            promptInput: {
+              agent: input.agent,
+              model: input.model,
+              parts: input.parts,
+              reviewMode: input.reviewMode,
+              text: input.text,
+            },
             title,
           },
           taskId,

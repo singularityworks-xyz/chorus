@@ -1,5 +1,6 @@
 "use client";
 
+import type { TaskOutcome, TaskPromptInput } from "@chorus/contracts";
 import { BorderlessFileView, ChorusMonaco } from "@chorus/monaco";
 import {
   closestCorners,
@@ -129,10 +130,13 @@ export interface Task {
   linesAdded?: number;
   /** Lines removed by the agent run — shown in done cards */
   linesRemoved?: number;
+  outcome?: TaskOutcome;
   /** AI-generated plan for the task — shown in review cards for MANUAL mode */
   plan?: string;
+  promptInput?: TaskPromptInput;
   /** Questions from AI that need user input — shown in review cards for MANUAL mode */
   questions?: string[];
+  retryOf?: string;
   /** Live or recorded run state shown in the in-progress card */
   run?: AgentRunContext;
   /** Links to an OpenCode sessionId for live agent output */

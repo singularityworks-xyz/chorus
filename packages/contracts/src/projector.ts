@@ -525,6 +525,7 @@ function applyCardEvent(
           ...task,
           pendingApproval: undefined,
           pendingApprovals: [],
+          outcome: "succeeded",
         })
       );
       const releasesTask = board.session.currentTaskId === event.taskId;
@@ -550,6 +551,7 @@ function applyCardEvent(
             ...task,
             pendingApproval: undefined,
             pendingApprovals: [],
+            outcome: "failed",
           })
         ),
         session: {
@@ -655,6 +657,12 @@ function applySessionEvent(
       const planText = extractPlanFromSteps(task?.run?.steps ?? []);
 
       let columns = moveCard(board.columns, taskId, targetColumn);
+      if (task) {
+        columns = withTaskUpdated(columns, taskId, (entry) => ({
+          ...entry,
+          outcome: isManualReview ? "awaiting_review" : "succeeded",
+        }));
+      }
       if (isManualReview && planText && task) {
         columns = withTaskUpdated(columns, taskId, (entry) => ({
           ...entry,
@@ -685,6 +693,7 @@ function applySessionEvent(
                 ...task,
                 pendingApproval: undefined,
                 pendingApprovals: [],
+                outcome: "failed",
               })
             )
           : board.columns,
@@ -709,6 +718,7 @@ function applySessionEvent(
                 ...task,
                 pendingApproval: undefined,
                 pendingApprovals: [],
+                outcome: "timed_out",
               })
             )
           : board.columns,

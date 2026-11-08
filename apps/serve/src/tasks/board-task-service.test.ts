@@ -216,8 +216,25 @@ describe("BoardTaskService", () => {
       model: { providerID: "anthropic", modelID: "claude" },
       agent: undefined,
     });
+    expect(
+      workspaceStore.getBoard(boardId)?.columns.queue[0]?.promptInput
+    ).toMatchObject({
+      model: { providerID: "anthropic", modelID: "claude" },
+      reviewMode: "auto",
+      text: "build feature",
+    });
 
     await workspaceStore.close();
+    const recoveredStore = new WorkspaceStore(dir);
+    await recoveredStore.load();
+    expect(
+      recoveredStore.getBoard(boardId)?.columns.queue[0]?.promptInput
+    ).toMatchObject({
+      model: { providerID: "anthropic", modelID: "claude" },
+      reviewMode: "auto",
+      text: "build feature",
+    });
+    await recoveredStore.close();
     rmSync(dir, { force: true, recursive: true });
   });
 
