@@ -137,6 +137,7 @@ describe("HTTP routes", () => {
     const bridge = makeMockBridge();
     const boardTasks = makeMockBoardTasks();
     const updateBoardSession = mock(async () => undefined);
+    const resolvePendingApproval = mock(async () => false);
     const app = new Elysia().use(
       createHttpRoutes(
         bridge as never,
@@ -162,12 +163,18 @@ describe("HTTP routes", () => {
                 }
               : undefined,
           getSnapshot: () => ({ boards: [] }),
-          resolvePendingApproval: async () => false,
+          resolvePendingApproval,
           updateBoardSession,
         } as never
       )
     );
-    return { app, bridge, boardTasks, updateBoardSession };
+    return {
+      app,
+      bridge,
+      boardTasks,
+      resolvePendingApproval,
+      updateBoardSession,
+    };
   }
 
   describe("GET /health", () => {
@@ -464,7 +471,7 @@ describe("HTTP routes", () => {
 
   describe("POST /tasks/:sessionID/approve", () => {
     test("approves a permission request", async () => {
-      const { app, bridge } = makeApp();
+      const { app, bridge, resolvePendingApproval } = makeApp();
 
       const res = await app.handle(
         new Request("http://localhost/tasks/sess-1/approve", {
@@ -491,6 +498,11 @@ describe("HTTP routes", () => {
         reply: "once",
         message: undefined,
       });
+      expect(resolvePendingApproval).toHaveBeenCalledWith(
+        "sess-1",
+        "perm-1",
+        true
+      );
     });
 
     test("passes optional message", async () => {
@@ -733,7 +745,7 @@ describe("HTTP routes", () => {
 
   describe("question commands", () => {
     test("answers a question with an explicit accepted acknowledgment", async () => {
-      const { app, bridge } = makeApp();
+      const { app, bridge, resolvePendingApproval } = makeApp();
 
       const response = await app.handle(
         new Request(
@@ -762,6 +774,11 @@ describe("HTTP routes", () => {
         directory: BOARD_WORKTREE,
         requestID: "question-1",
       });
+      expect(resolvePendingApproval).toHaveBeenCalledWith(
+        "sess-1",
+        "question-1",
+        true
+      );
     });
 
     test("rejects a question with an explicit accepted acknowledgment", async () => {

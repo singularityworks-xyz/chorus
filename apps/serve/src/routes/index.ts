@@ -393,7 +393,8 @@ export function createHttpRoutes(
           if (result) {
             await workspaceStore.resolvePendingApproval(
               params.sessionID,
-              body.requestID
+              body.requestID,
+              true
             );
           }
 
@@ -522,7 +523,8 @@ export function createHttpRoutes(
           });
           await workspaceStore.resolvePendingApproval(
             params.sessionID,
-            params.requestID
+            params.requestID,
+            true
           );
 
           return {

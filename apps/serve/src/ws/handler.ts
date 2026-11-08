@@ -431,7 +431,8 @@ async function handleCommand(
       if (result) {
         await workspaceStore.resolvePendingApproval(
           payload.sessionID,
-          payload.requestID
+          payload.requestID,
+          true
         );
       }
 
@@ -556,7 +557,8 @@ async function handleCommand(
       });
       await workspaceStore.resolvePendingApproval(
         payload.sessionID,
-        payload.requestID
+        payload.requestID,
+        true
       );
 
       wsSend({

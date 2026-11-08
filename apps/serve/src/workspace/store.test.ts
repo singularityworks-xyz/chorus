@@ -824,6 +824,37 @@ describe("WorkspaceStore snapshots and retention", () => {
 });
 
 describe("WorkspaceStore agent events", () => {
+  test("accepted pending approval resumes the task atomically", async () => {
+    const store = createStore();
+    await store.load();
+    const boardId = await seedActiveBoard(store);
+
+    await store.applyAgentEvent(
+      agentEvent({
+        activity: "waiting_for_approval",
+        permission: "edit",
+        permissionID: "permission-1",
+      })
+    );
+
+    expect(
+      store.getBoard(boardId)?.columns.approve[0]?.pendingApproval?.requestId
+    ).toBe("permission-1");
+    expect(
+      await store.resolvePendingApproval("sess-1", "permission-1", true)
+    ).toBe(true);
+
+    const resumedBoard = store.getBoard(boardId);
+    expect(resumedBoard?.columns.approve).toHaveLength(0);
+    expect(resumedBoard?.columns.in_progress[0]).toMatchObject({
+      id: "task-1",
+      pendingApprovals: [],
+    });
+    expect(
+      resumedBoard?.columns.in_progress[0]?.pendingApproval
+    ).toBeUndefined();
+  });
+
   test("an agent event expands into several sequenced events", async () => {
     const store = createStore();
     await store.load();

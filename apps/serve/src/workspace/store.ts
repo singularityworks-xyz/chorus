@@ -528,7 +528,8 @@ export class WorkspaceStore {
 
   async resolvePendingApproval(
     sessionId: string,
-    requestId: string
+    requestId: string,
+    resume = false
   ): Promise<boolean> {
     return this.#enqueue(async () => {
       const board = this.#snapshot.boards.find(
@@ -548,19 +549,25 @@ export class WorkspaceStore {
       if (!task) {
         return false;
       }
-      this.#commit(
-        [
-          {
-            boardId: board.boardId,
-            requestId,
-            taskId: task.id,
-            ts: Date.now(),
-            type: "card.approval_resolved",
-          },
-        ],
-        board.boardId,
-        null
-      );
+      const ts = Date.now();
+      const events: WorkspaceEvent[] = [
+        {
+          boardId: board.boardId,
+          requestId,
+          taskId: task.id,
+          ts,
+          type: "card.approval_resolved",
+        },
+      ];
+      if (resume) {
+        events.push({
+          boardId: board.boardId,
+          taskId: task.id,
+          ts,
+          type: "card.started",
+        });
+      }
+      this.#commit(events, board.boardId, null);
       return true;
     });
   }
