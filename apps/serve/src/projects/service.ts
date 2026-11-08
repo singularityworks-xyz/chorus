@@ -52,7 +52,7 @@ export class ProjectService {
   readonly #registerPickedRepository: (directory: string) => Promise<string>;
   readonly #globalAdapter: OpenCodeAdapter;
   readonly #authLoginLauncher = new AuthLoginLauncher();
-  readonly #credentialStore = new OpenCodeCredentialStore();
+  readonly #credentialStore: Pick<OpenCodeCredentialStore, "listCredentials">;
   readonly #engineAdapterForDirectory:
     | ((directory: string) => Promise<OpenCodeAdapter>)
     | undefined;
@@ -69,7 +69,11 @@ export class ProjectService {
     repositoryRegistry?: RepositoryRegistry,
     engineAdapterForDirectory?: (directory: string) => Promise<OpenCodeAdapter>,
     prepareEngineDirectory?: (directory: string) => Promise<void>,
-    globalAdapter?: OpenCodeAdapter
+    globalAdapter?: OpenCodeAdapter,
+    credentialStore: Pick<
+      OpenCodeCredentialStore,
+      "listCredentials"
+    > = new OpenCodeCredentialStore()
   ) {
     this.#baseUrl = baseUrl;
     this.#defaultDirectory = defaultDirectory;
@@ -77,6 +81,7 @@ export class ProjectService {
     this.#repositoryRegistry = repositoryRegistry;
     this.#engineAdapterForDirectory = engineAdapterForDirectory;
     this.#prepareEngineDirectory = prepareEngineDirectory;
+    this.#credentialStore = credentialStore;
     this.#folderPicker = folderPicker;
     this.#registerPickedRepository = registerPickedRepository;
     this.#globalAdapter =

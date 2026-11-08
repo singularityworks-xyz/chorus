@@ -12,14 +12,17 @@ import {
   webSocketTicketResponseSchema,
   workspaceSnapshotSchema,
 } from "@chorus/contracts";
+import { OpenCodeAdapter } from "@chorus/oc-adapter";
 import { Elysia } from "elysia";
 import { authGuardHandler } from "../src/auth/guard";
 import { DevicePairingTokenStore } from "../src/auth/pairing";
 import { createAuthRoutes } from "../src/auth/routes";
 import { OpenCodeBridge } from "../src/bridge/opencode/bridge";
 import { RepositoryRegistry } from "../src/projects/repository-registry";
+import { ProjectService } from "../src/projects/service";
 import { WorktreeManager } from "../src/projects/worktree-manager";
 import { createHttpRoutes } from "../src/routes";
+import { createProjectRoutes } from "../src/routes/projects";
 import { createWorkspaceRoutes } from "../src/routes/workspace";
 import { BoardTaskService } from "../src/tasks/board-task-service";
 import { WorkspaceStore } from "../src/workspace/store";
@@ -226,6 +229,22 @@ export async function startPhase6Harness() {
       null,
       registry
     );
+    const globalAdapter = OpenCodeAdapter.from({ baseUrl: engine.baseUrl });
+    const projectService = new ProjectService(
+      engine.baseUrl,
+      repositories[0] ?? root,
+      { pickFolder: async () => null },
+      (directory) => workspace.registerPickedRepository(directory),
+      undefined,
+      registry,
+      async (directory) =>
+        OpenCodeAdapter.from({ baseUrl: engine.baseUrl, directory }),
+      async (directory) => {
+        await engineBridge.subscribeDirectory(directory);
+      },
+      globalAdapter,
+      { listCredentials: async () => ({ credentials: [] }) }
+    );
     const token = crypto.randomUUID();
     const ticketOptions = { store: workspace.meta, now: Date.now };
     const app = new Elysia()
@@ -241,6 +260,7 @@ export async function startPhase6Harness() {
       )
       .use(createWorkspaceRoutes(workspace, boardTasks))
       .use(createHttpRoutes(engineBridge, boardTasks, workspace))
+      .use(createProjectRoutes(projectService))
       .use(
         createWsHandler({
           boardTasks,
@@ -522,11 +542,24 @@ export async function startPhase6Harness() {
       mirrors,
       store: workspace,
       root,
+      serveBaseUrl: base,
+      accessToken: token,
       appendBatch(count: number) {
         for (let index = 0; index < count; index += 1) {
           const run = runs[index % runs.length];
           if (run) {
             engine.appendDelta(run.sessionId, ".");
+          }
+        }
+      },
+      appendReasoningBatch(count: number) {
+        for (let index = 0; index < count; index += 1) {
+          const run = runs[index % runs.length];
+          if (run) {
+            engine.appendReasoningDelta(
+              run.sessionId,
+              " Checking the board state."
+            );
           }
         }
       },

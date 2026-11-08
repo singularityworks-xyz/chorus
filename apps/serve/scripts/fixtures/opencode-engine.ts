@@ -4,6 +4,7 @@ import { z } from "zod";
 interface FixtureSession {
   approved: boolean;
   busy: boolean;
+  reasoning: string;
   session: Session;
   text: string;
 }
@@ -22,6 +23,7 @@ export function startScriptedEngine() {
   >();
   const encoder = new TextEncoder();
   let eventNumber = 0;
+  let activeReasoningCursor = 0;
 
   function emit(directory: string, event: Event) {
     const frame = encoder.encode(`data: ${JSON.stringify(event)}\n\n`);
@@ -56,6 +58,17 @@ export function startScriptedEngine() {
     };
   }
 
+  function reasoningPart(entry: FixtureSession) {
+    return {
+      id: `reasoning-${entry.session.id}`,
+      messageID: `message-${entry.session.id}`,
+      sessionID: entry.session.id,
+      type: "reasoning" as const,
+      text: entry.reasoning,
+      time: { start: Date.now() },
+    };
+  }
+
   function begin(entry: FixtureSession) {
     const sessionID = entry.session.id;
     status(entry, true);
@@ -83,6 +96,16 @@ export function startScriptedEngine() {
             cache: { read: 0, write: 0 },
           },
         },
+      },
+    });
+    entry.reasoning = "I’m mapping the request to the repository structure.";
+    emit(entry.session.directory, {
+      id: eventId(),
+      type: "message.part.updated",
+      properties: {
+        sessionID,
+        part: reasoningPart(entry),
+        time: Date.now(),
       },
     });
     entry.text = "Working";
@@ -184,6 +207,70 @@ export function startScriptedEngine() {
       switch (url.pathname) {
         case "/global/health":
           return Response.json({ healthy: true, version: "1.19.0" });
+        case "/global/config":
+        case "/config":
+          return Response.json({ provider: { fixture: {} } });
+        case "/provider":
+          return Response.json({
+            all: [
+              {
+                id: "fixture",
+                name: "Fixture Provider",
+                source: "custom",
+                env: [],
+                options: {},
+                models: {
+                  scripted: {
+                    id: "scripted",
+                    providerID: "fixture",
+                    api: {
+                      id: "fixture",
+                      url: "http://127.0.0.1",
+                      npm: "@ai-sdk/openai-compatible",
+                    },
+                    name: "Scripted Model",
+                    capabilities: {
+                      temperature: true,
+                      reasoning: true,
+                      attachment: false,
+                      toolcall: true,
+                      input: {
+                        text: true,
+                        audio: false,
+                        image: false,
+                        video: false,
+                        pdf: false,
+                      },
+                      output: {
+                        text: true,
+                        audio: false,
+                        image: false,
+                        video: false,
+                        pdf: false,
+                      },
+                      interleaved: false,
+                    },
+                    cost: {
+                      input: 0,
+                      output: 0,
+                      cache: { read: 0, write: 0 },
+                    },
+                    limit: { context: 32_000, output: 4096 },
+                    status: "active",
+                    options: {},
+                    headers: {},
+                    release_date: "2026-01-01",
+                  },
+                },
+              },
+            ],
+            default: { fixture: "scripted" },
+            connected: ["fixture"],
+          });
+        case "/provider/auth":
+          return Response.json({
+            fixture: [{ type: "api", label: "Fixture API key" }],
+          });
         case "/event":
           return new Response(streamFor(directory), {
             headers: {
@@ -238,7 +325,13 @@ export function startScriptedEngine() {
             version: "1.19.0",
             time: { created: Date.now(), updated: Date.now() },
           };
-          sessions.set(id, { session, text: "", busy: false, approved: false });
+          sessions.set(id, {
+            session,
+            text: "",
+            reasoning: "",
+            busy: false,
+            approved: false,
+          });
           return Response.json(session);
         }
         default:
@@ -266,9 +359,44 @@ export function startScriptedEngine() {
       },
     });
   }
+  function appendReasoningDelta(sessionID: string, delta: string) {
+    const entry = sessions.get(sessionID);
+    if (!(entry?.busy && entry.approved)) {
+      throw new Error("scripted session is not approved and running");
+    }
+    entry.reasoning += delta;
+    emit(entry.session.directory, {
+      id: eventId(),
+      type: "message.part.delta",
+      properties: {
+        sessionID,
+        messageID: `message-${sessionID}`,
+        partID: `reasoning-${sessionID}`,
+        field: "text",
+        delta,
+      },
+    });
+  }
+  function appendActiveReasoningDelta(delta: string): boolean {
+    const activeSessions = [...sessions.values()].filter(
+      (candidate) => candidate.busy && candidate.approved
+    );
+    if (activeSessions.length === 0) {
+      return false;
+    }
+    const entry = activeSessions[activeReasoningCursor % activeSessions.length];
+    if (!entry) {
+      return false;
+    }
+    activeReasoningCursor = (activeReasoningCursor + 1) % activeSessions.length;
+    appendReasoningDelta(entry.session.id, delta);
+    return true;
+  }
   return {
     baseUrl: `http://127.0.0.1:${server.port}`,
     appendDelta,
+    appendReasoningDelta,
+    appendActiveReasoningDelta,
     complete(sessionID: string) {
       const entry = sessions.get(sessionID);
       if (!entry?.approved) {
