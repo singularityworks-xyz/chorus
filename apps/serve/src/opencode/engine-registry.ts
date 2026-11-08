@@ -36,6 +36,7 @@ interface EngineEntry {
 export interface EngineManagerInput {
   adoptExisting: false;
   baseUrl: string;
+  databasePath?: string;
   directory: string;
   expectedVersion: string;
   password?: string;
@@ -52,6 +53,7 @@ export interface EngineRegistryOptions {
   ) => OpenCodeAdapter;
   allocatePort?: () => Promise<number>;
   canonicalize?: (directory: string) => Promise<string>;
+  databasePath?: string;
   expectedVersion: string;
   managerFactory?: (input: EngineManagerInput) => ManagedEngine;
   maxEngines?: number;
@@ -70,6 +72,7 @@ export class EngineRegistry {
   readonly #maxEngines: number;
   readonly #username: string | undefined;
   readonly #password: string | undefined;
+  readonly #databasePath: string | undefined;
   readonly #managerFactory: (input: EngineManagerInput) => ManagedEngine;
   readonly #adapterFactory: (
     baseUrl: string,
@@ -92,6 +95,7 @@ export class EngineRegistry {
     this.#maxEngines = options.maxEngines ?? DEFAULT_ENGINE_LIMIT;
     this.#username = options.username;
     this.#password = options.password;
+    this.#databasePath = options.databasePath;
     this.#managerFactory =
       options.managerFactory ?? ((input) => new OpenCodeProcessManager(input));
     this.#adapterFactory =
@@ -305,6 +309,7 @@ export class EngineRegistry {
       const manager = this.#managerFactory({
         adoptExisting: false,
         baseUrl,
+        databasePath: this.#databasePath,
         directory,
         expectedVersion: this.#expectedVersion,
         password: this.#password,

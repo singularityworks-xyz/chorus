@@ -103,6 +103,7 @@ const processManager = config.opencodePerWorktree
   ? null
   : new OpenCodeProcessManager({
       baseUrl: config.opencodeBaseUrl,
+      databasePath: path.resolve(config.dataDir, "opencode.db"),
       directory: config.opencodeDirectory,
       port: config.opencodePort,
       username: config.opencodeUsername,
@@ -111,6 +112,7 @@ const processManager = config.opencodePerWorktree
     });
 const engineRegistry = config.opencodePerWorktree
   ? new EngineRegistry({
+      databasePath: path.resolve(config.dataDir, "opencode.db"),
       expectedVersion: sdkVersion(),
       username: config.opencodeUsername,
       password: config.opencodePassword,

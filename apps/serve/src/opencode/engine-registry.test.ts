@@ -24,9 +24,11 @@ function fixtureDirectory(): string {
 }
 
 function createHarness({
+  databasePath,
   limit = 8,
   now = () => Date.now(),
 }: {
+  databasePath?: string;
   limit?: number;
   now?: () => number;
 } = {}) {
@@ -40,6 +42,7 @@ function createHarness({
       nextPort += 1;
       return Promise.resolve(nextPort);
     },
+    databasePath,
     expectedVersion: "1.19.0",
     maxEngines: limit,
     now,
@@ -172,7 +175,8 @@ describe("EngineRegistry", () => {
   test("starts one engine per canonical directory with distinct allocated ports", async () => {
     const firstDirectory = fixtureDirectory();
     const secondDirectory = fixtureDirectory();
-    const { managers, registry } = createHarness();
+    const databasePath = join(fixtureRoot, ".chorus", "opencode.db");
+    const { managers, registry } = createHarness({ databasePath });
     try {
       await Promise.all([
         registry.adapterForDirectory(firstDirectory),
@@ -183,6 +187,10 @@ describe("EngineRegistry", () => {
       expect(managers.map(({ input }) => input.adoptExisting)).toEqual([
         false,
         false,
+      ]);
+      expect(managers.map(({ input }) => input.databasePath)).toEqual([
+        databasePath,
+        databasePath,
       ]);
       expect(managers.map(({ input }) => input.baseUrl)).toEqual(
         managers.map(({ input }) => `http://127.0.0.1:${input.port}`)

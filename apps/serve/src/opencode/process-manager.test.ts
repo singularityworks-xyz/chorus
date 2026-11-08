@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { loadConfig } from "../config";
 import {
+  createOpenCodeEnvironment,
   EngineUnavailableError,
   OpenCodeProcessManager,
   resolveOpenCodeBinary,
@@ -38,6 +39,18 @@ describe("opencode engine address", () => {
     const binary = resolveOpenCodeBinary();
     expect(binary).toContain("opencode-ai");
     expect(existsSync(binary)).toBe(true);
+  });
+
+  test("isolates managed OpenCode storage and preserves other environment values", () => {
+    const environment = createOpenCodeEnvironment("/chorus/opencode.db", {
+      OPENAI_API_KEY: "test-key",
+      OPENCODE_DB: "/operator/opencode.db",
+    });
+
+    expect(environment).toEqual({
+      OPENAI_API_KEY: "test-key",
+      OPENCODE_DB: "/chorus/opencode.db",
+    });
   });
 
   test("defaults the port and the base url to the same place", () => {

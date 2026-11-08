@@ -67,6 +67,17 @@ export function resolveOpenCodeBinary(): string {
   return join(dirname(manifestPath), relativeBinary);
 }
 
+/**
+ * Give the managed engine its own database without changing the parent process
+ * environment or touching the operator's regular OpenCode database.
+ */
+export function createOpenCodeEnvironment(
+  databasePath: string,
+  environment: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  return { ...environment, OPENCODE_DB: databasePath };
+}
+
 async function probeHealth(
   baseUrl: string,
   timeoutMs: number,
@@ -101,6 +112,7 @@ export class OpenCodeProcessManager {
   readonly #baseUrl: string;
   readonly #authorization: string | undefined;
   readonly #directory: string;
+  readonly #databasePath: string | undefined;
   readonly #readinessTimeoutMs: number;
   readonly #maxRestarts: number;
   /** Version the spawned binary reported, once it has answered a health probe. */
@@ -132,6 +144,7 @@ export class OpenCodeProcessManager {
     username?: string;
     password?: string;
     directory: string;
+    databasePath?: string;
     readinessTimeoutMs?: number;
     maxRestarts?: number;
     expectedVersion?: string;
@@ -146,6 +159,7 @@ export class OpenCodeProcessManager {
         ? `Basic ${Buffer.from(`${options.username}:${options.password}`).toString("base64")}`
         : undefined;
     this.#directory = options.directory;
+    this.#databasePath = options.databasePath;
     this.#expectedVersion = options.expectedVersion;
     this.#adoptExisting = options.adoptExisting ?? true;
     this.#readinessTimeoutMs = options.readinessTimeoutMs ?? 30_000;
@@ -466,7 +480,9 @@ export class OpenCodeProcessManager {
       ],
       {
         cwd: this.#directory,
-        env: { ...process.env },
+        env: this.#databasePath
+          ? createOpenCodeEnvironment(this.#databasePath)
+          : { ...process.env },
         stderr: "pipe",
         stdout: "pipe",
         windowsHide: true,
