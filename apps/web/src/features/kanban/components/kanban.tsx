@@ -568,6 +568,7 @@ function ChangedFileRow({ file }: { file: ChangedFile }) {
 interface TaskCardProps {
   actionState?: KanbanTaskActionState;
   asHandle?: boolean;
+  boardId: string;
   draggable?: boolean;
   onApprove?: (
     taskId: string,
@@ -677,6 +678,7 @@ function TaskCardDiffSection({
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: TaskCard renders multiple conditional sections for different task states (queue, in_progress, review, done)
 function TaskCard({
+  boardId,
   task,
   asHandle,
   draggable,
@@ -1050,7 +1052,11 @@ function TaskCard({
                   <div className="h-1.5 w-px bg-linear-to-b from-white/15 to-white/5" />
                 </div>
               </div>
-              <AgentOutputCard run={task.run} />
+              <AgentOutputCard
+                boardId={boardId}
+                run={task.run}
+                taskId={task.id}
+              />
             </>
           ) : (
             <p
@@ -1297,6 +1303,7 @@ function ColumnHeader({
 }
 
 function TaskList({
+  boardId,
   columnId,
   tasks,
   reviewMode,
@@ -1308,6 +1315,7 @@ function TaskList({
   onRetry,
   onRun,
 }: {
+  boardId: string;
   columnId: string;
   tasks: Task[];
   reviewMode: "manual" | "auto";
@@ -1327,6 +1335,7 @@ function TaskList({
     <TaskCard
       actionState={actionStates?.[task.id]}
       asHandle
+      boardId={boardId}
       draggable={columnId === "queue"}
       key={task.id}
       onApprove={onApprove}
@@ -1346,6 +1355,7 @@ function TaskList({
 }
 
 function KanbanColumnRenderer({
+  boardId,
   columnId,
   tasks,
   reviewMode,
@@ -1359,6 +1369,7 @@ function KanbanColumnRenderer({
   onRun,
   onCreateTask,
 }: {
+  boardId: string;
   columnId: string;
   tasks: Task[];
   reviewMode: "manual" | "auto";
@@ -1384,6 +1395,7 @@ function KanbanColumnRenderer({
     >
       <KanbanColumnBody
         actionStates={actionStates}
+        boardId={boardId}
         columnId={columnId}
         onApprove={onApprove}
         onCreateTask={onCreateTask}
@@ -1409,6 +1421,7 @@ function KanbanColumnRenderer({
  * what happened when the phone reused the whole desktop card.
  */
 export function KanbanColumnBody({
+  boardId,
   columnId,
   tasks,
   reviewMode,
@@ -1422,6 +1435,7 @@ export function KanbanColumnBody({
   onRun,
   onCreateTask,
 }: {
+  boardId: string;
   columnId: string;
   tasks: Task[];
   reviewMode: "manual" | "auto";
@@ -1491,6 +1505,7 @@ export function KanbanColumnBody({
             ) : (
               <TaskList
                 actionStates={actionStates}
+                boardId={boardId}
                 columnId={columnId}
                 onApprove={onApprove}
                 onPlanChange={onPlanChange}
@@ -1563,6 +1578,7 @@ export function KanbanCardContent({
             <Fragment key={columnId}>
               <KanbanColumnRenderer
                 actionStates={actionStates}
+                boardId={data.id}
                 columnId={columnId}
                 onApprove={onApprove}
                 onCreateTask={onCreateTask}

@@ -182,6 +182,17 @@ export function createHttpRoutes(
       )
 
       .post(
+        "/boards/:boardID/tasks/:taskID/abort",
+        async ({ params }) => ({
+          ...(await boardTasks.abortTask(params.boardID, params.taskID)),
+          accepted: true,
+        }),
+        {
+          params: t.Object({ boardID: t.String(), taskID: t.String() }),
+        }
+      )
+
+      .post(
         "/boards/:boardID/tasks/:taskID/finalize-review",
         async ({ params, body }) => ({
           ...(await boardTasks.finalizeReview(
@@ -281,14 +292,29 @@ export function createHttpRoutes(
       .post(
         "/tasks/:sessionID/abort",
         async ({ params }) => {
-          const result = await bridge.abortSession(
-            params.sessionID,
-            await directoryFor(params.sessionID)
-          );
+          const board = workspaceStore.getBoardBySessionId(params.sessionID);
+          if (!board) {
+            await directoryFor(params.sessionID);
+            return {
+              sessionID: params.sessionID,
+              accepted: false,
+              timestamp: Date.now(),
+            };
+          }
+          const taskId = board.session.currentTaskId;
+          if (!taskId) {
+            return {
+              sessionID: params.sessionID,
+              accepted: false,
+              timestamp: Date.now(),
+            };
+          }
+          const result = await boardTasks.abortTask(board.boardId, taskId);
 
           return {
             sessionID: params.sessionID,
-            accepted: result,
+            ...result,
+            accepted: true,
             timestamp: Date.now(),
           };
         },

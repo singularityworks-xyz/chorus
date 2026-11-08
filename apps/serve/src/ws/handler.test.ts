@@ -44,6 +44,13 @@ function makeMockBoardTasks() {
       accepted: true,
       timestamp: 123,
     })),
+    abortTask: mock(async (boardId: string, taskId: string) => ({
+      boardId,
+      sessionId: "sess-123",
+      status: "accepted" as const,
+      taskId,
+      timestamp: 123,
+    })),
   };
 }
 

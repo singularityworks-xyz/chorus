@@ -137,10 +137,128 @@ async function createManualReviewTask(
   return queued;
 }
 
+async function createRunningTask(
+  service: BoardTaskService,
+  store: WorkspaceStore,
+  boardId: string
+) {
+  const queued = await service.queuePrompt({
+    boardId,
+    directory: "/tmp/repo",
+    text: "Implement the requested feature",
+    reviewMode: "auto",
+  });
+  await store.applyBoardEvents(boardId, [
+    {
+      boardId,
+      taskId: queued.taskId,
+      ts: Date.now(),
+      type: "card.started",
+    },
+    {
+      boardId,
+      model: "anthropic/claude",
+      sessionId: queued.sessionId,
+      startedAt: Date.now(),
+      taskId: queued.taskId,
+      taskTitle: "Implement the requested feature",
+      ts: Date.now(),
+      type: "run.started",
+    },
+  ]);
+  return queued;
+}
+
 const NO_SUCH_BOARD = /no such board/;
 const BOARD_IS_CLOSING = /board is closing/;
 
 describe("BoardTaskService", () => {
+  test("Stop waits for engine idle and marks the exact task aborted", async () => {
+    const bridge = makeMockBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-task-stop-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      state: "uninitialized",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+    const task = await createRunningTask(service, workspaceStore, boardId);
+
+    const result = await service.abortTask(boardId, task.taskId);
+
+    expect(result.status).toBe("accepted");
+    expect(bridge.abortSession).toHaveBeenCalledWith(
+      task.sessionId,
+      "/tmp/repo"
+    );
+    expect(
+      workspaceStore
+        .getBoard(boardId)
+        ?.columns.done?.find((entry) => entry.id === task.taskId)?.outcome
+    ).toBe("aborted");
+    expect(
+      workspaceStore.getBoard(boardId)?.session.currentTaskId
+    ).toBeUndefined();
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("Stop leaves the task active when the engine refuses the abort", async () => {
+    const bridge = makeMockBridge();
+    bridge.abortSession.mockResolvedValue(false);
+    const dir = mkdtempSync(join(tmpdir(), "chorus-task-stop-refused-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      state: "uninitialized",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+    const task = await createRunningTask(service, workspaceStore, boardId);
+
+    await expect(service.abortTask(boardId, task.taskId)).rejects.toMatchObject(
+      {
+        code: "abort_not_accepted",
+      }
+    );
+    const board = workspaceStore.getBoard(boardId);
+    expect(board?.session.currentTaskId).toBe(task.taskId);
+    expect(
+      board?.columns.in_progress?.find((entry) => entry.id === task.taskId)
+        ?.outcome
+    ).toBeUndefined();
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("Stop does not send a stale abort when the engine is already idle", async () => {
+    const bridge = makeMockBridge();
+    bridge.waitForSessionIdle.mockImplementation(
+      async (_id, _directory, timeout) => timeout === 0
+    );
+    const dir = mkdtempSync(join(tmpdir(), "chorus-task-stop-idle-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      state: "uninitialized",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+    const task = await createRunningTask(service, workspaceStore, boardId);
+
+    await service.abortTask(boardId, task.taskId);
+
+    expect(bridge.abortSession).not.toHaveBeenCalled();
+    expect(
+      workspaceStore
+        .getBoard(boardId)
+        ?.columns.done?.find((entry) => entry.id === task.taskId)?.outcome
+    ).toBe("succeeded");
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
   test("finalizes the exact task with its saved model and retains review edits", async () => {
     const bridge = makeMockBridge();
     const dir = mkdtempSync(join(tmpdir(), "chorus-review-finalize-"));

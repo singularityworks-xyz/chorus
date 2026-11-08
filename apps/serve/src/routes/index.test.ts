@@ -76,6 +76,13 @@ function makeMockBoardTasks() {
       taskId,
       timestamp: 123,
     })),
+    abortTask: mock(async (boardId: string, taskId: string) => ({
+      boardId,
+      sessionId: "sess-123",
+      status: "accepted" as const,
+      taskId,
+      timestamp: 123,
+    })),
     finalizeReview: mock(async (boardId: string, taskId: string) => ({
       boardId,
       sessionId: "sess-123",
@@ -113,6 +120,7 @@ describe("HTTP routes", () => {
               ? {
                   boardId: "board-1",
                   repo: { directory: "/repo", worktree: BOARD_WORKTREE },
+                  session: { currentTaskId: "task-1", sessionId: sessionID },
                 }
               : undefined,
           getSnapshot: () => ({ boards: [] }),
@@ -390,6 +398,20 @@ describe("HTTP routes", () => {
       expect(boardTasks.retryTask).toHaveBeenCalledWith("board-1", "task-2");
     });
 
+    test("routes Stop with explicit board and task identities", async () => {
+      const { app, boardTasks } = makeApp();
+
+      const response = await app.handle(
+        new Request("http://localhost/boards/board-1/tasks/task-5/abort", {
+          method: "POST",
+        })
+      );
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ accepted: true });
+      expect(boardTasks.abortTask).toHaveBeenCalledWith("board-1", "task-5");
+    });
+
     test("routes plan finalize and reject with explicit board and task identities", async () => {
       const { app, boardTasks } = makeApp();
       const payload = { answers: ["Use the safer option"], plan: "step one" };
@@ -532,8 +554,8 @@ describe("HTTP routes", () => {
   });
 
   describe("POST /tasks/:sessionID/abort", () => {
-    test("aborts a running session", async () => {
-      const { app, bridge } = makeApp();
+    test("resolves the current board task and uses the task lifecycle command", async () => {
+      const { app, boardTasks, bridge } = makeApp();
 
       const res = await app.handle(
         new Request("http://localhost/tasks/sess-1/abort", {
@@ -546,16 +568,18 @@ describe("HTTP routes", () => {
       expect(res.status).toBe(200);
 
       const body = await res.json();
-      expect(body).toEqual({
+      expect(body).toMatchObject({
+        boardId: "board-1",
+        taskId: "task-1",
+        sessionId: "sess-123",
+        status: "accepted",
         sessionID: "sess-1",
         accepted: true,
         timestamp: expect.any(Number),
       });
 
-      expect(bridge.abortSession).toHaveBeenCalledWith(
-        "sess-1",
-        BOARD_WORKTREE
-      );
+      expect(boardTasks.abortTask).toHaveBeenCalledWith("board-1", "task-1");
+      expect(bridge.abortSession).not.toHaveBeenCalled();
     });
 
     test("refuses a session no board owns", async () => {

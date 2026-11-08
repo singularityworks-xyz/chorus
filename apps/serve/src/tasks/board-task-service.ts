@@ -66,6 +66,8 @@ export class BoardTaskCommandError extends Error {
     | "task_not_found"
     | "task_not_queued"
     | "task_not_retryable"
+    | "task_not_abortable"
+    | "abort_not_accepted"
     | "task_not_reviewable"
     | "task_session_missing"
     | "task_prompt_missing"
@@ -277,7 +279,7 @@ export class BoardTaskService {
       const sessionId = board.session.sessionId;
       if (sessionId && board.session.state === "active") {
         const directory = boardDirectory(board);
-        const stoppedByAbort = await this.#abortSessionForRemoval(
+        const stoppedByAbort = await this.#abortSessionAndConfirmIdle(
           sessionId,
           directory
         );
@@ -303,9 +305,10 @@ export class BoardTaskService {
     }
   }
 
-  async #abortSessionForRemoval(
+  async #abortSessionAndConfirmIdle(
     sessionId: string,
-    directory: string
+    directory: string,
+    source: "removal" | "stop" = "removal"
   ): Promise<boolean> {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
@@ -314,7 +317,7 @@ export class BoardTaskService {
           reject(
             new BoardLifecycleError(
               "board_abort_failed",
-              "the agent did not confirm an abort before the timeout; the board was kept"
+              "the agent did not confirm an abort before the timeout; the board and task were kept unchanged"
             )
           ),
         BOARD_ABORT_TIMEOUT_MS
@@ -331,9 +334,18 @@ export class BoardTaskService {
         timeout,
       ]);
       if (!aborted) {
+        if (await this.#bridge.waitForSessionIdle(sessionId, directory, 0)) {
+          return false;
+        }
+        if (source === "stop") {
+          throw new BoardTaskCommandError(
+            "abort_not_accepted",
+            "The engine did not accept the stop request. The task is still running."
+          );
+        }
         throw new BoardLifecycleError(
           "board_abort_failed",
-          "the agent did not confirm an abort; the board was kept"
+          "the agent did not confirm an abort; the board and task were kept unchanged"
         );
       }
 
@@ -348,17 +360,20 @@ export class BoardTaskService {
       if (!isIdle) {
         throw new BoardLifecycleError(
           "board_abort_failed",
-          "the agent did not confirm an abort; the board was kept"
+          "the agent did not confirm an abort; the board and task were kept unchanged"
         );
       }
       return true;
     } catch (error) {
-      if (error instanceof BoardLifecycleError) {
+      if (
+        error instanceof BoardLifecycleError ||
+        error instanceof BoardTaskCommandError
+      ) {
         throw error;
       }
       throw new BoardLifecycleError(
         "board_abort_failed",
-        "the engine could not confirm an abort; the board was kept"
+        "the engine could not confirm an abort; the board and task were kept unchanged"
       );
     } finally {
       if (timeoutId) {
@@ -765,6 +780,122 @@ export class BoardTaskService {
         timestamp: response.timestamp,
       };
     });
+  }
+
+  abortTask(
+    boardId: string,
+    taskId: string
+  ): Promise<BoardTaskCommandResponse> {
+    this.assertBoardOpen(boardId);
+    return this.#withBoardOperation(boardId, async () => {
+      this.assertBoardOpen(boardId);
+      const { board, task } = this.#requireBoardTask(boardId, taskId);
+      if (
+        task.outcome === "aborted" &&
+        (board.columns.done ?? []).some((entry) => entry.id === taskId)
+      ) {
+        const sessionId =
+          task.run?.sessionId ?? task.runId ?? board.session.sessionId;
+        if (!sessionId) {
+          throw new BoardTaskCommandError(
+            "task_session_missing",
+            "This task's provider session is no longer attached to the board. Refresh and try again."
+          );
+        }
+        return {
+          boardId,
+          sessionId,
+          status: "accepted",
+          taskId,
+          timestamp: Date.now(),
+        };
+      }
+      if (
+        board.session.currentTaskId !== taskId ||
+        (board.columns.done ?? []).some((entry) => entry.id === taskId)
+      ) {
+        throw new BoardTaskCommandError(
+          "task_not_abortable",
+          "This task is no longer running. Refresh the board to load its latest status."
+        );
+      }
+      const sessionId =
+        task.run?.sessionId ?? task.runId ?? board.session.sessionId;
+      if (
+        !sessionId ||
+        (board.session.sessionId && board.session.sessionId !== sessionId)
+      ) {
+        throw new BoardTaskCommandError(
+          "task_session_missing",
+          "This task's provider session is no longer attached to the board. Refresh and try again."
+        );
+      }
+
+      const directory = boardDirectory(board);
+      await this.assertCheckoutAuthorized(directory);
+      await this.#bridge.subscribeDirectory(directory);
+      const stoppedByAbort = await this.#abortSessionAndConfirmIdle(
+        sessionId,
+        directory,
+        "stop"
+      );
+      const timestamp = Date.now();
+
+      if (stoppedByAbort) {
+        await this.#workspaceStore.applyBoardEventsIf(
+          boardId,
+          [
+            {
+              boardId,
+              reason: "Stopped by the user.",
+              taskId,
+              ts: timestamp,
+              type: "card.aborted",
+            },
+          ],
+          (currentBoard) => this.#canMarkTaskAborted(currentBoard, taskId)
+        );
+      } else {
+        await this.#workspaceStore.applyBoardEventsIf(
+          boardId,
+          [
+            {
+              boardId,
+              ts: timestamp,
+              type: "session.idle",
+            },
+          ],
+          (currentBoard) => currentBoard.session.currentTaskId === taskId
+        );
+      }
+
+      this.#watchdog?.stop(sessionId);
+      return {
+        boardId,
+        sessionId,
+        status: "accepted",
+        taskId,
+        timestamp: Date.now(),
+      };
+    });
+  }
+
+  #canMarkTaskAborted(board: WorkspaceBoard, taskId: string): boolean {
+    if (board.session.currentTaskId && board.session.currentTaskId !== taskId) {
+      return false;
+    }
+    const task = findTaskInColumns(board.columns, taskId);
+    if (!task) {
+      return false;
+    }
+    if (task.outcome === "failed" || task.outcome === "timed_out") {
+      return false;
+    }
+    return (
+      board.session.currentTaskId === taskId ||
+      task.outcome === "succeeded" ||
+      task.outcome === "awaiting_review"
+    );
   }
 
   finalizeReview(

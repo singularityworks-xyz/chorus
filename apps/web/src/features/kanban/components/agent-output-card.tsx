@@ -18,7 +18,7 @@ import {
   TerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
@@ -405,12 +405,16 @@ function GroupedStepRow({ group }: { group: GroupedStep }) {
 
 interface AgentOutputCardProps {
   accentClass?: string;
+  boardId: string;
   className?: string;
   run: AgentRunContext;
+  taskId: string;
 }
 
 export function AgentOutputCard({
+  boardId,
   run,
+  taskId,
   accentClass: _accentClass = "bg-primary-light",
   className,
 }: AgentOutputCardProps) {
@@ -418,17 +422,24 @@ export function AgentOutputCard({
   const isLive = run.steps.some((s) => s.status === "running");
   const groupedSteps = useMemo(() => groupSteps(run.steps), [run.steps]);
   const [aborting, setAborting] = useState(false);
+  const [stopAccepted, setStopAccepted] = useState(false);
   const [abortError, setAbortError] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (!isLive) {
+      setStopAccepted(false);
+    }
+  }, [isLive]);
+
   const handleAbort = useCallback(async () => {
-    if (!run.sessionId || aborting) {
+    if (aborting || stopAccepted) {
       return;
     }
     setAborting(true);
     setAbortError(null);
     try {
       const response = await fetch(
-        `/api/tasks/${encodeURIComponent(run.sessionId)}/abort`,
+        `/api/boards/${encodeURIComponent(boardId)}/tasks/${encodeURIComponent(taskId)}/abort`,
         { method: "POST" }
       );
       const payload: unknown = await response.json().catch(() => undefined);
@@ -446,6 +457,7 @@ export function AgentOutputCard({
           "The engine did not accept the stop request. The task is still running."
         );
       }
+      setStopAccepted(true);
     } catch (error) {
       setAbortError(
         error instanceof Error
@@ -455,7 +467,7 @@ export function AgentOutputCard({
     } finally {
       setAborting(false);
     }
-  }, [run.sessionId, aborting]);
+  }, [boardId, taskId, aborting, stopAccepted]);
 
   return (
     <div
@@ -489,17 +501,17 @@ export function AgentOutputCard({
           <button
             className={cn(
               "flex items-center gap-1 rounded-xs border px-1.5 py-0.5 font-medium text-[0.6rem] transition-colors",
-              aborting
+              aborting || stopAccepted
                 ? "cursor-not-allowed border-white/10 bg-white/5 text-white/20"
                 : "border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:text-red-300"
             )}
-            disabled={aborting}
+            disabled={aborting || stopAccepted}
             onClick={handleAbort}
             title="Interrupt agent"
             type="button"
           >
             <SquareIcon className="size-2.5" />
-            {aborting ? "Stopping" : "Stop"}
+            {aborting || stopAccepted ? "Stopping" : "Stop"}
           </button>
         )}
       </div>

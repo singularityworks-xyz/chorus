@@ -476,17 +476,18 @@ async function handleCommand(
 
     case WS_MESSAGE_TYPE.TASK_ABORT: {
       const payload = validate(WS_MESSAGE_TYPE.TASK_ABORT, msg.payload);
-
-      const result = await bridge.abortSession(
-        payload.sessionID,
-        await directoryFor(payload.sessionID)
-      );
+      const board = workspaceStore.getBoardBySessionId(payload.sessionID);
+      const taskId = board?.session.currentTaskId;
+      const result =
+        board && taskId
+          ? await boardTasks.abortTask(board.boardId, taskId)
+          : null;
 
       wsSend({
         type: WS_RESPONSE_TYPE.TASK_ABORTED,
         payload: {
           sessionID: payload.sessionID,
-          accepted: result,
+          accepted: result !== null,
         },
         timestamp: Date.now(),
       });
