@@ -11,7 +11,7 @@ import {
   TriangleAlertIcon,
   XIcon,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -22,6 +22,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { BoardSessionHistoryControls } from "@/features/kanban/components/board-session-history-controls";
+import { GitStatusFeedback } from "@/features/kanban/components/git-status-feedback";
 import {
   KanbanCardContent,
   type KanbanCardData,
@@ -376,6 +377,9 @@ function KanbanCardNodeComponent({
   const [localGitStatus, setLocalGitStatus] = useState<GitStatus | null>(
     cardData.gitStatus ?? null
   );
+  const [gitStatusError, setGitStatusError] = useState<string | null>(null);
+  const [isLoadingGitStatus, setIsLoadingGitStatus] = useState(false);
+  const gitStatusControllerRef = useRef<AbortController | null>(null);
   const {
     diffError,
     diffFiles,
@@ -418,27 +422,45 @@ function KanbanCardNodeComponent({
 
   const filePath = cardData.filePath ?? cardData.projectName ?? cardData.title;
 
-  useEffect(() => {
-    if (!filePath) {
-      return;
-    }
-
-    let cancelled = false;
-
-    fetchGitStatus(filePath)
+  const refreshGitStatus = useCallback(() => {
+    gitStatusControllerRef.current?.abort();
+    const controller = new AbortController();
+    gitStatusControllerRef.current = controller;
+    setGitStatusError(null);
+    setIsLoadingGitStatus(true);
+    fetchGitStatus(filePath, { signal: controller.signal })
       .then((status) => {
-        if (!cancelled && status) {
+        if (!controller.signal.aborted) {
           setLocalGitStatus(status);
         }
       })
-      .catch(() => {
-        // Silently fail - git status is not critical
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          setGitStatusError(
+            error instanceof Error
+              ? error.message
+              : "Could not load repository status. Retry."
+          );
+        }
+      })
+      .finally(() => {
+        if (gitStatusControllerRef.current === controller) {
+          gitStatusControllerRef.current = null;
+          setIsLoadingGitStatus(false);
+        }
       });
-
-    return () => {
-      cancelled = true;
-    };
   }, [filePath]);
+
+  useEffect(() => {
+    refreshGitStatus();
+    return () => {
+      const controller = gitStatusControllerRef.current;
+      if (controller) {
+        controller.abort();
+        gitStatusControllerRef.current = null;
+      }
+    };
+  }, [refreshGitStatus]);
 
   return (
     <>
@@ -485,6 +507,12 @@ function KanbanCardNodeComponent({
             ) : null}
 
             {localGitStatus && <GitDiffIndicator status={localGitStatus} />}
+
+            <GitStatusFeedback
+              error={gitStatusError}
+              loading={isLoadingGitStatus}
+              onRetry={refreshGitStatus}
+            />
 
             <span className="h-3.5 w-px bg-white/10" />
 

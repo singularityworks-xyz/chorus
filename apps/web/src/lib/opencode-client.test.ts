@@ -3,6 +3,7 @@ import {
   fetchCommands,
   fetchDirectory,
   fetchFiles,
+  fetchGitStatus,
   fetchSessionDiff,
 } from "./opencode-client";
 
@@ -118,6 +119,65 @@ describe("session diff client", () => {
 
     await expect(fetchSessionDiff("session-1")).rejects.toThrow(
       "The server returned invalid diff data. Try again."
+    );
+  });
+});
+
+describe("repository status client", () => {
+  test("validates status and applies contract defaults", async () => {
+    let requestedUrl = "";
+    replaceFetch((input) => {
+      requestedUrl = String(input);
+      return Promise.resolve(
+        Response.json({ branch: "main", modified: 2, timestamp: 123 })
+      );
+    });
+
+    await expect(fetchGitStatus("/tmp/repo with spaces")).resolves.toEqual({
+      ahead: 0,
+      behind: 0,
+      branch: "main",
+      linesAdded: 0,
+      linesRemoved: 0,
+      modified: 2,
+      staged: 0,
+      tracking: undefined,
+      untracked: 0,
+    });
+    expect(requestedUrl).toBe(
+      "/api/git/status?directory=%2Ftmp%2Frepo+with+spaces"
+    );
+  });
+
+  test("surfaces server errors instead of treating them as a clean repository", async () => {
+    replaceFetch(async () =>
+      Response.json(
+        {
+          code: "repository_unavailable",
+          message: "The repository is unavailable. Retry.",
+        },
+        { status: 503 }
+      )
+    );
+
+    await expect(fetchGitStatus("/tmp/repo")).rejects.toThrow(
+      "The repository is unavailable. Retry."
+    );
+  });
+
+  test("rejects malformed status payloads explicitly", async () => {
+    replaceFetch(async () => Response.json({ branch: "", modified: "many" }));
+
+    await expect(fetchGitStatus("/tmp/repo")).rejects.toThrow(
+      "The server returned invalid repository status. Refresh the board and retry."
+    );
+  });
+
+  test("returns a recoverable message when the server cannot be reached", async () => {
+    replaceFetch(() => Promise.reject(new TypeError("connection refused")));
+
+    await expect(fetchGitStatus("/tmp/repo")).rejects.toThrow(
+      "Could not reach Chorus to load repository status. Check the connection and retry."
     );
   });
 });

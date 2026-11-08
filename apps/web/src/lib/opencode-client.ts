@@ -1,13 +1,13 @@
 import {
   apiErrorSchema,
   boardAutocompleteResponseSchema,
+  type GitStatus,
+  gitStatusSchema,
   type SessionFileDiff,
   sessionFileDiffsSchema,
 } from "@chorus/contracts";
 
-export type { SessionFileDiff } from "@chorus/contracts";
-
-const IS_DEV = process.env.NODE_ENV !== "production";
+export type { GitStatus, SessionFileDiff } from "@chorus/contracts";
 
 interface AutocompleteOptions {
   signal?: AbortSignal;
@@ -159,46 +159,50 @@ export async function fetchSessionDiff(
   return parsed.data;
 }
 
-export interface GitStatus {
-  ahead: number;
-  behind: number;
-  branch: string;
-  linesAdded: number;
-  linesRemoved: number;
-  modified: number;
-  staged: number;
-  timestamp: number;
-  tracking: string | null;
-  untracked: number;
-}
-
 export async function fetchGitStatus(
-  directory: string
-): Promise<GitStatus | null> {
+  directory: string,
+  options?: AutocompleteOptions
+): Promise<GitStatus> {
+  const params = new URLSearchParams({ directory });
+  const timeout = AbortSignal.timeout(10_000);
+  const signal = options?.signal
+    ? AbortSignal.any([options.signal, timeout])
+    : timeout;
+
+  let response: Response;
   try {
-    const params = new URLSearchParams({ directory });
-    const response = await fetch(`/api/git/status?${params}`, {
-      signal: AbortSignal.timeout(10_000),
+    response = await fetch(`/api/git/status?${params}`, {
+      headers: { Accept: "application/json" },
+      signal,
     });
-    if (!response.ok) {
-      console.error("[opencode-client] Failed to fetch git status", {
-        directory,
-        status: response.status,
-      });
-      return null;
-    }
-    const text = await response.text();
-    if (!text) {
-      return null;
-    }
-    return JSON.parse(text) as GitStatus;
   } catch (error) {
-    if (IS_DEV) {
-      console.error("[opencode-client] Fetch git status failed", {
-        directory,
-        errorMessage: error instanceof Error ? error.message : String(error),
-      });
+    if (error instanceof Error && error.name === "AbortError") {
+      throw error;
     }
-    return null;
+    if (error instanceof Error && error.name === "TimeoutError") {
+      throw new Error("Repository status timed out. Retry.");
+    }
+    throw new Error(
+      "Could not reach Chorus to load repository status. Check the connection and retry."
+    );
   }
+
+  const payload: unknown = await response.json().catch(() => undefined);
+  if (!response.ok) {
+    const parsedError = apiErrorSchema.safeParse(payload);
+    throw new Error(
+      parsedError.success
+        ? parsedError.data.message
+        : "Could not load repository status. Retry."
+    );
+  }
+
+  const parsed = gitStatusSchema.safeParse(payload);
+  if (!parsed.success) {
+    throw new Error(
+      "The server returned invalid repository status. Refresh the board and retry."
+    );
+  }
+
+  return parsed.data;
 }
