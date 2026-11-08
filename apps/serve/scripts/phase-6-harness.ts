@@ -663,13 +663,17 @@ export async function startPhase6Harness({
           requestID: requestId,
         });
       },
-      replyInteractiveQuestion(sessionId: string, requestId: string) {
+      replyInteractiveQuestion(
+        sessionId: string,
+        requestId: string,
+        optionIndex = 0
+      ) {
         if (!interactive) {
           throw new Error("replyInteractiveQuestion requires interactive mode");
         }
         return request(
           `/tasks/${encodeURIComponent(sessionId)}/questions/${encodeURIComponent(requestId)}/reply`,
-          { answers: [{ questionIndex: 0, optionIndices: [0] }] }
+          { answers: [{ questionIndex: 0, optionIndices: [optionIndex] }] }
         );
       },
       appendBatch(count: number) {

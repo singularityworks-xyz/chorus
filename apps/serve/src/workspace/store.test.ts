@@ -855,6 +855,48 @@ describe("WorkspaceStore agent events", () => {
     ).toBeUndefined();
   });
 
+  test("resolving one of several approvals keeps the task waiting", async () => {
+    const store = createStore();
+    await store.load();
+    const boardId = await seedActiveBoard(store);
+
+    await store.applyAgentEvent(
+      agentEvent({
+        activity: "waiting_for_approval",
+        permission: "edit",
+        permissionID: "permission-1",
+      })
+    );
+    await store.applyAgentEvent(
+      agentEvent({
+        activity: "waiting_for_approval",
+        permission: "bash",
+        permissionID: "permission-2",
+      })
+    );
+
+    expect(
+      await store.resolvePendingApproval("sess-1", "permission-2", true)
+    ).toBe(true);
+    const waitingBoard = store.getBoard(boardId);
+    expect(waitingBoard?.columns.approve).toHaveLength(1);
+    expect(waitingBoard?.columns.approve[0]).toMatchObject({
+      id: "task-1",
+      pendingApprovals: [{ requestId: "permission-1" }],
+    });
+    expect(waitingBoard?.columns.in_progress).toHaveLength(0);
+
+    expect(
+      await store.resolvePendingApproval("sess-1", "permission-1", true)
+    ).toBe(true);
+    const resumedBoard = store.getBoard(boardId);
+    expect(resumedBoard?.columns.approve).toHaveLength(0);
+    expect(resumedBoard?.columns.in_progress[0]).toMatchObject({
+      id: "task-1",
+      pendingApprovals: [],
+    });
+  });
+
   test("an agent event expands into several sequenced events", async () => {
     const store = createStore();
     await store.load();

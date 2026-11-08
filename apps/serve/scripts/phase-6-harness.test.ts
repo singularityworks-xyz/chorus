@@ -154,7 +154,7 @@ test("manual review streams a plan and finalizes into an approved build run", as
   }
 }, 30_000);
 
-test("scripted question replies clear the request and finish the targeted task", async () => {
+test("concurrent scripted questions stay request-scoped until all are answered", async () => {
   const harness = await startPhase6Harness({ interactive: true });
   try {
     const boardId = harness.boardIds.at(-1);
@@ -178,16 +178,20 @@ test("scripted question replies clear the request and finish the targeted task",
           ?.columns.in_progress.some((task) => task.id === run.taskId) ?? false
     );
 
-    const requestId = harness.engine.askQuestion(run.sessionId);
-    await waitForQualification(
-      () =>
+    const requestIds = [
+      harness.engine.askQuestion(run.sessionId),
+      harness.engine.askQuestion(run.sessionId),
+    ];
+    await waitForQualification(() =>
+      requestIds.every((requestId) =>
         harness.store
           .getBoard(boardId)
           ?.columns.approve.some((task) =>
             task.pendingApprovals?.some(
               (request) => request.requestId === requestId
             )
-          ) ?? false
+          )
+      )
     );
 
     const board = harness.store.getBoard(boardId);
@@ -201,7 +205,7 @@ test("scripted question replies clear the request and finish the targeted task",
     });
     expect(await adapter.questions.list()).toMatchObject([
       {
-        id: requestId,
+        id: requestIds[0],
         sessionID: run.sessionId,
         questions: [
           {
@@ -210,15 +214,53 @@ test("scripted question replies clear the request and finish the targeted task",
           },
         ],
       },
+      {
+        id: requestIds[1],
+        sessionID: run.sessionId,
+        questions: [
+          {
+            header: "Implementation choice 2",
+            question: "Which behavior should request 2 keep?",
+          },
+        ],
+      },
     ]);
 
-    const response = await harness.replyInteractiveQuestion(
+    const secondResponse = await harness.replyInteractiveQuestion(
       run.sessionId,
-      requestId
+      requestIds[1] ?? "missing-second-question",
+      1
     );
-    expect(response).toMatchObject({
+    expect(secondResponse).toMatchObject({
       accepted: true,
-      requestID: requestId,
+      requestID: requestIds[1],
+      sessionID: run.sessionId,
+    });
+    expect(await adapter.questions.list()).toMatchObject([
+      { id: requestIds[0], sessionID: run.sessionId },
+    ]);
+    expect(
+      harness.store
+        .getBoard(boardId)
+        ?.columns.done.some((task) => task.id === run.taskId)
+    ).toBe(false);
+    const waitingBoard = harness.store.getBoard(boardId);
+    expect(
+      waitingBoard?.columns.approve
+        .find((task) => task.id === run.taskId)
+        ?.pendingApprovals?.map((request) => request.requestId)
+    ).toEqual([requestIds[0]]);
+    expect(
+      waitingBoard?.columns.in_progress.some((task) => task.id === run.taskId)
+    ).toBe(false);
+
+    const firstResponse = await harness.replyInteractiveQuestion(
+      run.sessionId,
+      requestIds[0] ?? "missing-first-question"
+    );
+    expect(firstResponse).toMatchObject({
+      accepted: true,
+      requestID: requestIds[0],
       sessionID: run.sessionId,
     });
     await waitForQualification(
@@ -228,14 +270,18 @@ test("scripted question replies clear the request and finish the targeted task",
           ?.columns.done.some((task) => task.id === run.taskId) ?? false
     );
     expect(await adapter.questions.list()).toEqual([]);
-    expect(
+    const responseText =
       harness.store
         .getBoard(boardId)
         ?.columns.done.find((task) => task.id === run.taskId)
-        ?.run?.steps.some((step) =>
-          step.content?.includes("The user chose: Preserve current behavior.")
-        )
-    ).toBe(true);
+        ?.run?.steps.map((step) => step.content ?? "")
+        .join("\n") ?? "";
+    expect(responseText).toContain(
+      "The user chose: Preserve current behavior."
+    );
+    expect(responseText).toContain(
+      "The user chose: Apply the requested change."
+    );
   } finally {
     await harness.close();
   }

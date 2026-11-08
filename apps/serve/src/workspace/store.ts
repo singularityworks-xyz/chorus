@@ -559,7 +559,13 @@ export class WorkspaceStore {
           type: "card.approval_resolved",
         },
       ];
-      if (resume) {
+      const pendingApprovals =
+        task.pendingApprovals ??
+        (task.pendingApproval ? [task.pendingApproval] : []);
+      const hasOtherPendingApprovals = pendingApprovals.some(
+        (request) => request.requestId !== requestId
+      );
+      if (resume && !hasOtherPendingApprovals) {
         events.push({
           boardId: board.boardId,
           taskId: task.id,

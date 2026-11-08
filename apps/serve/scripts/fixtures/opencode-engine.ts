@@ -1,5 +1,6 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { PendingQuestion } from "@chorus/contracts";
 import type { Event, Session } from "@chorus/oc-adapter";
 import { z } from "zod";
 
@@ -10,8 +11,9 @@ interface FixtureSession {
   currentMessageId: string;
   currentReasoningPartId: string;
   currentTextPartId: string;
-  pendingQuestionId?: string;
+  pendingQuestions: Map<string, PendingQuestion>;
   prompted: boolean;
+  questionNumber: number;
   reasoning: string;
   session: Session;
   text: string;
@@ -222,36 +224,46 @@ export function startScriptedEngine() {
     if (!(entry?.busy && entry.approved)) {
       throw new Error("scripted session is not approved and running");
     }
-    if (entry.pendingQuestionId) {
-      throw new Error("scripted session already has a pending question");
-    }
 
-    const requestID = `question-${sessionID}-${entry.turnNumber}`;
-    entry.pendingQuestionId = requestID;
+    entry.questionNumber += 1;
+    const questionNumber = entry.questionNumber;
+    const requestID = `question-${sessionID}-${entry.turnNumber}-${questionNumber}`;
+    const pendingQuestion: PendingQuestion = {
+      id: requestID,
+      sessionID,
+      questions: [
+        {
+          custom: false,
+          header:
+            questionNumber === 1
+              ? "Implementation choice"
+              : `Implementation choice ${questionNumber}`,
+          multiple: false,
+          options: [
+            {
+              description: "Keep the behavior the task started with.",
+              label: "Preserve current behavior",
+            },
+            {
+              description: "Change the behavior based on the new request.",
+              label: "Apply the requested change",
+            },
+          ],
+          question:
+            questionNumber === 1
+              ? "Which behavior should the scripted task keep?"
+              : `Which behavior should request ${questionNumber} keep?`,
+        },
+      ],
+    };
+    entry.pendingQuestions.set(requestID, pendingQuestion);
     emit(entry.session.directory, {
       id: eventId(),
       type: "question.asked",
       properties: {
         id: requestID,
         sessionID,
-        questions: [
-          {
-            custom: false,
-            header: "Implementation choice",
-            multiple: false,
-            options: [
-              {
-                description: "Keep the behavior the task started with.",
-                label: "Preserve current behavior",
-              },
-              {
-                description: "Change the behavior based on the new request.",
-                label: "Apply the requested change",
-              },
-            ],
-            question: "Which behavior should the scripted task keep?",
-          },
-        ],
+        questions: pendingQuestion.questions,
       },
     });
     return requestID;
@@ -330,7 +342,8 @@ export function startScriptedEngine() {
     const entry = [...sessions.values()].find(
       (candidate) =>
         candidate.session.directory === directory &&
-        candidate.pendingQuestionId === requestID
+        requestID !== undefined &&
+        candidate.pendingQuestions.has(requestID)
     );
     if (!(entry && requestID && match?.[2])) {
       return new Response(null, { status: 404 });
@@ -347,7 +360,7 @@ export function startScriptedEngine() {
         answer = "Apply the requested change";
       }
       answer ??= "Answer recorded";
-      entry.pendingQuestionId = undefined;
+      entry.pendingQuestions.delete(requestID);
       const delta = ` The user chose: ${answer}.`;
       entry.text += delta;
       emit(directory, {
@@ -362,13 +375,17 @@ export function startScriptedEngine() {
         },
       });
       setTimeout(() => {
-        status(entry, false);
+        if (entry.pendingQuestions.size === 0) {
+          status(entry, false);
+        }
       }, 100);
       return Response.json(true);
     }
 
-    entry.pendingQuestionId = undefined;
-    status(entry, false);
+    entry.pendingQuestions.delete(requestID);
+    if (entry.pendingQuestions.size === 0) {
+      status(entry, false);
+    }
     return Response.json(true);
   }
 
@@ -549,37 +566,9 @@ export function startScriptedEngine() {
           );
         case "/question":
           return Response.json(
-            scopedSessions(directory).flatMap((entry) =>
-              entry.pendingQuestionId
-                ? [
-                    {
-                      id: entry.pendingQuestionId,
-                      sessionID: entry.session.id,
-                      questions: [
-                        {
-                          custom: false,
-                          header: "Implementation choice",
-                          multiple: false,
-                          options: [
-                            {
-                              description:
-                                "Keep the behavior the task started with.",
-                              label: "Preserve current behavior",
-                            },
-                            {
-                              description:
-                                "Change the behavior based on the new request.",
-                              label: "Apply the requested change",
-                            },
-                          ],
-                          question:
-                            "Which behavior should the scripted task keep?",
-                        },
-                      ],
-                    },
-                  ]
-                : []
-            )
+            scopedSessions(directory).flatMap((entry) => [
+              ...entry.pendingQuestions.values(),
+            ])
           );
         case "/file/content": {
           const entry = scopedSessions(directory)[0];
@@ -617,7 +606,9 @@ export function startScriptedEngine() {
             currentMessageId: `message-${id}-0`,
             currentReasoningPartId: `reasoning-${id}-0`,
             currentTextPartId: `part-${id}-0`,
+            pendingQuestions: new Map(),
             prompted: false,
+            questionNumber: 0,
             turnNumber: 0,
           });
           return Response.json(session);

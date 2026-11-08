@@ -1,6 +1,18 @@
 import { startPhase6Harness } from "./phase-6-harness";
 
-const seedQuestionMode = process.env.CHORUS_BROWSER_FIXTURE_QUESTION === "1";
+const questionMode = process.env.CHORUS_BROWSER_FIXTURE_QUESTION;
+let questionCount = 0;
+switch (questionMode) {
+  case "1":
+    questionCount = 1;
+    break;
+  case "multi":
+    questionCount = 2;
+    break;
+  default:
+    break;
+}
+const seedQuestionMode = questionCount > 0;
 const reasoningDeltas = [
   " Checking the current board and task state.",
   " The selected model is shared across these boards.",
@@ -21,7 +33,9 @@ if (seedQuestionMode) {
     "auto"
   );
   await harness.approvePermission(run.sessionId, `permission-${run.sessionId}`);
-  harness.engine.askQuestion(run.sessionId);
+  for (let index = 0; index < questionCount; index += 1) {
+    harness.engine.askQuestion(run.sessionId);
+  }
 }
 let deltaIndex = 0;
 let streamFailure: unknown;
