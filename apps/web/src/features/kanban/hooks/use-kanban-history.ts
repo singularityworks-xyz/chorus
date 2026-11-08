@@ -1,16 +1,14 @@
 import posthog from "posthog-js";
 import { useCallback, useRef, useState } from "react";
 import type { Columns, Task } from "@/features/kanban/components/kanban";
-
-interface KanbanHistoryEntry {
-  columnsAfter: Columns;
-  columnsBefore: Columns;
-  prompt: string;
-  task: Task;
-  timestamp: number;
-}
-
-const MAX_HISTORY = 50;
+import {
+  canRedoKanbanHistory,
+  canUndoKanbanHistory,
+  EMPTY_KANBAN_HISTORY,
+  recordKanbanHistory,
+  redoKanbanHistory,
+  undoKanbanHistory,
+} from "@/features/kanban/utils/kanban-history-state";
 
 function extractPromptFromTask(task: Task): string {
   if (!task.run?.steps) {
@@ -27,110 +25,127 @@ function extractPromptFromTask(task: Task): string {
 }
 
 export function useKanbanHistory() {
-  const [undoStack, setUndoStack] = useState<KanbanHistoryEntry[]>([]);
-  const [redoStack, setRedoStack] = useState<KanbanHistoryEntry[]>([]);
-  const stacksRef = useRef({ undo: undoStack, redo: redoStack });
-  stacksRef.current = { undo: undoStack, redo: redoStack };
+  const [history, setHistory] = useState(EMPTY_KANBAN_HISTORY);
+  const historyRef = useRef(history);
+
+  const commitHistory = useCallback((next: typeof history) => {
+    historyRef.current = next;
+    setHistory(next);
+  }, []);
 
   const recordMove = useCallback(
-    (columnsBefore: Columns, columnsAfter: Columns, task: Task) => {
+    (
+      boardId: string,
+      columnsBefore: Columns,
+      columnsAfter: Columns,
+      task: Task
+    ) => {
       const prompt = extractPromptFromTask(task);
+      const timestamp = Date.now();
 
       posthog.capture("kanban_history_record", {
+        boardId,
         taskId: task.id,
         taskTitle: task.title,
         promptLength: prompt.length,
-        timestamp: Date.now(),
+        timestamp,
       });
 
-      const entry: KanbanHistoryEntry = {
-        columnsBefore,
-        columnsAfter,
-        task,
-        prompt,
-        timestamp: Date.now(),
-      };
-
-      setUndoStack((prev) => {
-        const next = [...prev, entry];
-        return next.length > MAX_HISTORY ? next.slice(-MAX_HISTORY) : next;
-      });
-      setRedoStack([]);
+      commitHistory(
+        recordKanbanHistory(historyRef.current, {
+          boardId,
+          columnsBefore,
+          columnsAfter,
+          prompt,
+          task,
+          timestamp,
+        })
+      );
     },
-    []
+    [commitHistory]
   );
 
-  const undo = useCallback((): {
-    columns: Columns;
-    prompt: string;
-    task: Task;
-  } | null => {
-    const current = stacksRef.current;
-    if (current.undo.length === 0) {
-      posthog.capture("kanban_undo_empty");
-      return null;
-    }
+  const undo = useCallback(
+    (
+      boardId: string
+    ): {
+      columns: Columns;
+      prompt: string;
+      task: Task;
+    } | null => {
+      const current = historyRef.current;
+      const transition = undoKanbanHistory(current, boardId);
+      if (!transition) {
+        posthog.capture("kanban_undo_empty", { boardId });
+        return null;
+      }
 
-    const entry = current.undo.at(-1);
-    if (!entry) {
-      return null;
-    }
+      const { entry } = transition;
+      posthog.capture("kanban_undo", {
+        boardId,
+        taskId: entry.task.id,
+        taskTitle: entry.task.title,
+        promptLength: entry.prompt.length,
+        stackDepth: current.undo.length,
+      });
+      commitHistory(transition.state);
 
-    posthog.capture("kanban_undo", {
-      taskId: entry.task.id,
-      taskTitle: entry.task.title,
-      promptLength: entry.prompt.length,
-      stackDepth: current.undo.length,
-    });
+      return {
+        columns: entry.columnsBefore,
+        prompt: entry.prompt,
+        task: entry.task,
+      };
+    },
+    [commitHistory]
+  );
 
-    setUndoStack((prev) => prev.slice(0, -1));
-    setRedoStack((prev) => [...prev, entry]);
+  const redo = useCallback(
+    (
+      boardId: string
+    ): {
+      columns: Columns;
+      task: Task;
+    } | null => {
+      const current = historyRef.current;
+      const transition = redoKanbanHistory(current, boardId);
+      if (!transition) {
+        posthog.capture("kanban_redo_empty", { boardId });
+        return null;
+      }
 
-    return {
-      columns: entry.columnsBefore,
-      prompt: entry.prompt,
-      task: entry.task,
-    };
-  }, []);
+      const { entry } = transition;
+      posthog.capture("kanban_redo", {
+        boardId,
+        taskId: entry.task.id,
+        taskTitle: entry.task.title,
+        stackDepth: current.redo.length,
+      });
+      commitHistory(transition.state);
 
-  const redo = useCallback((): {
-    columns: Columns;
-    task: Task;
-  } | null => {
-    const current = stacksRef.current;
-    if (current.redo.length === 0) {
-      posthog.capture("kanban_redo_empty");
-      return null;
-    }
-
-    const entry = current.redo.at(-1);
-    if (!entry) {
-      return null;
-    }
-
-    posthog.capture("kanban_redo", {
-      taskId: entry.task.id,
-      taskTitle: entry.task.title,
-      stackDepth: current.redo.length,
-    });
-
-    setRedoStack((prev) => prev.slice(0, -1));
-    setUndoStack((prev) => [...prev, entry]);
-
-    return {
-      columns: entry.columnsAfter,
-      task: entry.task,
-    };
-  }, []);
+      return {
+        columns: entry.columnsAfter,
+        task: entry.task,
+      };
+    },
+    [commitHistory]
+  );
 
   const clear = useCallback(() => {
-    setUndoStack([]);
-    setRedoStack([]);
-  }, []);
+    commitHistory(EMPTY_KANBAN_HISTORY);
+  }, [commitHistory]);
+
+  const canRedo = useCallback(
+    (boardId: string) => canRedoKanbanHistory(history, boardId),
+    [history]
+  );
+  const canUndo = useCallback(
+    (boardId: string) => canUndoKanbanHistory(history, boardId),
+    [history]
+  );
 
   return {
-    canRedo: redoStack.length > 0,
-    canUndo: undoStack.length > 0,
+    canRedo,
+    canUndo,
     clear,
     recordMove,
     redo,

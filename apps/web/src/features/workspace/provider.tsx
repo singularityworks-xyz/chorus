@@ -699,15 +699,18 @@ export function ChorusWorkspaceProvider({
 
   const recordMove = useCallback(
     (
-      columnsBefore: Parameters<
+      boardId: Parameters<
         WorkspaceContextValue["kanbanHistory"]["recordMove"]
       >[0],
-      columnsAfter: Parameters<
+      columnsBefore: Parameters<
         WorkspaceContextValue["kanbanHistory"]["recordMove"]
       >[1],
-      task: Parameters<WorkspaceContextValue["kanbanHistory"]["recordMove"]>[2]
+      columnsAfter: Parameters<
+        WorkspaceContextValue["kanbanHistory"]["recordMove"]
+      >[2],
+      task: Parameters<WorkspaceContextValue["kanbanHistory"]["recordMove"]>[3]
     ) => {
-      kanbanHistory.recordMove(columnsBefore, columnsAfter, task);
+      kanbanHistory.recordMove(boardId, columnsBefore, columnsAfter, task);
     },
     [kanbanHistory]
   );

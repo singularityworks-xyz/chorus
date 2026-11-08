@@ -62,15 +62,20 @@ export interface WorkspaceContextValue {
   isOpeningFolder: boolean;
   isQueueingPrompt: boolean;
   kanbanHistory: {
-    canRedo: boolean;
-    canUndo: boolean;
-    redo: () => { columns: Columns; task: Task } | null;
+    canRedo: (boardId: string) => boolean;
+    canUndo: (boardId: string) => boolean;
+    redo: (boardId: string) => { columns: Columns; task: Task } | null;
     recordMove: (
+      boardId: string,
       columnsBefore: Columns,
       columnsAfter: Columns,
       task: Task
     ) => void;
-    undo: () => { columns: Columns; prompt: string; task: Task } | null;
+    undo: (boardId: string) => {
+      columns: Columns;
+      prompt: string;
+      task: Task;
+    } | null;
   };
   /** Highest contiguously applied sequence, for diagnostics and e2e assertions. */
   lastSeq: number;

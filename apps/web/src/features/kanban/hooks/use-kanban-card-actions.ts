@@ -258,7 +258,12 @@ export function useKanbanCardActions({
         if (doneTasks.length > previousDoneTasks.length) {
           const newDoneTask = doneTasks.at(-1);
           if (newDoneTask) {
-            kanbanHistory.recordMove(previousColumns, nextColumns, newDoneTask);
+            kanbanHistory.recordMove(
+              boardId,
+              previousColumns,
+              nextColumns,
+              newDoneTask
+            );
           }
         }
 

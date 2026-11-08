@@ -429,23 +429,31 @@ function KanbanCardNodeComponent({
   }, [filePath]);
 
   const handleUndo = useCallback(() => {
-    const result = kanbanHistory.undo();
+    const result = kanbanHistory.undo(cardData.boardId);
     if (!result) {
       return;
     }
 
     handleHistoryColumnsChange(result.columns);
     restorePrompt(result.prompt);
-  }, [handleHistoryColumnsChange, kanbanHistory, restorePrompt]);
+  }, [
+    cardData.boardId,
+    handleHistoryColumnsChange,
+    kanbanHistory,
+    restorePrompt,
+  ]);
 
   const handleRedo = useCallback(() => {
-    const result = kanbanHistory.redo();
+    const result = kanbanHistory.redo(cardData.boardId);
     if (!result) {
       return;
     }
 
     handleHistoryColumnsChange(result.columns);
-  }, [handleHistoryColumnsChange, kanbanHistory]);
+  }, [cardData.boardId, handleHistoryColumnsChange, kanbanHistory]);
+
+  const canUndo = kanbanHistory.canUndo(cardData.boardId);
+  const canRedo = kanbanHistory.canRedo(cardData.boardId);
 
   return (
     <>
@@ -518,11 +526,11 @@ function KanbanCardNodeComponent({
               <button
                 className={cn(
                   "rounded-xs p-1 transition-colors",
-                  kanbanHistory.canUndo
+                  canUndo
                     ? "text-white/50 hover:bg-white/10 hover:text-white/80"
                     : "cursor-not-allowed text-white/15"
                 )}
-                disabled={!kanbanHistory.canUndo}
+                disabled={!canUndo}
                 onClick={handleUndo}
                 title="Undo last task"
                 type="button"
@@ -532,11 +540,11 @@ function KanbanCardNodeComponent({
               <button
                 className={cn(
                   "rounded-xs p-1 transition-colors",
-                  kanbanHistory.canRedo
+                  canRedo
                     ? "text-white/50 hover:bg-white/10 hover:text-white/80"
                     : "cursor-not-allowed text-white/15"
                 )}
-                disabled={!kanbanHistory.canRedo}
+                disabled={!canRedo}
                 onClick={handleRedo}
                 title="Redo undone task"
                 type="button"
