@@ -32,7 +32,10 @@ import { WorkspaceHub } from "../src/ws/hub";
 import { startScriptedEngine } from "./fixtures/opencode-engine";
 
 const SNAPSHOT_HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const BROWSER_FIXTURE_WEB_ORIGIN =
+  process.env.CHORUS_BROWSER_FIXTURE_ORIGIN ?? "http://localhost:3001";
 const BROWSER_FIXTURE_ORIGINS = [
+  BROWSER_FIXTURE_WEB_ORIGIN,
   "http://localhost:3001",
   "http://127.0.0.1:3001",
 ];

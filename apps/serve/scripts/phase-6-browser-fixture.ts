@@ -35,7 +35,8 @@ process.stdout.write(
     accessToken: harness.accessToken,
     boardIds: harness.runs.map((run) => run.boardId),
     serveBaseUrl: harness.serveBaseUrl,
-    webOrigin: "http://localhost:3001",
+    webOrigin:
+      process.env.CHORUS_BROWSER_FIXTURE_ORIGIN ?? "http://localhost:3001",
   })}\n`
 );
 
