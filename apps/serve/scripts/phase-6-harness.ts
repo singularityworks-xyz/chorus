@@ -43,6 +43,7 @@ const BROWSER_FIXTURE_ORIGINS = [
 interface QualificationRun {
   boardId: string;
   sessionId: string;
+  taskId: string;
 }
 
 interface QualificationMirror {
@@ -422,7 +423,11 @@ export async function startPhase6Harness({
                 reviewMode: "auto",
               })
             );
-            return { boardId, sessionId: response.sessionId };
+            return {
+              boardId,
+              sessionId: response.sessionId,
+              taskId: response.taskId,
+            };
           })
         );
     if (!interactive) {
@@ -567,6 +572,29 @@ export async function startPhase6Harness({
       }
     }
 
+    async function queueInteractiveTask(
+      boardId: string,
+      text: string,
+      reviewMode: "auto" | "manual"
+    ): Promise<QualificationRun> {
+      if (!interactive) {
+        throw new Error("queueInteractiveTask requires interactive mode");
+      }
+      const board = workspace.getBoard(boardId);
+      const directory = board?.repo.worktree ?? board?.repo.directory;
+      if (!directory) {
+        throw new Error("interactive fixture board has no checkout");
+      }
+      const response = queueBoardPromptResponseSchema.parse(
+        await request("/tasks", { boardId, directory, text, reviewMode })
+      );
+      return {
+        boardId: response.boardId,
+        sessionId: response.sessionId,
+        taskId: response.taskId,
+      };
+    }
+
     return {
       close,
       engine,
@@ -577,6 +605,29 @@ export async function startPhase6Harness({
       root,
       serveBaseUrl: base,
       accessToken: token,
+      queueInteractiveTask,
+      async finalizeReview(
+        boardId: string,
+        taskId: string,
+        plan: string,
+        answers: string[] = []
+      ) {
+        if (!interactive) {
+          throw new Error("finalizeReview requires interactive mode");
+        }
+        await request(
+          `/boards/${encodeURIComponent(boardId)}/tasks/${encodeURIComponent(taskId)}/finalize-review`,
+          { plan, answers }
+        );
+      },
+      async approvePermission(sessionId: string, requestId: string) {
+        if (!interactive) {
+          throw new Error("approvePermission requires interactive mode");
+        }
+        await request(`/tasks/${encodeURIComponent(sessionId)}/approve`, {
+          requestID: requestId,
+        });
+      },
       appendBatch(count: number) {
         requirePrepopulatedRuns("appendBatch");
         for (let index = 0; index < count; index += 1) {

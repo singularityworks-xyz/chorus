@@ -6,15 +6,21 @@ import { z } from "zod";
 interface FixtureSession {
   approved: boolean;
   busy: boolean;
+  canStreamReasoning: boolean;
+  currentMessageId: string;
+  currentReasoningPartId: string;
+  currentTextPartId: string;
   prompted: boolean;
   reasoning: string;
   session: Session;
   text: string;
+  turnNumber: number;
 }
 
 const SESSION_ROUTE = /^\/session\/([^/]+)(?:\/(.+))?$/;
 const PERMISSION_ROUTE = /^\/permission\/permission-(session-\d+)\/reply$/;
 const createSchema = z.object({ title: z.string().optional() });
+const promptSchema = z.object({ agent: z.string().optional() });
 const replySchema = z.object({ reply: z.enum(["once", "always", "reject"]) });
 const revertSchema = z.object({
   messageID: z.string(),
@@ -33,6 +39,7 @@ export function startScriptedEngine() {
   const encoder = new TextEncoder();
   let eventNumber = 0;
   let activeReasoningCursor = 0;
+  const pendingPlanTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   function emit(directory: string, event: Event) {
     const frame = encoder.encode(`data: ${JSON.stringify(event)}\n\n`);
@@ -59,8 +66,8 @@ export function startScriptedEngine() {
 
   function part(entry: FixtureSession) {
     return {
-      id: `part-${entry.session.id}`,
-      messageID: `message-${entry.session.id}`,
+      id: entry.currentTextPartId,
+      messageID: entry.currentMessageId,
       sessionID: entry.session.id,
       type: "text" as const,
       text: entry.text,
@@ -69,8 +76,8 @@ export function startScriptedEngine() {
 
   function reasoningPart(entry: FixtureSession) {
     return {
-      id: `reasoning-${entry.session.id}`,
-      messageID: `message-${entry.session.id}`,
+      id: entry.currentReasoningPartId,
+      messageID: entry.currentMessageId,
       sessionID: entry.session.id,
       type: "reasoning" as const,
       text: entry.reasoning,
@@ -78,29 +85,37 @@ export function startScriptedEngine() {
     };
   }
 
-  function begin(entry: FixtureSession) {
-    const sessionID = entry.session.id;
+  function startTurn(entry: FixtureSession, agent: "build" | "plan") {
+    const pendingPlanTimer = pendingPlanTimers.get(entry.session.id);
+    if (pendingPlanTimer) {
+      clearTimeout(pendingPlanTimer);
+      pendingPlanTimers.delete(entry.session.id);
+    }
+    entry.turnNumber += 1;
+    entry.currentMessageId = `message-${entry.session.id}-${entry.turnNumber}`;
+    entry.currentReasoningPartId = `reasoning-${entry.session.id}-${entry.turnNumber}`;
+    entry.currentTextPartId = `part-${entry.session.id}-${entry.turnNumber}`;
+    entry.reasoning = "";
+    entry.text = "";
+    entry.approved = false;
+    entry.canStreamReasoning = agent === "plan";
     entry.prompted = true;
-    writeFileSync(
-      join(entry.session.directory, FIXTURE_CHANGE_PATH),
-      `${sessionID}\n`
-    );
     status(entry, true);
     emit(entry.session.directory, {
       id: eventId(),
       type: "message.updated",
       properties: {
-        sessionID,
+        sessionID: entry.session.id,
         info: {
-          id: `message-${sessionID}`,
-          sessionID,
+          id: entry.currentMessageId,
+          sessionID: entry.session.id,
           role: "assistant",
           time: { created: Date.now() },
-          parentID: `user-${sessionID}`,
+          parentID: `user-${entry.session.id}-${entry.turnNumber}`,
           modelID: "scripted",
           providerID: "fixture",
-          mode: "build",
-          agent: "build",
+          mode: agent,
+          agent,
           path: { cwd: entry.session.directory, root: entry.session.directory },
           cost: 0,
           tokens: {
@@ -112,6 +127,55 @@ export function startScriptedEngine() {
         },
       },
     });
+  }
+
+  function beginPlan(entry: FixtureSession) {
+    startTurn(entry, "plan");
+    entry.reasoning =
+      "I’m checking the task scope and mapping a safe implementation sequence.";
+    emit(entry.session.directory, {
+      id: eventId(),
+      type: "message.part.updated",
+      properties: {
+        sessionID: entry.session.id,
+        part: reasoningPart(entry),
+        time: Date.now(),
+      },
+    });
+    entry.text = [
+      "1. Inspect the affected board flow and its existing state transitions.",
+      "2. Make the smallest focused change while preserving the shared provider selection.",
+      "3. Verify the interaction and confirm failures remain visible and recoverable.",
+    ].join("\n");
+    emit(entry.session.directory, {
+      id: eventId(),
+      type: "message.part.updated",
+      properties: {
+        sessionID: entry.session.id,
+        part: part(entry),
+        time: Date.now(),
+      },
+    });
+
+    const turnNumber = entry.turnNumber;
+    const timer = setTimeout(() => {
+      pendingPlanTimers.delete(entry.session.id);
+      if (entry.turnNumber !== turnNumber) {
+        return;
+      }
+      entry.canStreamReasoning = false;
+      status(entry, false);
+    }, 900);
+    pendingPlanTimers.set(entry.session.id, timer);
+  }
+
+  function begin(entry: FixtureSession) {
+    startTurn(entry, "build");
+    const sessionID = entry.session.id;
+    writeFileSync(
+      join(entry.session.directory, FIXTURE_CHANGE_PATH),
+      `${sessionID}\n`
+    );
     entry.reasoning = "I’m mapping the request to the repository structure.";
     emit(entry.session.directory, {
       id: eventId(),
@@ -198,9 +262,15 @@ export function startScriptedEngine() {
     switch (match?.[2]) {
       case undefined:
         return Response.json(entry.session);
-      case "prompt_async":
-        begin(entry);
+      case "prompt_async": {
+        const body = promptSchema.parse(await request.json());
+        if (body.agent === "plan") {
+          beginPlan(entry);
+        } else {
+          begin(entry);
+        }
         return new Response(null, { status: 204 });
+      }
       case "abort":
         status(entry, false);
         return Response.json(true);
@@ -389,7 +459,12 @@ export function startScriptedEngine() {
             reasoning: "",
             busy: false,
             approved: false,
+            canStreamReasoning: false,
+            currentMessageId: `message-${id}-0`,
+            currentReasoningPartId: `reasoning-${id}-0`,
+            currentTextPartId: `part-${id}-0`,
             prompted: false,
+            turnNumber: 0,
           });
           return Response.json(session);
         }
@@ -411,8 +486,8 @@ export function startScriptedEngine() {
       type: "message.part.delta",
       properties: {
         sessionID,
-        messageID: `message-${sessionID}`,
-        partID: `part-${sessionID}`,
+        messageID: entry.currentMessageId,
+        partID: entry.currentTextPartId,
         field: "text",
         delta,
       },
@@ -420,7 +495,7 @@ export function startScriptedEngine() {
   }
   function appendReasoningDelta(sessionID: string, delta: string) {
     const entry = sessions.get(sessionID);
-    if (!(entry?.busy && entry.approved)) {
+    if (!(entry?.busy && (entry.approved || entry.canStreamReasoning))) {
       throw new Error("scripted session is not approved and running");
     }
     entry.reasoning += delta;
@@ -429,8 +504,8 @@ export function startScriptedEngine() {
       type: "message.part.delta",
       properties: {
         sessionID,
-        messageID: `message-${sessionID}`,
-        partID: `reasoning-${sessionID}`,
+        messageID: entry.currentMessageId,
+        partID: entry.currentReasoningPartId,
         field: "text",
         delta,
       },
@@ -438,7 +513,8 @@ export function startScriptedEngine() {
   }
   function appendActiveReasoningDelta(delta: string): boolean {
     const activeSessions = [...sessions.values()].filter(
-      (candidate) => candidate.busy && candidate.approved
+      (candidate) =>
+        candidate.busy && (candidate.approved || candidate.canStreamReasoning)
     );
     if (activeSessions.length === 0) {
       return false;
@@ -465,6 +541,10 @@ export function startScriptedEngine() {
       status(entry, false);
     },
     async stop() {
+      for (const timer of pendingPlanTimers.values()) {
+        clearTimeout(timer);
+      }
+      pendingPlanTimers.clear();
       for (const listeners of streams.values()) {
         for (const controller of listeners) {
           controller.close();

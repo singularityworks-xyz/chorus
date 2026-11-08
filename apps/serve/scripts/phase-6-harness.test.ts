@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { OpenCodeAdapter } from "@chorus/oc-adapter";
 import { startPhase6Harness, waitForQualification } from "./phase-6-harness";
 
@@ -42,6 +44,105 @@ test("interactive browser fixture starts with idle boards and one shared default
     );
     await expect(harness.complete()).rejects.toThrow(
       "complete requires prepopulated qualification runs"
+    );
+  } finally {
+    await harness.close();
+  }
+}, 30_000);
+
+test("manual review streams a plan and finalizes into an approved build run", async () => {
+  const harness = await startPhase6Harness({ interactive: true });
+  try {
+    const boardId = harness.boardIds[0];
+    expect(boardId).toBeDefined();
+    if (!boardId) {
+      throw new Error("interactive fixture has no board");
+    }
+
+    const run = await harness.queueInteractiveTask(
+      boardId,
+      "Implement the requested change after plan review",
+      "manual"
+    );
+    await waitForQualification(
+      () =>
+        harness.store
+          .getBoard(boardId)
+          ?.columns.approve.some((task) => task.id === run.taskId) ?? false,
+      5000,
+      () => harness.store.getBoard(boardId)?.columns
+    );
+
+    const reviewBoard = harness.store.getBoard(boardId);
+    const reviewTask = reviewBoard?.columns.approve.find(
+      (task) => task.id === run.taskId
+    );
+    if (!reviewTask) {
+      throw new Error("manual review plan did not reach the approval lane");
+    }
+    expect(reviewTask?.plan).toContain("Inspect the affected board flow");
+    expect(
+      reviewTask?.run?.steps.some(
+        (step) =>
+          step.kind === "thinking" &&
+          step.content?.includes("mapping a safe implementation sequence")
+      )
+    ).toBe(true);
+    const checkout = reviewBoard?.repo.worktree ?? reviewBoard?.repo.directory;
+    expect(checkout).toBeDefined();
+    if (!checkout) {
+      throw new Error("manual review board has no checkout");
+    }
+    expect(existsSync(join(checkout, "result.txt"))).toBe(false);
+
+    const finalizedPlan = `${reviewTask.plan}\n\nUser refinement: preserve current board behavior.`;
+    await harness.finalizeReview(boardId, run.taskId, finalizedPlan);
+    await waitForQualification(
+      () => {
+        const task = harness.store
+          .getBoard(boardId)
+          ?.columns.approve.find((candidate) => candidate.id === run.taskId);
+        return Boolean(
+          task?.reviewApproved && (task.pendingApprovals?.length ?? 0) > 0
+        );
+      },
+      5000,
+      () => harness.store.getBoard(boardId)?.columns
+    );
+
+    await harness.approvePermission(
+      run.sessionId,
+      `permission-${run.sessionId}`
+    );
+    await waitForQualification(
+      () =>
+        harness.store
+          .getBoard(boardId)
+          ?.columns.in_progress.some((task) => task.id === run.taskId) ?? false,
+      5000,
+      () => harness.store.getBoard(boardId)?.columns
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 950));
+    harness.engine.appendActiveReasoningDelta(
+      " Implementation reasoning is streaming after approval."
+    );
+    await waitForQualification(
+      () => {
+        const task = harness.store
+          .getBoard(boardId)
+          ?.columns.in_progress.find(
+            (candidate) => candidate.id === run.taskId
+          );
+        return Boolean(
+          task?.run?.steps.some(
+            (step) =>
+              step.kind === "thinking" &&
+              step.content?.includes("Implementation reasoning is streaming")
+          )
+        );
+      },
+      5000,
+      () => harness.store.getBoard(boardId)?.columns
     );
   } finally {
     await harness.close();
