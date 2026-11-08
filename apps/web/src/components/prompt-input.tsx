@@ -5,7 +5,7 @@ import {
   type OpencodeModelSummary,
   opencodeModelCatalogSchema,
 } from "@chorus/contracts";
-import { ArrowUp, Mic, MoreHorizontal, XIcon } from "lucide-react";
+import { ArrowUp, Mic, XIcon } from "lucide-react";
 import posthog from "posthog-js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CommandPalette } from "@/components/command-palette";
@@ -165,6 +165,9 @@ export function PromptInput() {
 
   const { isRecording, isTranscribing, startRecording, stopRecording } =
     useVoiceRecording(handleTranscriptionComplete);
+  const voiceActionLabel = isRecording
+    ? "Stop voice input"
+    : "Start voice input";
 
   useEffect(() => {
     let isCancelled = false;
@@ -577,8 +580,10 @@ export function PromptInput() {
                           : ""}
                       </span>
                       <button
+                        aria-label={`Remove ${part.filename} attachment`}
                         className="ml-0.5 rounded-sm p-0.5 opacity-0 transition-opacity hover:bg-white/10 group-hover:opacity-100"
                         onClick={() => removePart(part.id)}
+                        title={`Remove ${part.filename}`}
                         type="button"
                       >
                         <XIcon className="h-3 w-3" />
@@ -685,6 +690,7 @@ export function PromptInput() {
                     </Select>
                   </div>
                   <Button
+                    aria-label={voiceActionLabel}
                     className={`h-7 w-7 rounded-xs hover:text-white/90 dark:hover:text-white/90 ${
                       isRecording
                         ? "bg-red-500/20 text-red-400 hover:bg-red-500/30 dark:bg-red-500/20 dark:text-red-400 dark:hover:bg-red-500/30"
@@ -693,6 +699,7 @@ export function PromptInput() {
                     disabled={isTranscribing}
                     onClick={handleVoiceButtonClick}
                     size="icon"
+                    title={voiceActionLabel}
                     type="button"
                     variant="ghost"
                   >
@@ -700,21 +707,15 @@ export function PromptInput() {
                       className={`h-4 w-4 ${isRecording ? "animate-pulse" : ""}`}
                     />
                   </Button>
-                  <Button
-                    className="h-7 w-7 rounded-xs text-white/50 hover:bg-white/10 hover:text-white/90 dark:text-white/50 dark:hover:bg-white/10 dark:hover:text-white/90"
-                    size="icon"
-                    type="button"
-                    variant="ghost"
-                  >
-                    <MoreHorizontal className="h-4 w-4" />
-                  </Button>
                   <button
+                    aria-label="Send prompt"
                     className="h-7 w-7 rounded-xs bg-[#0f0f0f]/90 text-white/70 shadow-none transition-colors hover:bg-[#161616]/95 hover:text-white/90 focus:outline-none disabled:opacity-30"
                     disabled={
                       !(prompt.trim() && selectedBoard) ||
                       isBusy ||
                       hasActiveRun
                     }
+                    title="Send prompt"
                     type="submit"
                   >
                     <ArrowUp className="h-4 w-4" />
