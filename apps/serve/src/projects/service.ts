@@ -16,7 +16,6 @@ import type {
 import { createLogger } from "@chorus/logger";
 import { OpenCodeAdapter } from "@chorus/oc-adapter";
 import { AuthLoginLauncher } from "./auth-login";
-import { OpenCodeConfigStore } from "./config-store";
 import { OpenCodeCredentialStore } from "./credential-store";
 import type { FolderPicker } from "./folder-picker";
 import type { RepositoryRegistry } from "./repository-registry";
@@ -53,7 +52,6 @@ export class ProjectService {
   readonly #registerPickedRepository: (directory: string) => Promise<string>;
   readonly #authLoginLauncher = new AuthLoginLauncher();
   readonly #credentialStore = new OpenCodeCredentialStore();
-  readonly #configStore = new OpenCodeConfigStore();
   readonly #engineAdapterForDirectory:
     | ((directory: string) => Promise<OpenCodeAdapter>)
     | undefined;
@@ -135,12 +133,14 @@ export class ProjectService {
 
   listConfiguredProviders(): Promise<OpencodeConfiguredProviderCatalog> {
     logger.debug("list-configured-providers:start");
-    return this.#configStore.listConfiguredProviders().then((catalog) => {
-      logger.info("list-configured-providers:done", {
-        providerCount: catalog.providerIDs.length,
+    return this.#adapterForDirectory(this.#defaultDirectory)
+      .then((adapter) => adapter.config.listConfiguredProviders())
+      .then((catalog) => {
+        logger.info("list-configured-providers:done", {
+          providerCount: catalog.providerIDs.length,
+        });
+        return catalog;
       });
-      return catalog;
-    });
   }
 
   async reloadInstance(directory: string): Promise<boolean> {
@@ -179,7 +179,7 @@ export class ProjectService {
       await this.reloadInstance(input.directory);
     }
 
-    const catalog = await this.#configStore.listConfiguredProviders();
+    const catalog = await adapter.config.listConfiguredProviders();
 
     logger.info("configure-provider:done", {
       directory: input.directory ?? null,
