@@ -13,6 +13,7 @@ import {
   workspaceSnapshotSchema,
 } from "@chorus/contracts";
 import { OpenCodeAdapter } from "@chorus/oc-adapter";
+import { cors } from "@elysiajs/cors";
 import { Elysia } from "elysia";
 import { authGuardHandler } from "../src/auth/guard";
 import { DevicePairingTokenStore } from "../src/auth/pairing";
@@ -31,6 +32,7 @@ import { WorkspaceHub } from "../src/ws/hub";
 import { startScriptedEngine } from "./fixtures/opencode-engine";
 
 const SNAPSHOT_HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const BROWSER_FIXTURE_ORIGIN = "http://localhost:3001";
 
 interface QualificationRun {
   boardId: string;
@@ -248,13 +250,21 @@ export async function startPhase6Harness() {
     const token = crypto.randomUUID();
     const ticketOptions = { store: workspace.meta, now: Date.now };
     const app = new Elysia()
+      .use(
+        cors({
+          origin: [BROWSER_FIXTURE_ORIGIN],
+          credentials: true,
+          maxAge: 86_400,
+          methods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
+        })
+      )
       .resolve({ as: "global" }, authGuardHandler({ token, ticketOptions }))
       .use(
         createAuthRoutes({
           token,
           ticketStore: workspace.meta,
           isProduction: false,
-          localOrigins: [],
+          localOrigins: [BROWSER_FIXTURE_ORIGIN],
           pairingTokenStore: new DevicePairingTokenStore(),
         })
       )
