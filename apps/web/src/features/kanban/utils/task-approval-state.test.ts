@@ -21,19 +21,26 @@ describe("task approval state", () => {
     const task = { pendingApprovals: [questionApproval] };
 
     expect(hasPendingQuestion(task)).toBe(true);
-    expect(shouldShowReviewActions(task, "auto")).toBe(false);
+    expect(shouldShowReviewActions(task)).toBe(false);
   });
 
   test("keeps permission actions available", () => {
     const task = { pendingApproval: permissionApproval };
 
     expect(hasPendingQuestion(task)).toBe(false);
-    expect(shouldShowReviewActions(task, "auto")).toBe(true);
+    expect(shouldShowReviewActions(task)).toBe(true);
   });
 
   test("keeps manual plan review actions available", () => {
+    expect(shouldShowReviewActions({ outcome: "awaiting_review" })).toBe(true);
+  });
+
+  test("does not show plan controls after implementation was accepted", () => {
     expect(
-      shouldShowReviewActions({ outcome: "awaiting_review" }, "manual")
-    ).toBe(true);
+      shouldShowReviewActions({
+        outcome: "awaiting_review",
+        reviewApproved: true,
+      })
+    ).toBe(false);
   });
 });

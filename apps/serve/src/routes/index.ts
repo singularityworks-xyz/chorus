@@ -35,6 +35,7 @@ function boardTaskCommandStatus(error: BoardTaskCommandError): number {
     case "task_not_found":
       return 404;
     case "task_prompt_missing":
+    case "task_review_invalid":
       return 422;
     case "prompt_dispatch_failed":
       return 502;
@@ -181,6 +182,33 @@ export function createHttpRoutes(
       )
 
       .post(
+        "/boards/:boardID/tasks/:taskID/finalize-review",
+        async ({ params, body }) => ({
+          ...(await boardTasks.finalizeReview(
+            params.boardID,
+            params.taskID,
+            body
+          )),
+          accepted: true,
+        }),
+        {
+          params: t.Object({ boardID: t.String(), taskID: t.String() }),
+          body: t.Object({
+            plan: t.String(),
+            answers: t.Optional(t.Array(t.String())),
+          }),
+        }
+      )
+
+      .post(
+        "/boards/:boardID/tasks/:taskID/reject-review",
+        ({ params }) => boardTasks.rejectReview(params.boardID, params.taskID),
+        {
+          params: t.Object({ boardID: t.String(), taskID: t.String() }),
+        }
+      )
+
+      .post(
         "/tasks/:sessionID/approve",
         async ({ params, body }) => {
           const result = await bridge.replyPermission({
@@ -246,44 +274,6 @@ export function createHttpRoutes(
           body: t.Object({
             requestID: t.String(),
             message: t.Optional(t.String()),
-          }),
-        }
-      )
-
-      .post(
-        "/tasks/:sessionID/finalize-review",
-        async ({ params, body }) => {
-          logger.info("finalize-review", {
-            sessionID: params.sessionID,
-            planPreview: body.plan?.slice(0, 100),
-          });
-
-          await bridge.promptSessionAsync({
-            directory: await directoryFor(params.sessionID),
-            sessionID: params.sessionID,
-            text: `The plan has been reviewed and finalized. Here is the final plan:\n\n${body.plan}\n\n${body.questions && body.questions.length > 0 ? `Answers to your questions:\n${body.questions.map((q: { question: string; answer: string }) => `- ${q.question}: ${q.answer}`).join("\n")}\n\n` : ""}Please proceed with implementing this plan.`,
-          });
-
-          return {
-            sessionID: params.sessionID,
-            accepted: true,
-            timestamp: Date.now(),
-          };
-        },
-        {
-          params: t.Object({
-            sessionID: t.String(),
-          }),
-          body: t.Object({
-            plan: t.String(),
-            questions: t.Optional(
-              t.Array(
-                t.Object({
-                  question: t.String(),
-                  answer: t.String(),
-                })
-              )
-            ),
           }),
         }
       )

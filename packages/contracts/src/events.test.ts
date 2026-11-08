@@ -81,6 +81,9 @@ const EVENT_CORPUS: Record<WorkspaceEvent["type"], WorkspaceEvent> = {
     taskId: "task-1",
     plan: "do the thing",
     questions: ["which one?"],
+    questionAnswers: ["the first"],
+    reviewApproved: true,
+    errorMessage: null,
   },
   "card.created": {
     type: "card.created",
@@ -135,6 +138,13 @@ const EVENT_CORPUS: Record<WorkspaceEvent["type"], WorkspaceEvent> = {
     boardId: "board-1",
     taskId: "task-1",
     error: "boom",
+  },
+  "card.aborted": {
+    type: "card.aborted",
+    ts: TS,
+    boardId: "board-1",
+    taskId: "task-1",
+    reason: "rejected",
   },
   "run.started": {
     type: "run.started",

@@ -4,6 +4,7 @@ export interface TaskApprovalState {
   outcome?: TaskOutcome;
   pendingApproval?: PendingApprovalRequest;
   pendingApprovals?: PendingApprovalRequest[];
+  reviewApproved?: boolean;
 }
 
 function pendingApprovals(task: TaskApprovalState): PendingApprovalRequest[] {
@@ -19,10 +20,7 @@ export function hasPendingQuestion(task: TaskApprovalState): boolean {
   );
 }
 
-export function shouldShowReviewActions(
-  task: TaskApprovalState,
-  reviewMode: "manual" | "auto"
-): boolean {
+export function shouldShowReviewActions(task: TaskApprovalState): boolean {
   const approvals = pendingApprovals(task);
   const hasQuestion = approvals.some(
     (approval) => approval.kind === "question"
@@ -31,9 +29,11 @@ export function shouldShowReviewActions(
     (approval) => approval.kind === "permission"
   );
 
-  return (
-    !hasQuestion ||
-    hasPermission ||
-    (reviewMode === "manual" && task.outcome === "awaiting_review")
-  );
+  if (hasQuestion) {
+    return hasPermission;
+  }
+  if (task.outcome === "awaiting_review") {
+    return task.reviewApproved !== true;
+  }
+  return true;
 }

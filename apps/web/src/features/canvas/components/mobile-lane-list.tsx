@@ -157,7 +157,6 @@ function MobileBoardBody({
     columns,
     onUpdateColumns,
     sessionId,
-    reviewMode,
   });
 
   // `KanbanColumnBody` reads review mode as a prop rather than owning it, so the

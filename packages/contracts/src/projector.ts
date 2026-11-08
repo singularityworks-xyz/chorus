@@ -315,6 +315,14 @@ function resolveTaskId(
   return board.session.currentTaskId ?? null;
 }
 
+function taskNeedsManualReview(
+  task: Task | null | undefined,
+  boardReviewMode: WorkspaceBoard["reviewMode"]
+): boolean {
+  const reviewMode = task?.promptInput?.reviewMode ?? boardReviewMode;
+  return reviewMode === "manual" && task?.reviewApproved !== true;
+}
+
 type SessionScopedEvent = Extract<
   BoardScopedEvent,
   { type: `session.${string}` }
@@ -394,8 +402,13 @@ function applyBoardScopedEvent(
         ...board,
         columns: withTaskUpdated(board.columns, event.taskId, (task) => ({
           ...task,
+          ...(event.errorMessage === undefined
+            ? {}
+            : { errorMessage: event.errorMessage ?? undefined }),
           plan: event.plan,
+          questionAnswers: event.questionAnswers ?? task.questionAnswers,
           questions: event.questions ?? task.questions,
+          reviewApproved: event.reviewApproved ?? task.reviewApproved,
         })),
       };
 
@@ -564,6 +577,28 @@ function applyCardEvent(
         },
       };
 
+    case "card.aborted": {
+      const columns = withTaskUpdated(
+        moveCard(board.columns, event.taskId, "done"),
+        event.taskId,
+        (task) => ({
+          ...task,
+          pendingApproval: undefined,
+          pendingApprovals: [],
+          errorMessage: undefined,
+          outcome: "aborted",
+        })
+      );
+      const releasesTask = board.session.currentTaskId === event.taskId;
+      return {
+        ...board,
+        columns,
+        session: releasesTask
+          ? { ...board.session, currentTaskId: undefined }
+          : board.session,
+      };
+    }
+
     case "run.started": {
       const columns = withTaskUpdated(board.columns, event.taskId, (task) => {
         const run = ensureRun(task, {
@@ -652,7 +687,7 @@ function applySessionEvent(
       }
 
       const task = findTaskInColumns(board.columns, taskId);
-      const isManualReview = board.reviewMode === "manual";
+      const isManualReview = taskNeedsManualReview(task, board.reviewMode);
       const targetColumn: WorkspaceColumnId = isManualReview
         ? "approve"
         : "done";
@@ -663,6 +698,7 @@ function applySessionEvent(
         columns = withTaskUpdated(columns, taskId, (entry) => ({
           ...entry,
           outcome: isManualReview ? "awaiting_review" : "succeeded",
+          reviewApproved: isManualReview ? false : entry.reviewApproved,
         }));
       }
       if (isManualReview && planText && task) {

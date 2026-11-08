@@ -334,8 +334,10 @@ export const taskSchema = z.object({
   pendingApproval: pendingApprovalRequestSchema.optional(),
   pendingApprovals: z.array(pendingApprovalRequestSchema).optional(),
   promptInput: taskPromptInputSchema.optional(),
+  questionAnswers: z.array(z.string()).optional(),
   questions: z.array(z.string()).optional(),
   retryOf: z.string().min(1).optional(),
+  reviewApproved: z.boolean().optional(),
   run: agentRunContextSchema.optional(),
   runId: z.string().min(1).optional(),
   outcome: taskOutcomeSchema.optional(),
@@ -542,6 +544,11 @@ export const boardTaskCommandResponseSchema = z.object({
   timestamp: z.number(),
 });
 
+export const boardTaskFinalizeReviewInputSchema = z.object({
+  answers: z.array(z.string()).optional(),
+  plan: z.string(),
+});
+
 export type RepoProject = z.infer<typeof repoProjectSchema>;
 export type RepoContext = z.infer<typeof repoContextSchema>;
 export type BoardSeed = z.infer<typeof boardSeedSchema>;
@@ -609,4 +616,7 @@ export type QueueBoardPromptResponse = z.infer<
 >;
 export type BoardTaskCommandResponse = z.infer<
   typeof boardTaskCommandResponseSchema
+>;
+export type BoardTaskFinalizeReviewInput = z.infer<
+  typeof boardTaskFinalizeReviewInputSchema
 >;

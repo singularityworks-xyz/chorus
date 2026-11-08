@@ -397,7 +397,6 @@ function KanbanCardNodeComponent({
     boardId: cardData.boardId,
     columns: cardData.columns,
     onUpdateColumns: cardData.onUpdateColumns,
-    reviewMode,
     sessionId: cardData.sessionId,
   });
 

@@ -1,10 +1,6 @@
 "use client";
 
-import type {
-  PendingApprovalRequest,
-  TaskOutcome,
-  TaskPromptInput,
-} from "@chorus/contracts";
+import type { Task as ContractTask } from "@chorus/contracts";
 import { BorderlessFileView, ChorusMonaco } from "@chorus/monaco";
 import {
   closestCorners,
@@ -64,7 +60,6 @@ import {
 } from "@/components/ui/resizable";
 import {
   AgentOutputCard,
-  type AgentRunContext,
   type AgentStep,
 } from "@/features/kanban/components/agent-output-card";
 import type { KanbanTaskActionState } from "@/features/kanban/hooks/use-kanban-card-actions";
@@ -123,41 +118,7 @@ export interface ChangedFile {
   removed: number;
 }
 
-export interface Task {
-  /** Files changed by the agent — shown in review cards */
-  changedFiles?: ChangedFile[];
-  errorMessage?: string;
-  id: string;
-  label: string;
-  labelVariant:
-    | "primary-light"
-    | "success-light"
-    | "warning-light"
-    | "destructive-light"
-    | "info-light";
-  /** Lines added by the agent run — shown in done cards */
-  linesAdded?: number;
-  /** Lines removed by the agent run — shown in done cards */
-  linesRemoved?: number;
-  outcome?: TaskOutcome;
-  pendingApproval?: PendingApprovalRequest;
-  pendingApprovals?: PendingApprovalRequest[];
-  /** AI-generated plan for the task — shown in review cards for MANUAL mode */
-  plan?: string;
-  promptInput?: TaskPromptInput;
-  /** Questions from AI that need user input — shown in review cards for MANUAL mode */
-  questions?: string[];
-  retryOf?: string;
-  /** Live or recorded run state shown in the in-progress card */
-  run?: AgentRunContext;
-  /** Links to an OpenCode sessionId for live agent output */
-  runId?: string;
-  /** Short paragraph describing what the agent did — shown in done cards */
-  summary?: string;
-  /** Files tagged/referenced by this task — shown in queue cards */
-  taggedFiles?: string[];
-  title: string;
-}
+export type Task = ContractTask;
 
 export type Columns = Record<string, Task[]>;
 
@@ -740,11 +701,11 @@ function TaskCard({
     : { added: task.linesAdded ?? 0, removed: task.linesRemoved ?? 0 };
   const hasQuestion = hasPendingQuestion(task);
   const showReviewActions =
-    showApprovalControls && shouldShowReviewActions(task, reviewMode);
+    showApprovalControls && shouldShowReviewActions(task);
 
   const [editedPlan, setEditedPlan] = useState(task.plan ?? "");
   const [questionAnswers, setQuestionAnswers] = useState<string[]>(
-    task.questions?.map(() => "") ?? []
+    task.questionAnswers ?? task.questions?.map(() => "") ?? []
   );
   const [showPlanPopup, setShowPlanPopup] = useState(false);
 
@@ -753,10 +714,15 @@ function TaskCard({
   }, [task.plan]);
 
   useEffect(() => {
-    setQuestionAnswers(task.questions?.map(() => "") ?? []);
-  }, [task.questions]);
+    setQuestionAnswers(
+      task.questionAnswers ?? task.questions?.map(() => "") ?? []
+    );
+  }, [task.questionAnswers, task.questions]);
 
-  const isManualReview = showApprovalControls && reviewMode === "manual";
+  const isManualReview =
+    showApprovalControls &&
+    task.outcome === "awaiting_review" &&
+    task.reviewApproved !== true;
 
   const handleApproveClick = () => {
     if (isManualReview && onApprove) {
@@ -856,8 +822,24 @@ function TaskCard({
               </span>
             </div>
           )}
+          {task.errorMessage && (
+            <p
+              className="rounded-xs border border-rose-500/15 bg-rose-500/[0.03] px-2.5 py-2 text-[0.68rem] text-rose-300/85 leading-relaxed"
+              role="status"
+            >
+              {task.errorMessage}
+            </p>
+          )}
         </div>
       )}
+
+      {showApprovalControls &&
+        task.outcome === "awaiting_review" &&
+        task.reviewApproved === true && (
+          <p className="border-white/5 border-t pt-2.5 text-[0.7rem] text-emerald-300/75">
+            Implementation accepted. Waiting for task activity…
+          </p>
+        )}
 
       {showApprovalControls &&
         reviewMode === "auto" &&

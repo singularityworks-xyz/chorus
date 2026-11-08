@@ -1,12 +1,16 @@
 import { resolve } from "node:path";
 import type {
   BoardTaskCommandResponse,
+  BoardTaskFinalizeReviewInput,
+  ModelSelection,
   QueueBoardPromptInput,
   QueueBoardPromptResponse,
+  Task,
   WorkspaceBoard,
   WorkspaceMutation,
 } from "@chorus/contracts";
 import {
+  boardTaskFinalizeReviewInputSchema,
   findTaskInColumns,
   queueBoardPromptInputSchema,
 } from "@chorus/contracts";
@@ -62,7 +66,10 @@ export class BoardTaskCommandError extends Error {
     | "task_not_found"
     | "task_not_queued"
     | "task_not_retryable"
+    | "task_not_reviewable"
+    | "task_session_missing"
     | "task_prompt_missing"
+    | "task_review_invalid"
     | "prompt_dispatch_failed";
 
   constructor(code: BoardTaskCommandError["code"], message: string) {
@@ -73,6 +80,18 @@ export class BoardTaskCommandError extends Error {
 }
 
 const BOARD_ABORT_TIMEOUT_MS = 5000;
+
+interface ManualReviewContext {
+  answers: string[];
+  board: WorkspaceBoard;
+  boardId: string;
+  directory: string;
+  model: ModelSelection;
+  questions: string[];
+  sessionId: string;
+  task: Task;
+  taskId: string;
+}
 
 type SdkPart =
   | { text: string; type: "text" }
@@ -170,19 +189,28 @@ function normalize(path: string): string {
 }
 
 /**
- * Whether the board's current task is still somewhere it can receive activity.
+ * Whether the board has active work or an unhandled manual plan review.
  *
  * A card in `done` is finished, so it is not a reason to skip creating a card for
  * new work.
  */
-function hasLiveTask(board: WorkspaceBoard): boolean {
+function hasLiveTask(board: WorkspaceBoard, excludeTaskId?: string): boolean {
   const currentTaskId = board.session.currentTaskId;
-  if (!currentTaskId) {
-    return false;
+  if (currentTaskId && currentTaskId !== excludeTaskId) {
+    const currentTask = findTaskInColumns(board.columns, currentTaskId);
+    if (
+      currentTask &&
+      !(board.columns.done ?? []).some((task) => task.id === currentTaskId)
+    ) {
+      return true;
+    }
   }
 
-  return Object.entries(board.columns).some(([column, cards]) =>
-    column === "done" ? false : cards.some((card) => card.id === currentTaskId)
+  return (board.columns.approve ?? []).some(
+    (task) =>
+      task.id !== excludeTaskId &&
+      task.outcome === "awaiting_review" &&
+      task.reviewApproved !== true
   );
 }
 
@@ -736,6 +764,385 @@ export class BoardTaskService {
         taskId: response.taskId,
         timestamp: response.timestamp,
       };
+    });
+  }
+
+  finalizeReview(
+    boardId: string,
+    taskId: string,
+    rawInput: BoardTaskFinalizeReviewInput
+  ): Promise<BoardTaskCommandResponse> {
+    this.assertBoardOpen(boardId);
+    const parsed = boardTaskFinalizeReviewInputSchema.safeParse(rawInput);
+    if (!parsed.success) {
+      throw new BoardTaskCommandError(
+        "task_review_invalid",
+        "The plan review data is invalid. Refresh the card and try again."
+      );
+    }
+    return this.#withBoardOperation(boardId, () =>
+      this.#finalizeReviewInOperation(boardId, taskId, parsed.data)
+    );
+  }
+
+  async #finalizeReviewInOperation(
+    boardId: string,
+    taskId: string,
+    input: BoardTaskFinalizeReviewInput
+  ): Promise<BoardTaskCommandResponse> {
+    this.assertBoardOpen(boardId);
+    const context = this.#requireBoardTask(boardId, taskId);
+    const existingResponse = this.#alreadyRunningReview(context);
+    if (existingResponse) {
+      return existingResponse;
+    }
+
+    const review = this.#manualReviewContext(
+      context.board,
+      context.task,
+      input
+    );
+    await this.assertCheckoutAuthorized(review.directory);
+    await this.#bridge.subscribeDirectory(review.directory);
+
+    const reserved = await this.#reserveReviewContinuation(review, input.plan);
+    if (!reserved) {
+      return this.#resolveReviewReservationConflict(boardId, taskId);
+    }
+
+    await this.#dispatchReviewContinuation(review, input.plan);
+    this.#watchdog?.start(review.sessionId, {
+      boardId,
+      directory: review.directory,
+    });
+    return {
+      boardId,
+      sessionId: review.sessionId,
+      status: "accepted",
+      taskId,
+      timestamp: Date.now(),
+    };
+  }
+
+  #requireBoardTask(boardId: string, taskId: string) {
+    const board = this.#workspaceStore.getBoard(boardId);
+    const task = board ? findTaskInColumns(board.columns, taskId) : null;
+    if (!(board && task)) {
+      throw new BoardTaskCommandError(
+        "task_not_found",
+        "This task is no longer on the board. Refresh and try again."
+      );
+    }
+    return { board, task };
+  }
+
+  #alreadyRunningReview({
+    board,
+    task,
+  }: {
+    board: WorkspaceBoard;
+    task: Task;
+  }): BoardTaskCommandResponse | null {
+    if (
+      !(task.reviewApproved === true && board.session.currentTaskId === task.id)
+    ) {
+      return null;
+    }
+    const sessionId =
+      task.run?.sessionId ?? task.runId ?? board.session.sessionId;
+    if (!sessionId) {
+      throw new BoardTaskCommandError(
+        "task_session_missing",
+        "This task's provider session is no longer attached to the board. Refresh and try again."
+      );
+    }
+    return {
+      boardId: board.boardId,
+      sessionId,
+      status: "already_running",
+      taskId: task.id,
+      timestamp: Date.now(),
+    };
+  }
+
+  #manualReviewContext(
+    board: WorkspaceBoard,
+    task: Task,
+    input: BoardTaskFinalizeReviewInput
+  ): ManualReviewContext {
+    if (
+      !(board.columns.approve ?? []).some((entry) => entry.id === task.id) ||
+      task.outcome !== "awaiting_review" ||
+      task.reviewApproved === true
+    ) {
+      throw new BoardTaskCommandError(
+        "task_not_reviewable",
+        "This task is no longer waiting for plan review. Refresh the board."
+      );
+    }
+    if (hasLiveTask(board, task.id)) {
+      throw new BoardTaskCommandError(
+        "board_busy",
+        "Another task is already running on this board. Wait for it to finish before approving this plan."
+      );
+    }
+    const model = task.promptInput?.model;
+    if (!model) {
+      throw new BoardTaskCommandError(
+        "task_prompt_missing",
+        "The task's original model is unavailable, so Chorus cannot safely continue it. Start a new task from this prompt."
+      );
+    }
+    const sessionId = task.run?.sessionId ?? task.runId;
+    if (
+      !sessionId ||
+      (board.session.sessionId && board.session.sessionId !== sessionId)
+    ) {
+      throw new BoardTaskCommandError(
+        "task_session_missing",
+        "This task's provider session is no longer attached to the board. Refresh and try again."
+      );
+    }
+
+    const questions = task.questions ?? [];
+    const answers = input.answers ?? task.questionAnswers ?? [];
+    if (answers.length !== questions.length) {
+      throw new BoardTaskCommandError(
+        "task_review_invalid",
+        "Answer each plan question before continuing."
+      );
+    }
+    return {
+      answers,
+      board,
+      boardId: board.boardId,
+      directory: boardDirectory(board),
+      model,
+      questions,
+      sessionId,
+      task,
+      taskId: task.id,
+    };
+  }
+
+  #canReserveReview(currentBoard: WorkspaceBoard, review: ManualReviewContext) {
+    const currentTask = findTaskInColumns(currentBoard.columns, review.taskId);
+    return (
+      currentTask?.outcome === "awaiting_review" &&
+      currentTask.reviewApproved !== true &&
+      (currentBoard.columns.approve ?? []).some(
+        (entry) => entry.id === review.taskId
+      ) &&
+      !currentBoard.session.currentTaskId &&
+      !hasLiveTask(currentBoard, review.taskId)
+    );
+  }
+
+  #reserveReviewContinuation(
+    review: ManualReviewContext,
+    plan: string
+  ): Promise<StoreCommit | null> {
+    const timestamp = Date.now();
+    return this.#workspaceStore.applyBoardEventsIf(
+      review.boardId,
+      [
+        {
+          boardId: review.boardId,
+          errorMessage: null,
+          plan,
+          questionAnswers: review.answers,
+          reviewApproved: true,
+          taskId: review.taskId,
+          ts: timestamp,
+          type: "board.task_plan_updated",
+        },
+        {
+          boardId: review.boardId,
+          session: {
+            currentTaskId: review.taskId,
+            errorMessage: undefined,
+            state: "active",
+          },
+          ts: timestamp,
+          type: "board.session_patched",
+        },
+      ],
+      (currentBoard) => this.#canReserveReview(currentBoard, review)
+    );
+  }
+
+  #resolveReviewReservationConflict(
+    boardId: string,
+    taskId: string
+  ): BoardTaskCommandResponse {
+    const latest = this.#requireBoardTask(boardId, taskId);
+    const existingResponse = this.#alreadyRunningReview(latest);
+    if (existingResponse) {
+      return existingResponse;
+    }
+    throw new BoardTaskCommandError(
+      "task_not_reviewable",
+      "This task changed while you were reviewing it. Refresh the card before trying again."
+    );
+  }
+
+  #reviewContinuationText(review: ManualReviewContext, plan: string): string {
+    const answerText = review.questions
+      .map((question, index) => {
+        const answer = review.answers[index] ?? "";
+        return `- ${question}: ${answer || "(No answer provided.)"}`;
+      })
+      .join("\n");
+    return [
+      "The user reviewed and finalized the implementation plan below.",
+      `Original task: ${review.task.promptInput?.text ?? review.task.title}`,
+      `Final plan:\n${plan}`,
+      answerText ? `Answers to plan questions:\n${answerText}` : "",
+      "Proceed with implementing this plan in the current task session.",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  async #dispatchReviewContinuation(
+    review: ManualReviewContext,
+    plan: string
+  ): Promise<void> {
+    try {
+      await this.#bridge.promptSessionAsync({
+        agent: "build",
+        directory: review.directory,
+        model: review.model,
+        sessionID: review.sessionId,
+        text: this.#reviewContinuationText(review, plan),
+      });
+    } catch (error) {
+      await this.#recoverReviewDispatchFailure(review, plan);
+      const message =
+        "Chorus could not confirm that the provider accepted the implementation request. Check the task stream before retrying; your plan and answers are saved.";
+      logger.error("finalize-review:dispatch-failed", {
+        boardId: review.boardId,
+        error: error instanceof Error ? error.message : String(error),
+        sessionId: review.sessionId,
+        taskId: review.taskId,
+      });
+      throw new BoardTaskCommandError("prompt_dispatch_failed", message);
+    }
+  }
+
+  async #recoverReviewDispatchFailure(
+    review: ManualReviewContext,
+    plan: string
+  ): Promise<void> {
+    const timestamp = Date.now();
+    try {
+      await this.#workspaceStore.applyBoardEventsIf(
+        review.boardId,
+        [
+          {
+            boardId: review.boardId,
+            errorMessage:
+              "Chorus could not confirm that the provider accepted the implementation request. Check the task stream before retrying; your plan and answers are saved.",
+            plan,
+            questionAnswers: review.answers,
+            reviewApproved: false,
+            taskId: review.taskId,
+            ts: timestamp,
+            type: "board.task_plan_updated",
+          },
+          {
+            boardId: review.boardId,
+            session: {
+              currentTaskId: undefined,
+              errorMessage: undefined,
+              state: "active",
+            },
+            ts: timestamp,
+            type: "board.session_patched",
+          },
+        ],
+        (currentBoard) => currentBoard.session.currentTaskId === review.taskId
+      );
+    } catch (recoveryError) {
+      logger.error("finalize-review:recovery-failed", {
+        boardId: review.boardId,
+        error:
+          recoveryError instanceof Error
+            ? recoveryError.message
+            : String(recoveryError),
+        taskId: review.taskId,
+      });
+    }
+  }
+
+  rejectReview(
+    boardId: string,
+    taskId: string
+  ): Promise<{
+    accepted: true;
+    boardId: string;
+    taskId: string;
+    timestamp: number;
+  }> {
+    this.assertBoardOpen(boardId);
+    return this.#withBoardOperation(boardId, async () => {
+      this.assertBoardOpen(boardId);
+      const board = this.#workspaceStore.getBoard(boardId);
+      const task = board ? findTaskInColumns(board.columns, taskId) : null;
+      if (!(board && task)) {
+        throw new BoardTaskCommandError(
+          "task_not_found",
+          "This task is no longer on the board. Refresh and try again."
+        );
+      }
+      if (
+        task.outcome !== "awaiting_review" ||
+        task.reviewApproved === true ||
+        board.session.currentTaskId === taskId ||
+        !(board.columns.approve ?? []).some((entry) => entry.id === taskId)
+      ) {
+        throw new BoardTaskCommandError(
+          "task_not_reviewable",
+          "This task is no longer waiting for plan review. Refresh the board."
+        );
+      }
+      if (hasLiveTask(board, taskId)) {
+        throw new BoardTaskCommandError(
+          "board_busy",
+          "Another task is running on this board. Wait for it to finish before rejecting this plan."
+        );
+      }
+
+      const commit = await this.#workspaceStore.applyBoardEventsIf(
+        boardId,
+        [
+          {
+            boardId,
+            reason: "Plan rejected by the user.",
+            taskId,
+            ts: Date.now(),
+            type: "card.aborted",
+          },
+        ],
+        (currentBoard) => {
+          const currentTask = findTaskInColumns(currentBoard.columns, taskId);
+          return (
+            currentTask?.outcome === "awaiting_review" &&
+            currentTask.reviewApproved !== true &&
+            (currentBoard.columns.approve ?? []).some(
+              (entry) => entry.id === taskId
+            ) &&
+            !hasLiveTask(currentBoard, taskId)
+          );
+        }
+      );
+      if (!commit) {
+        throw new BoardTaskCommandError(
+          "task_not_reviewable",
+          "This task changed while you were reviewing it. Refresh the board."
+        );
+      }
+      return { accepted: true, boardId, taskId, timestamp: Date.now() };
     });
   }
 

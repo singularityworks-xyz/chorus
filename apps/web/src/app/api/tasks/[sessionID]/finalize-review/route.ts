@@ -1,14 +1,9 @@
-import { proxyChorusJson } from "@/lib/chorus-serve";
-
-export async function POST(
-  request: Request,
-  { params }: { params: Promise<{ sessionID: string }> }
-) {
-  const { sessionID } = await params;
-  const body = await request.json();
-
-  return proxyChorusJson(`/tasks/${sessionID}/finalize-review`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+export function POST() {
+  return Response.json(
+    {
+      code: "task_identity_required",
+      message: "Refresh the board and submit plan review from its task card.",
+    },
+    { status: 409 }
+  );
 }

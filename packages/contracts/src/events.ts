@@ -96,8 +96,11 @@ export const boardSessionPatchedEventSchema = boardScopedSchema.extend({
 });
 
 export const boardTaskPlanUpdatedEventSchema = boardScopedSchema.extend({
+  errorMessage: z.string().nullable().optional(),
   plan: z.string(),
+  questionAnswers: z.array(z.string()).optional(),
   questions: z.array(z.string()).optional(),
+  reviewApproved: z.boolean().optional(),
   taskId: z.string().min(1),
   type: z.literal("board.task_plan_updated"),
 });
@@ -152,6 +155,12 @@ export const cardFailedEventSchema = boardScopedSchema.extend({
   error: z.string().optional(),
   taskId: z.string().min(1),
   type: z.literal("card.failed"),
+});
+
+export const cardAbortedEventSchema = boardScopedSchema.extend({
+  reason: z.string().optional(),
+  taskId: z.string().min(1),
+  type: z.literal("card.aborted"),
 });
 
 // ── Run / step ──────────────────────────────────────────────────────────────
@@ -257,6 +266,7 @@ export const workspaceEventSchema = z.discriminatedUnion("type", [
   cardApprovalResolvedEventSchema,
   cardCompletedEventSchema,
   cardFailedEventSchema,
+  cardAbortedEventSchema,
   runStartedEventSchema,
   stepUpsertedEventSchema,
   stepDeltaAppendedEventSchema,
@@ -295,6 +305,7 @@ export const BOARD_SCOPED_EVENT_TYPES = [
   "card.approval_resolved",
   "card.completed",
   "card.failed",
+  "card.aborted",
   "run.started",
   "step.upserted",
   "step.delta_appended",

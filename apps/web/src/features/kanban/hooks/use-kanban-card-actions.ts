@@ -60,17 +60,18 @@ function taskPendingApprovals(task: Task) {
 
 async function submitTaskApproval({
   answers,
+  boardId,
   plan,
-  reviewMode,
   sessionId,
   task,
 }: {
   answers: string[];
+  boardId: string;
   plan: string;
-  reviewMode: "manual" | "auto";
-  sessionId: string;
+  sessionId?: string;
   task: Task;
 }) {
+  const taskSessionId = task.run?.sessionId ?? task.runId ?? sessionId;
   const pendingApprovals = taskPendingApprovals(task);
   const permission = pendingApprovals.find(
     (entry) => entry.kind === "permission"
@@ -81,8 +82,13 @@ async function submitTaskApproval({
         "This permission request has expired. Refresh the board to load the latest request."
       );
     }
+    if (!taskSessionId) {
+      throw new Error(
+        "This permission request has no provider session. Refresh the board and try again."
+      );
+    }
     await requireAccepted(
-      await fetch(`/api/tasks/${encodeURIComponent(sessionId)}/approve`, {
+      await fetch(`/api/tasks/${encodeURIComponent(taskSessionId)}/approve`, {
         body: JSON.stringify({ requestID: permission.requestId }),
         headers: { "content-type": "application/json" },
         method: "POST",
@@ -97,40 +103,39 @@ async function submitTaskApproval({
       "Answer the pending question in this card before continuing."
     );
   }
-  if (reviewMode !== "manual") {
+  if (task.outcome !== "awaiting_review") {
     throw new Error(
       "No active approval request was found. Refresh the board and try again."
     );
   }
 
   const planText = plan || task.plan || task.title;
-  const questions =
-    task.questions?.map((question, index) => ({
-      answer: answers[index] ?? "",
-      question,
-    })) ?? [];
   await requireAccepted(
-    await fetch(`/api/tasks/${encodeURIComponent(sessionId)}/finalize-review`, {
-      body: JSON.stringify({
-        plan: planText,
-        questions: questions.length > 0 ? questions : undefined,
-      }),
-      headers: { "content-type": "application/json" },
-      method: "POST",
-    }),
+    await fetch(
+      `/api/boards/${encodeURIComponent(boardId)}/tasks/${encodeURIComponent(task.id)}/finalize-review`,
+      {
+        body: JSON.stringify({
+          answers,
+          plan: planText,
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      }
+    ),
     "Could not finalize this plan. Your edits are still on the card; try again."
   );
 }
 
 async function submitTaskRejection({
-  reviewMode,
+  boardId,
   sessionId,
   task,
 }: {
-  reviewMode: "manual" | "auto";
-  sessionId: string;
+  boardId: string;
+  sessionId?: string;
   task: Task;
 }) {
+  const taskSessionId = task.run?.sessionId ?? task.runId ?? sessionId;
   const pendingApprovals = taskPendingApprovals(task);
   const permission = pendingApprovals.find(
     (entry) => entry.kind === "permission"
@@ -141,8 +146,13 @@ async function submitTaskRejection({
         "This permission request has expired. Refresh the board to load the latest request."
       );
     }
+    if (!taskSessionId) {
+      throw new Error(
+        "This permission request has no provider session. Refresh the board and try again."
+      );
+    }
     await requireAccepted(
-      await fetch(`/api/tasks/${encodeURIComponent(sessionId)}/reject`, {
+      await fetch(`/api/tasks/${encodeURIComponent(taskSessionId)}/reject`, {
         body: JSON.stringify({ requestID: permission.requestId }),
         headers: { "content-type": "application/json" },
         method: "POST",
@@ -154,26 +164,32 @@ async function submitTaskRejection({
 
   const question = pendingApprovals.find((entry) => entry.kind === "question");
   if (question?.requestId) {
+    if (!taskSessionId) {
+      throw new Error(
+        "This question has no provider session. Refresh the board and try again."
+      );
+    }
     await requireAccepted(
       await fetch(
-        `/api/tasks/${encodeURIComponent(sessionId)}/questions/${encodeURIComponent(question.requestId)}/reject`,
+        `/api/tasks/${encodeURIComponent(taskSessionId)}/questions/${encodeURIComponent(question.requestId)}/reject`,
         { method: "POST" }
       ),
       "Could not reject this question. Try again."
     );
     return;
   }
-  if (reviewMode !== "manual") {
+  if (task.outcome !== "awaiting_review") {
     throw new Error(
       "No active request was found to reject. Refresh the board and try again."
     );
   }
 
   await requireAccepted(
-    await fetch(`/api/tasks/${encodeURIComponent(sessionId)}/abort`, {
-      method: "POST",
-    }),
-    "Could not stop this plan. Your task remains on the board; try again."
+    await fetch(
+      `/api/boards/${encodeURIComponent(boardId)}/tasks/${encodeURIComponent(task.id)}/reject-review`,
+      { method: "POST" }
+    ),
+    "Could not reject this plan. Your task remains on the board; try again."
   );
 }
 
@@ -182,13 +198,11 @@ export function useKanbanCardActions({
   boardId,
   columns,
   onUpdateColumns,
-  reviewMode = "auto",
   sessionId,
 }: {
   boardId: string;
   columns: Columns;
   onUpdateColumns?: (boardId: string, columns: Columns) => void;
-  reviewMode?: "manual" | "auto";
   sessionId?: string | undefined;
 }): KanbanCardActions {
   const [localColumns, setLocalColumns] = useState<Columns>(columns);
@@ -276,7 +290,7 @@ export function useKanbanCardActions({
         });
         return;
       }
-      if (!sessionId) {
+      if (!sessionId && task.outcome !== "awaiting_review") {
         setTaskActionState(taskId, {
           error: "This board has no active session to approve.",
         });
@@ -295,8 +309,8 @@ export function useKanbanCardActions({
       try {
         await submitTaskApproval({
           answers,
+          boardId,
           plan,
-          reviewMode,
           sessionId,
           task,
         });
@@ -324,7 +338,7 @@ export function useKanbanCardActions({
         });
       }
     },
-    [boardId, localColumns, reviewMode, sessionId, setTaskActionState]
+    [boardId, localColumns, sessionId, setTaskActionState]
   );
 
   const handleReject = useCallback(
@@ -339,7 +353,7 @@ export function useKanbanCardActions({
         });
         return;
       }
-      if (!sessionId) {
+      if (!sessionId && task.outcome !== "awaiting_review") {
         setTaskActionState(taskId, {
           error: "This board has no active session to reject.",
         });
@@ -348,7 +362,7 @@ export function useKanbanCardActions({
 
       setTaskActionState(taskId, { pending: "reject" });
       try {
-        await submitTaskRejection({ reviewMode, sessionId, task });
+        await submitTaskRejection({ boardId, sessionId, task });
 
         setTaskActionState(taskId, {
           awaitingEvent: true,
@@ -368,7 +382,7 @@ export function useKanbanCardActions({
         });
       }
     },
-    [boardId, localColumns, reviewMode, sessionId, setTaskActionState]
+    [boardId, localColumns, sessionId, setTaskActionState]
   );
 
   const runTaskCommand = useCallback(

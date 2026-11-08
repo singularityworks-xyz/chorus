@@ -76,6 +76,19 @@ function makeMockBoardTasks() {
       taskId,
       timestamp: 123,
     })),
+    finalizeReview: mock(async (boardId: string, taskId: string) => ({
+      boardId,
+      sessionId: "sess-123",
+      status: "accepted" as const,
+      taskId,
+      timestamp: 123,
+    })),
+    rejectReview: mock(async (boardId: string, taskId: string) => ({
+      accepted: true as const,
+      boardId,
+      taskId,
+      timestamp: 123,
+    })),
   };
 }
 
@@ -375,6 +388,38 @@ describe("HTTP routes", () => {
         "task-1"
       );
       expect(boardTasks.retryTask).toHaveBeenCalledWith("board-1", "task-2");
+    });
+
+    test("routes plan finalize and reject with explicit board and task identities", async () => {
+      const { app, boardTasks } = makeApp();
+      const payload = { answers: ["Use the safer option"], plan: "step one" };
+
+      const finalizeResponse = await app.handle(
+        new Request(
+          "http://localhost/boards/board-1/tasks/task-3/finalize-review",
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          }
+        )
+      );
+      const rejectResponse = await app.handle(
+        new Request(
+          "http://localhost/boards/board-1/tasks/task-4/reject-review",
+          { method: "POST" }
+        )
+      );
+
+      expect(finalizeResponse.status).toBe(200);
+      expect(await finalizeResponse.json()).toMatchObject({ accepted: true });
+      expect(boardTasks.finalizeReview).toHaveBeenCalledWith(
+        "board-1",
+        "task-3",
+        payload
+      );
+      expect(rejectResponse.status).toBe(200);
+      expect(boardTasks.rejectReview).toHaveBeenCalledWith("board-1", "task-4");
     });
 
     test("returns a recoverable conflict when another task is active", async () => {
