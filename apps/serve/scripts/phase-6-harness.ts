@@ -144,12 +144,12 @@ function readSnapshotHash(value: unknown): string {
 /** Real repositories, SDK, HTTP commands, SQLite writer and authenticated WS mirrors. */
 export async function startPhase6Harness() {
   const root = mkdtempSync(join(tmpdir(), "chorus-qualification-"));
-  const engine = startScriptedEngine();
   const repositories: string[] = [];
   let store: WorkspaceStore | undefined;
   let hub: WorkspaceHub | undefined;
   let bridge: OpenCodeBridge | undefined;
   let stopHttp: (() => Promise<void>) | undefined;
+  let stopEngine: (() => Promise<void>) | undefined;
   const mirrors: QualificationMirror[] = [];
   const latencies: number[] = [];
   let latencyCursor = 0;
@@ -171,7 +171,7 @@ export async function startPhase6Harness() {
     bridge?.stop();
     await stopHttp?.();
     await store?.close();
-    await engine.stop();
+    await stopEngine?.();
     const insideTemp = relative(resolve(tmpdir()), resolve(root));
     if (
       insideTemp.startsWith("..") ||
@@ -185,6 +185,9 @@ export async function startPhase6Harness() {
   }
 
   try {
+    const engine = startScriptedEngine();
+    stopEngine = () => engine.stop();
+
     for (let index = 0; index < 3; index += 1) {
       const directory = join(root, `repo-${index}`);
       mkdirSync(directory);
@@ -286,6 +289,17 @@ export async function startPhase6Harness() {
       const data: unknown = await response.json();
       return data;
     }
+
+    // Task dispatch now requires the same installation-wide model selection
+    // used by the UI. Seed a deterministic fixture model in this disposable
+    // workspace so the lifecycle test exercises accepted runs and streaming.
+    await request("/workspace/mutations", {
+      baseRevision: null,
+      clientId: "qualification",
+      mutationId: "select-scripted-model",
+      type: "preference.default_model.set",
+      payload: { model: { modelID: "scripted", providerID: "fixture" } },
+    });
 
     const boardIds: string[] = [];
     for (let index = 0; index < 8; index += 1) {

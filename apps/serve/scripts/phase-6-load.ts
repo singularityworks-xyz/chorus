@@ -54,3 +54,11 @@ try {
 } finally {
   await harness.close();
 }
+
+// Bun can retain a closed server's native references in a standalone load run
+// even after the harness reports no active handles. The qualification owns all
+// of those servers, so flush the report and exit after the awaited cleanup.
+await new Promise<void>((resolve, reject) =>
+  process.stdout.write("", (error) => (error ? reject(error) : resolve()))
+);
+process.exit(0);
