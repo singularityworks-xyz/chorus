@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { fetchCommands, fetchDirectory, fetchFiles } from "./opencode-client";
+import {
+  fetchCommands,
+  fetchDirectory,
+  fetchFiles,
+  fetchSessionDiff,
+} from "./opencode-client";
 
 const originalFetch = globalThis.fetch;
 
@@ -63,6 +68,56 @@ describe("board autocomplete client", () => {
 
     await expect(fetchFiles("board-1", "main")).rejects.toThrow(
       "Provider connection unavailable. Retry."
+    );
+  });
+});
+
+describe("session diff client", () => {
+  test("validates and returns session diffs", async () => {
+    replaceFetch(async () =>
+      Response.json([
+        {
+          additions: 1,
+          after: "new line\n",
+          before: "old line\n",
+          deletions: 1,
+          file: "src/main.ts",
+        },
+      ])
+    );
+
+    await expect(fetchSessionDiff("session/one")).resolves.toEqual([
+      {
+        additions: 1,
+        after: "new line\n",
+        before: "old line\n",
+        deletions: 1,
+        file: "src/main.ts",
+      },
+    ]);
+  });
+
+  test("surfaces a Chorus API error instead of returning an empty diff", async () => {
+    replaceFetch(async () =>
+      Response.json(
+        {
+          code: "session_unavailable",
+          message: "The session is unavailable. Reopen the board and retry.",
+        },
+        { status: 503 }
+      )
+    );
+
+    await expect(fetchSessionDiff("session-1")).rejects.toThrow(
+      "The session is unavailable. Reopen the board and retry."
+    );
+  });
+
+  test("rejects malformed diff payloads as an explicit error", async () => {
+    replaceFetch(async () => Response.json([{ file: "../outside" }]));
+
+    await expect(fetchSessionDiff("session-1")).rejects.toThrow(
+      "The server returned invalid diff data. Try again."
     );
   });
 });
