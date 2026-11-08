@@ -18,7 +18,7 @@ import {
   TerminalIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
@@ -56,6 +56,43 @@ export interface AgentRunContext {
 }
 
 const EMPTY_AGENT_STEPS: AgentStep[] = [];
+const MARKDOWN_PLUGINS = [remarkGfm];
+const MARKDOWN_REFRESH_INTERVAL_MS = 100;
+
+function useStreamedMarkdownContent(content: string, isStreaming: boolean) {
+  const [displayedContent, setDisplayedContent] = useState(content);
+  const latestContent = useRef(content);
+  latestContent.current = content;
+
+  useEffect(() => {
+    if (!isStreaming) {
+      setDisplayedContent(latestContent.current);
+      return;
+    }
+
+    setDisplayedContent(latestContent.current);
+    const interval = window.setInterval(() => {
+      setDisplayedContent(latestContent.current);
+    }, MARKDOWN_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(interval);
+  }, [isStreaming]);
+
+  return isStreaming ? displayedContent : content;
+}
+
+const MarkdownContent = memo(function MarkdownContent({
+  className,
+  content,
+}: {
+  className: string;
+  content: string;
+}) {
+  return (
+    <div className={className}>
+      <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS}>{content}</ReactMarkdown>
+    </div>
+  );
+});
 
 const STEP_META: Record<
   AgentStepKind,
@@ -120,6 +157,10 @@ function GroupedThinkingBlock({
   const [expanded, setExpanded] = useState(false);
   const hasContent = group.content && group.content.length > 0;
   const stepCount = group.sourceSteps.length;
+  const displayedContent = useStreamedMarkdownContent(
+    group.content,
+    isRunning && expanded
+  );
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -162,11 +203,10 @@ function GroupedThinkingBlock({
 
       {expanded && hasContent && (
         <div className="ml-5 rounded-xs border border-violet-500/10 bg-violet-500/[0.03] px-3 py-2.5">
-          <div className="text-[0.72rem] text-violet-300/60 leading-relaxed">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {group.content}
-            </ReactMarkdown>
-          </div>
+          <MarkdownContent
+            className="text-[0.72rem] text-violet-300/60 leading-relaxed"
+            content={displayedContent}
+          />
         </div>
       )}
     </div>
@@ -190,6 +230,10 @@ function GroupedResponseBlock({
   const [copied, setCopied] = useState(false);
   const hasContent = group.content && group.content.length > 0;
   const stepCount = group.sourceSteps.length;
+  const displayedContent = useStreamedMarkdownContent(
+    group.content,
+    isRunning && expanded
+  );
 
   function handleCopy() {
     if (group.content) {
@@ -254,11 +298,10 @@ function GroupedResponseBlock({
 
       {expanded && hasContent && (
         <div className="ml-5 rounded-xs border border-sky-500/10 bg-sky-500/[0.03] px-3 py-2.5">
-          <div className="text-[0.72rem] text-sky-300/70 leading-relaxed">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {group.content}
-            </ReactMarkdown>
-          </div>
+          <MarkdownContent
+            className="text-[0.72rem] text-sky-300/70 leading-relaxed"
+            content={displayedContent}
+          />
         </div>
       )}
     </div>
