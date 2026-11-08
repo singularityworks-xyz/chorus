@@ -516,9 +516,13 @@ export class BoardTaskService {
     const sessionId = board.session.sessionId ?? null;
     const boardId = board.boardId;
     const directory = boardDirectory(board);
+    const currentTaskId = board.session.currentTaskId;
+    const currentTaskIsUnfinished =
+      currentTaskId !== undefined &&
+      !(board.columns.done ?? []).some((task) => task.id === currentTaskId);
     const busyFromBoard =
       board.session.state === "starting" ||
-      Boolean(board.session.currentTaskId) ||
+      currentTaskIsUnfinished ||
       hasLiveTask(board);
 
     if (!sessionId) {

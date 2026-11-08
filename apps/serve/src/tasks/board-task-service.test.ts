@@ -1379,6 +1379,47 @@ describe("BoardTaskService", () => {
     rmSync(dir, { force: true, recursive: true });
   });
 
+  test("a stale pointer to a completed task does not lock session history", async () => {
+    const bridge = makeMockBridge();
+    bridge.waitForSessionIdle.mockResolvedValue(true);
+    const dir = mkdtempSync(
+      join(tmpdir(), "chorus-session-history-stale-task-")
+    );
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, {
+      sessionId: "sess-123",
+      state: "active",
+    });
+    await addSavedTask(workspaceStore, boardId, "task-completed");
+    await workspaceStore.applyBoardEvents(boardId, [
+      {
+        boardId,
+        taskId: "task-completed",
+        ts: Date.now(),
+        type: "card.completed",
+      },
+    ]);
+    await workspaceStore.applyMutation({
+      baseRevision: null,
+      clientId: "task-test",
+      mutationId: `stale-session-task-${crypto.randomUUID()}`,
+      payload: {
+        boardId,
+        session: { currentTaskId: "task-completed" },
+      },
+      type: "board.session.patch",
+    });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    await expect(
+      service.getSessionHistoryState(boardId)
+    ).resolves.toMatchObject({ busy: false, canUndo: true, canRedo: false });
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
   test("undo and redo use the board session without changing task history", async () => {
     const bridge = makeMockBridge();
     bridge.waitForSessionIdle.mockResolvedValue(true);
