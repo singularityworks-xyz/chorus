@@ -340,11 +340,15 @@ export function PromptInput() {
     setSubmitError(null);
 
     if (trimmedPrompt === "/undo" || trimmedPrompt === "/redo") {
-      const command = trimmedPrompt.replace("/", "") as "undo" | "redo";
+      const command = trimmedPrompt === "/undo" ? "undo" : "redo";
       const success = await sessionCommand(command);
       if (success) {
         setPrompt("");
         setParts([]);
+      } else {
+        setSubmitError(
+          `Could not ${command} this session. Your prompt is unchanged; check the board connection and try again.`
+        );
       }
       return;
     }
@@ -414,13 +418,18 @@ export function PromptInput() {
 
   const handleSelectAutocomplete = useCallback(
     async (item: AutocompleteItem) => {
-      if (item.id.startsWith("builtin:")) {
-        const command = item.id.replace("builtin:", "") as "undo" | "redo";
+      if (item.id === "builtin:undo" || item.id === "builtin:redo") {
+        const command = item.id === "builtin:undo" ? "undo" : "redo";
+        setSubmitError(null);
         const success = await sessionCommand(command);
         if (success) {
           autocomplete.close();
           setTextareaRect(null);
           setPrompt("");
+        } else {
+          setSubmitError(
+            `Could not ${command} this session. Your prompt is unchanged; check the board connection and try again.`
+          );
         }
         return;
       }
