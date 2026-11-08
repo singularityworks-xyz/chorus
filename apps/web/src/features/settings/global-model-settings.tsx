@@ -1,24 +1,16 @@
 "use client";
 
-import {
-  type ModelSelection,
+import type {
+  ModelSelection,
   opencodeModelCatalogSchema,
 } from "@chorus/contracts";
 import { useEffect, useMemo, useState } from "react";
 import { createModelKey, ModelPicker } from "@/components/model-picker";
+import {
+  fetchGlobalModelCatalog,
+  modelSettingsLoadErrorMessage,
+} from "@/features/settings/settings-client";
 import { useWorkspace } from "@/features/workspace/workspace-context";
-
-async function fetchModelCatalog(signal: AbortSignal, refreshKey: number) {
-  const refreshQuery = refreshKey > 0 ? `?refresh=${refreshKey}` : "";
-  const response = await fetch(`/api/models${refreshQuery}`, {
-    cache: "no-store",
-    signal,
-  });
-  if (!response.ok) {
-    throw new Error("model_catalog_unavailable");
-  }
-  return opencodeModelCatalogSchema.parse(await response.json());
-}
 
 function getSelectionWarning(
   selection: ModelSelection | null,
@@ -57,7 +49,7 @@ export function GlobalModelSettings() {
     const controller = new AbortController();
     setLoading(true);
     setError(null);
-    fetchModelCatalog(controller.signal, refreshKey)
+    fetchGlobalModelCatalog(controller.signal, refreshKey)
       .then((catalog) => {
         if (controller.signal.aborted) {
           return;
@@ -65,11 +57,9 @@ export function GlobalModelSettings() {
         setAvailableModels(catalog.models);
         setProviderDefault(catalog.defaultModel);
       })
-      .catch(() => {
+      .catch((loadError: unknown) => {
         if (!controller.signal.aborted) {
-          setError(
-            "Could not load available models. Check the engine connection and retry."
-          );
+          setError(modelSettingsLoadErrorMessage(loadError));
         }
       })
       .finally(() => {

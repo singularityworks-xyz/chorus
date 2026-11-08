@@ -5,11 +5,7 @@ import {
   type OpencodeCredentialSummary,
   type OpencodeProviderStatus,
   opencodeAuthLoginResponseSchema,
-  opencodeConfiguredProviderCatalogSchema,
-  opencodeConfigureProviderResponseSchema,
-  opencodeCredentialCatalogSchema,
   opencodeModelsDialogResponseSchema,
-  opencodeProviderCatalogSchema,
   type WorkspaceBoard,
 } from "@chorus/contracts";
 import {
@@ -55,6 +51,14 @@ import { DeviceAccessPanel } from "@/features/auth/device-access-panel";
 import { PushSettings } from "@/features/notifications/push-settings";
 import { GlobalModelSettings } from "@/features/settings/global-model-settings";
 import { providerCatalogInvalidator } from "@/features/settings/provider-catalog-invalidator";
+import {
+  configureOpenCodeProvider,
+  fetchConfiguredProviders,
+  fetchProviderStatus,
+  fetchStoredCredentials,
+  postOpenCodeAction,
+  providerSettingsLoadErrorMessage,
+} from "@/features/settings/settings-client";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 import { useVoiceConfig } from "@/hooks/use-voice-config";
 import { cn } from "@/lib/utils";
@@ -89,60 +93,6 @@ const DEFAULT_SPEECH_VOICE_VALUE = "__default_speech_voice__";
 
 function buildProvidersUrl(refreshToken: string): string {
   return `/api/providers?refresh=${refreshToken}`;
-}
-
-async function fetchProviderStatus(url: string) {
-  const response = await fetch(url, {
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    throw new Error(`provider_status_http_${String(response.status)}`);
-  }
-
-  return opencodeProviderCatalogSchema.parse(await response.json()).providers;
-}
-
-async function fetchStoredCredentials() {
-  const response = await fetch("/api/opencode/auth-credentials", {
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    throw new Error(`provider_credentials_http_${String(response.status)}`);
-  }
-
-  return opencodeCredentialCatalogSchema.parse(await response.json())
-    .credentials;
-}
-
-async function fetchConfiguredProviders() {
-  const response = await fetch("/api/opencode/configured-providers", {
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    throw new Error(`configured_providers_http_${String(response.status)}`);
-  }
-
-  return opencodeConfiguredProviderCatalogSchema.parse(await response.json())
-    .providerIDs;
-}
-
-async function configureOpenCodeProvider(providerID: string) {
-  const response = await fetch("/api/opencode/configure-provider", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ providerID }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`provider_configure_http_${String(response.status)}`);
-  }
-
-  return opencodeConfigureProviderResponseSchema.parse(await response.json());
 }
 
 type NotifType = "permission" | "question";
@@ -408,22 +358,6 @@ function SettingsActionItem({
   );
 }
 
-async function postOpenCodeAction(path: string) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({}),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to post ${path}`);
-  }
-
-  return response.json();
-}
-
 function useProviderSettings() {
   const [providerStatus, setProviderStatus] = useState<
     OpencodeProviderStatus[]
@@ -441,6 +375,7 @@ function useProviderSettings() {
 
   useEffect(() => {
     let isCancelled = false;
+    const controller = new AbortController();
     const refreshToken = providerStatusRefreshTick.toString(36);
 
     async function loadProviderStatus() {
@@ -449,9 +384,12 @@ function useProviderSettings() {
       try {
         const [providers, credentials, configuredProviders] = await Promise.all(
           [
-            fetchProviderStatus(buildProvidersUrl(refreshToken)),
-            fetchStoredCredentials(),
-            fetchConfiguredProviders(),
+            fetchProviderStatus(
+              buildProvidersUrl(refreshToken),
+              controller.signal
+            ),
+            fetchStoredCredentials(controller.signal),
+            fetchConfiguredProviders(controller.signal),
           ]
         );
 
@@ -464,12 +402,11 @@ function useProviderSettings() {
         setConfiguredProviderIDs(configuredProviders);
       } catch (error) {
         console.error("Failed to load provider status", error);
+        controller.abort();
         if (isCancelled) {
           return;
         }
-        setSettingsError(
-          "Could not load provider settings. Check the engine connection and retry."
-        );
+        setSettingsError(providerSettingsLoadErrorMessage(error));
       } finally {
         if (!isCancelled) {
           setIsLoading(false);
@@ -481,6 +418,7 @@ function useProviderSettings() {
 
     return () => {
       isCancelled = true;
+      controller.abort();
     };
   }, [providerStatusRefreshTick]);
 
