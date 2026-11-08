@@ -55,6 +55,8 @@ export interface AgentRunContext {
   taskTitle: string;
 }
 
+const EMPTY_AGENT_STEPS: AgentStep[] = [];
+
 const STEP_META: Record<
   AgentStepKind,
   {
@@ -407,29 +409,35 @@ interface AgentOutputCardProps {
   accentClass?: string;
   boardId: string;
   className?: string;
-  run: AgentRunContext;
+  isActive: boolean;
+  run?: AgentRunContext;
   taskId: string;
+  taskTitle: string;
 }
 
 export function AgentOutputCard({
   boardId,
+  isActive,
   run,
   taskId,
+  taskTitle,
   accentClass: _accentClass = "bg-primary-light",
   className,
 }: AgentOutputCardProps) {
-  const doneCount = run.steps.filter((s) => s.status === "done").length;
-  const isLive = run.steps.some((s) => s.status === "running");
-  const groupedSteps = useMemo(() => groupSteps(run.steps), [run.steps]);
+  const steps = run?.steps ?? EMPTY_AGENT_STEPS;
+  const doneCount = steps.filter((s) => s.status === "done").length;
+  const progressPercent =
+    steps.length === 0 ? 0 : Math.round((doneCount / steps.length) * 100);
+  const groupedSteps = useMemo(() => groupSteps(steps), [steps]);
   const [aborting, setAborting] = useState(false);
   const [stopAccepted, setStopAccepted] = useState(false);
   const [abortError, setAbortError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isLive) {
+    if (!isActive) {
       setStopAccepted(false);
     }
-  }, [isLive]);
+  }, [isActive]);
 
   const handleAbort = useCallback(async () => {
     if (aborting || stopAccepted) {
@@ -478,26 +486,28 @@ export function AgentOutputCard({
     >
       <div className="flex items-center gap-2 border-white/8 border-b bg-white/1.5 px-3 py-2">
         <span className="relative flex size-2">
-          {isLive && (
+          {isActive && (
             <span className="absolute inline-flex size-full animate-ping rounded-full bg-sky-400 opacity-50" />
           )}
           <span
             className={cn(
               "relative inline-flex size-2 rounded-full",
-              isLive ? "bg-sky-400" : "bg-white/20"
+              isActive ? "bg-sky-400" : "bg-white/20"
             )}
           />
         </span>
 
         <span className="min-w-0 flex-1 truncate font-medium text-[0.7rem] text-white/70">
-          {run.taskTitle}
+          {taskTitle}
         </span>
 
-        <span className="shrink-0 rounded-xs border border-white/8 bg-white/5 px-1.5 py-0.5 font-mono text-[0.6rem] text-white/40">
-          {run.model}
-        </span>
+        {run?.model && (
+          <span className="shrink-0 rounded-xs border border-white/8 bg-white/5 px-1.5 py-0.5 font-mono text-[0.6rem] text-white/40">
+            {run.model}
+          </span>
+        )}
 
-        {isLive && (
+        {isActive && (
           <button
             className={cn(
               "flex items-center gap-1 rounded-xs border px-1.5 py-0.5 font-medium text-[0.6rem] transition-colors",
@@ -524,6 +534,11 @@ export function AgentOutputCard({
               : group.step.id;
           return <GroupedStepRow group={group} key={stepId} />;
         })}
+        {steps.length === 0 && (
+          <p className="text-[0.68rem] text-white/35" role="status">
+            Waiting for the agent to send its first update…
+          </p>
+        )}
       </div>
 
       {abortError && (
@@ -540,15 +555,17 @@ export function AgentOutputCard({
           <div
             className={cn(
               "h-full rounded-full transition-all duration-500",
-              isLive ? "bg-sky-500" : "bg-white/30"
+              isActive ? "bg-sky-500" : "bg-white/30"
             )}
             style={{
-              width: `${Math.round((doneCount / run.steps.length) * 100)}%`,
+              width: `${progressPercent}%`,
             }}
           />
         </div>
         <span className="shrink-0 text-[0.65rem] text-white/30 tabular-nums">
-          {doneCount}/{run.steps.length} steps · {run.elapsed}
+          {steps.length === 0
+            ? `Waiting · ${run?.elapsed ?? "…"}`
+            : `${doneCount}/${steps.length} steps · ${run?.elapsed ?? ""}`}
         </span>
       </div>
     </div>

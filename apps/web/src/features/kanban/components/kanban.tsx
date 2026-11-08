@@ -1043,29 +1043,20 @@ function TaskCard({
       {showOutput ? (
         <>
           {contentNode}
-          {task.run ? (
-            <>
-              <div className="flex">
-                <div className="ml-5 flex flex-col items-center">
-                  <div className="h-2 w-px bg-linear-to-b from-white/5 to-white/15" />
-                  <div className="size-1.5 rounded-full border border-white/20 bg-white/10" />
-                  <div className="h-1.5 w-px bg-linear-to-b from-white/15 to-white/5" />
-                </div>
-              </div>
-              <AgentOutputCard
-                boardId={boardId}
-                run={task.run}
-                taskId={task.id}
-              />
-            </>
-          ) : (
-            <p
-              className="ml-5 border-white/5 border-l py-2 pl-3 text-[0.68rem] text-white/40"
-              role="status"
-            >
-              Waiting for the agent to send its first update…
-            </p>
-          )}
+          <div className="flex">
+            <div className="ml-5 flex flex-col items-center">
+              <div className="h-2 w-px bg-linear-to-b from-white/5 to-white/15" />
+              <div className="size-1.5 rounded-full border border-white/20 bg-white/10" />
+              <div className="h-1.5 w-px bg-linear-to-b from-white/15 to-white/5" />
+            </div>
+          </div>
+          <AgentOutputCard
+            boardId={boardId}
+            isActive={showOutput}
+            run={task.run}
+            taskId={task.id}
+            taskTitle={task.title}
+          />
         </>
       ) : (
         contentNode
