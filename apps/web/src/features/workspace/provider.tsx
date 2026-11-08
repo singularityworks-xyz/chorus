@@ -2,7 +2,9 @@
 
 import {
   apiErrorSchema,
+  type BoardSessionHistoryCommand,
   boardSeedSchema,
+  boardSessionHistoryCommandResponseSchema,
   type ModelSelection,
   projectListResponseSchema,
   queueBoardPromptResponseSchema,
@@ -13,7 +15,6 @@ import {
 } from "@chorus/contracts";
 import posthog from "posthog-js";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { useKanbanHistory } from "@/features/kanban/hooks/use-kanban-history";
 import { useChorusSync } from "@/features/sync/use-chorus-sync";
 import { ChorusApiError } from "@/lib/chorus-api-error";
 import {
@@ -90,11 +91,14 @@ export function ChorusWorkspaceProvider({
     WorkspaceContextValue["recentProjects"]
   >([]);
   const [restoredPrompt, setRestoredPrompt] = useState("");
+  const [sessionHistoryChange, setSessionHistoryChange] = useState<{
+    boardId: string;
+    revision: number;
+  } | null>(null);
 
   const clientIdRef = useRef(crypto.randomUUID());
   const revisionRef = useRef(0);
-
-  const kanbanHistory = useKanbanHistory();
+  const sessionHistoryRevisionRef = useRef(0);
 
   const selectedBoard = boards.find(
     (board) => board.boardId === selectedBoardId
@@ -656,63 +660,74 @@ export function ChorusWorkspaceProvider({
   );
 
   const sessionCommand = useCallback(
-    async (command: "undo" | "redo"): Promise<boolean> => {
-      if (!selectedBoard?.session.sessionId) {
-        return false;
-      }
-
-      const endpoint =
-        command === "undo"
-          ? `/api/sessions/${selectedBoard.session.sessionId}/revert`
-          : `/api/sessions/${selectedBoard.session.sessionId}/unrevert`;
-
+    async (boardId: string, command: BoardSessionHistoryCommand) => {
       try {
-        const response = await fetch(endpoint, { method: "POST" });
-
-        if (reportUnauthorized(response)) {
-          return false;
-        }
-
-        posthog.capture(
-          response.ok ? "session_command_success" : "session_command_error",
-          {
-            command,
-            sessionID: selectedBoard.session.sessionId,
-            status: response.status,
-            timestamp: Date.now(),
-          }
+        const response = await fetch(
+          `/api/boards/${encodeURIComponent(boardId)}/session/history/${command}`,
+          { method: "POST" }
         );
 
-        return response.ok;
-      } catch (error) {
-        posthog.capture("session_command_exception", {
+        if (reportUnauthorized(response)) {
+          return {
+            error:
+              "Your sign-in expired. Sign in again before changing repository history.",
+            ok: false,
+          };
+        }
+
+        const payload: unknown = await response.json().catch(() => undefined);
+        if (!response.ok) {
+          const apiError = apiErrorSchema.safeParse(payload);
+          return {
+            error: apiError.success
+              ? apiError.data.message
+              : `Could not ${command} repository changes. Check the board connection and try again.`,
+            ok: false,
+          };
+        }
+
+        const result =
+          boardSessionHistoryCommandResponseSchema.safeParse(payload);
+        if (
+          !result.success ||
+          result.data.boardId !== boardId ||
+          result.data.command !== command
+        ) {
+          return {
+            error:
+              "The server response did not confirm the history change. Refresh the board before retrying.",
+            ok: false,
+          };
+        }
+
+        posthog.capture("session_command_success", {
+          boardId,
           command,
-          errorMessage: error instanceof Error ? error.message : String(error),
-          sessionID: selectedBoard.session.sessionId,
+          sessionID: result.data.sessionId,
+          status: response.status,
           timestamp: Date.now(),
         });
-        return false;
+        sessionHistoryRevisionRef.current += 1;
+        setSessionHistoryChange({
+          boardId,
+          revision: sessionHistoryRevisionRef.current,
+        });
+
+        return { ok: true };
+      } catch (error) {
+        posthog.capture("session_command_exception", {
+          boardId,
+          command,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          timestamp: Date.now(),
+        });
+        return {
+          error: `Could not ${command} repository changes. Check the board connection and try again.`,
+          ok: false,
+        };
       }
     },
-    [reportUnauthorized, selectedBoard]
-  );
-
-  const recordMove = useCallback(
-    (
-      boardId: Parameters<
-        WorkspaceContextValue["kanbanHistory"]["recordMove"]
-      >[0],
-      columnsBefore: Parameters<
-        WorkspaceContextValue["kanbanHistory"]["recordMove"]
-      >[1],
-      columnsAfter: Parameters<
-        WorkspaceContextValue["kanbanHistory"]["recordMove"]
-      >[2],
-      task: Parameters<WorkspaceContextValue["kanbanHistory"]["recordMove"]>[3]
-    ) => {
-      kanbanHistory.recordMove(boardId, columnsBefore, columnsAfter, task);
-    },
-    [kanbanHistory]
+    [reportUnauthorized]
   );
 
   const value: WorkspaceContextValue = {
@@ -729,13 +744,6 @@ export function ChorusWorkspaceProvider({
     focusBoardLocally,
     isOpeningFolder,
     isQueueingPrompt,
-    kanbanHistory: {
-      canRedo: kanbanHistory.canRedo,
-      canUndo: kanbanHistory.canUndo,
-      redo: kanbanHistory.redo,
-      recordMove,
-      undo: kanbanHistory.undo,
-    },
     lastSeq,
     loadProjects,
     openFolder,
@@ -748,6 +756,7 @@ export function ChorusWorkspaceProvider({
     restoredPrompt,
     restorePrompt: setRestoredPrompt,
     selectBoard,
+    sessionHistoryChange,
     selectedBoard,
     selectedBoardId,
     sessionCommand,

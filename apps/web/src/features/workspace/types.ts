@@ -1,5 +1,6 @@
 import type {
   BoardSeed,
+  BoardSessionHistoryCommand,
   WorkspaceBoard as ContractWorkspaceBoard,
   WorkspaceHistoryEntry as ContractWorkspaceHistoryEntry,
   WorkspacePreferences as ContractWorkspacePreferences,
@@ -26,6 +27,11 @@ export type WorkspacePreferences = ContractWorkspacePreferences;
 
 export interface PromptSubmissionResult extends QueueBoardPromptResponse {
   task: Task;
+}
+
+export interface SessionHistoryCommandResult {
+  error?: string;
+  ok: boolean;
 }
 
 export interface PromptPart {
@@ -61,22 +67,6 @@ export interface WorkspaceContextValue {
   hydrated: boolean;
   isOpeningFolder: boolean;
   isQueueingPrompt: boolean;
-  kanbanHistory: {
-    canRedo: (boardId: string) => boolean;
-    canUndo: (boardId: string) => boolean;
-    redo: (boardId: string) => { columns: Columns; task: Task } | null;
-    recordMove: (
-      boardId: string,
-      columnsBefore: Columns,
-      columnsAfter: Columns,
-      task: Task
-    ) => void;
-    undo: (boardId: string) => {
-      columns: Columns;
-      prompt: string;
-      task: Task;
-    } | null;
-  };
   /** Highest contiguously applied sequence, for diagnostics and e2e assertions. */
   lastSeq: number;
   loadProjects: () => Promise<void>;
@@ -101,7 +91,11 @@ export interface WorkspaceContextValue {
   selectBoard: (boardId: string) => void;
   selectedBoard?: WorkspaceBoard;
   selectedBoardId: string | null;
-  sessionCommand: (command: "undo" | "redo") => Promise<boolean>;
+  sessionCommand: (
+    boardId: string,
+    command: BoardSessionHistoryCommand
+  ) => Promise<SessionHistoryCommandResult>;
+  sessionHistoryChange: { boardId: string; revision: number } | null;
   /** Socket status, so the UI can show a reconnecting strip. */
   sessionStatus: "connecting" | "live" | "offline" | "auth-expired";
   setBoardModel: (boardId: string, model: ModelSelection | null) => void;

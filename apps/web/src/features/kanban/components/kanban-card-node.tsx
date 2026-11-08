@@ -8,9 +8,7 @@ import {
   GitBranchIcon,
   GripVerticalIcon,
   LoaderCircleIcon,
-  Redo2Icon,
   TriangleAlertIcon,
-  Undo2Icon,
   XIcon,
 } from "lucide-react";
 import { memo, useCallback, useEffect, useState } from "react";
@@ -23,6 +21,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { BoardSessionHistoryControls } from "@/features/kanban/components/board-session-history-controls";
 import {
   KanbanCardContent,
   type KanbanCardData,
@@ -58,6 +57,16 @@ export interface KanbanCardNodeData {
 
 const kanbanHeaderControlClass =
   "flex h-6 items-center rounded-xs font-medium text-[0.65rem] leading-none";
+
+function hasBlockingSessionWork(columns: KanbanCardData["columns"]): boolean {
+  return (
+    Boolean(columns.in_progress?.length) ||
+    (columns.approve ?? []).some(
+      (task) =>
+        task.outcome === "awaiting_review" && task.reviewApproved !== true
+    )
+  );
+}
 
 function focusBoardPrompt(
   boardId: string,
@@ -378,7 +387,7 @@ function KanbanCardNodeComponent({
     selectedDiffFile,
   } = useBoardDiffs(cardData.sessionId);
 
-  const { focusBoardLocally, kanbanHistory, restorePrompt } = useWorkspace();
+  const { focusBoardLocally } = useWorkspace();
 
   // Approve, reject, column moves and review mode live in one hook so the phone
   // lane list runs the same code as this card rather than a copy of it.
@@ -386,7 +395,6 @@ function KanbanCardNodeComponent({
     actionStates,
     handleApprove,
     handleColumnsChange,
-    handleHistoryColumnsChange,
     handlePlanChange,
     handleQuestionsAnswered,
     handleReject,
@@ -399,7 +407,6 @@ function KanbanCardNodeComponent({
     onUpdateColumns: cardData.onUpdateColumns,
     sessionId: cardData.sessionId,
   });
-
   const handleCreateTask = useCallback(() => {
     focusBoardPrompt(cardData.boardId, focusBoardLocally);
   }, [cardData.boardId, focusBoardLocally]);
@@ -427,33 +434,6 @@ function KanbanCardNodeComponent({
       cancelled = true;
     };
   }, [filePath]);
-
-  const handleUndo = useCallback(() => {
-    const result = kanbanHistory.undo(cardData.boardId);
-    if (!result) {
-      return;
-    }
-
-    handleHistoryColumnsChange(result.columns);
-    restorePrompt(result.prompt);
-  }, [
-    cardData.boardId,
-    handleHistoryColumnsChange,
-    kanbanHistory,
-    restorePrompt,
-  ]);
-
-  const handleRedo = useCallback(() => {
-    const result = kanbanHistory.redo(cardData.boardId);
-    if (!result) {
-      return;
-    }
-
-    handleHistoryColumnsChange(result.columns);
-  }, [cardData.boardId, handleHistoryColumnsChange, kanbanHistory]);
-
-  const canUndo = kanbanHistory.canUndo(cardData.boardId);
-  const canRedo = kanbanHistory.canRedo(cardData.boardId);
 
   return (
     <>
@@ -522,36 +502,11 @@ function KanbanCardNodeComponent({
 
             <span className="h-3.5 w-px bg-white/10" />
 
-            <div className="flex items-center gap-1">
-              <button
-                className={cn(
-                  "rounded-xs p-1 transition-colors",
-                  canUndo
-                    ? "text-white/50 hover:bg-white/10 hover:text-white/80"
-                    : "cursor-not-allowed text-white/15"
-                )}
-                disabled={!canUndo}
-                onClick={handleUndo}
-                title="Undo last task"
-                type="button"
-              >
-                <Undo2Icon className="size-3.5" />
-              </button>
-              <button
-                className={cn(
-                  "rounded-xs p-1 transition-colors",
-                  canRedo
-                    ? "text-white/50 hover:bg-white/10 hover:text-white/80"
-                    : "cursor-not-allowed text-white/15"
-                )}
-                disabled={!canRedo}
-                onClick={handleRedo}
-                title="Redo undone task"
-                type="button"
-              >
-                <Redo2Icon className="size-3.5" />
-              </button>
-            </div>
+            <BoardSessionHistoryControls
+              boardBusy={hasBlockingSessionWork(cardData.columns)}
+              boardId={cardData.boardId}
+              sessionId={cardData.sessionId}
+            />
 
             <span className="h-3.5 w-px bg-white/10" />
 

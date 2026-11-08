@@ -26,7 +26,6 @@ export interface KanbanCardActions {
     answers: string[]
   ) => Promise<void>;
   handleColumnsChange: (columns: Columns) => void;
-  handleHistoryColumnsChange: (columns: Columns) => void;
   handlePlanChange: (taskId: string, plan: string) => void;
   handleQuestionsAnswered: (taskId: string, answers: string[]) => void;
   handleReject: (taskId: string) => Promise<void>;
@@ -209,7 +208,7 @@ export function useKanbanCardActions({
   const [actionStates, setActionStates] = useState<
     Record<string, KanbanTaskActionState | undefined>
   >({});
-  const { kanbanHistory, updateBoardReviewMode } = useWorkspace();
+  const { updateBoardReviewMode } = useWorkspace();
 
   // Server events own lifecycle columns. The hook keeps no optimistic lifecycle
   // transitions that could leave a card missing after a rejected command.
@@ -251,33 +250,8 @@ export function useKanbanCardActions({
 
   const handleColumnsChange = useCallback(
     (nextColumns: Columns) => {
-      setLocalColumns((previousColumns) => {
-        const doneTasks = nextColumns.done ?? [];
-        const previousDoneTasks = previousColumns.done ?? [];
-
-        if (doneTasks.length > previousDoneTasks.length) {
-          const newDoneTask = doneTasks.at(-1);
-          if (newDoneTask) {
-            kanbanHistory.recordMove(
-              boardId,
-              previousColumns,
-              nextColumns,
-              newDoneTask
-            );
-          }
-        }
-
-        return nextColumns;
-      });
-
-      onUpdateColumns?.(boardId, nextColumns);
-    },
-    [boardId, kanbanHistory, onUpdateColumns]
-  );
-
-  const handleHistoryColumnsChange = useCallback(
-    (nextColumns: Columns) => {
       setLocalColumns(nextColumns);
+
       onUpdateColumns?.(boardId, nextColumns);
     },
     [boardId, onUpdateColumns]
@@ -485,7 +459,6 @@ export function useKanbanCardActions({
     actionStates,
     handleApprove,
     handleColumnsChange,
-    handleHistoryColumnsChange,
     handlePlanChange,
     handleQuestionsAnswered,
     handleReject,

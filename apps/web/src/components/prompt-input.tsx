@@ -341,13 +341,14 @@ export function PromptInput() {
 
     if (trimmedPrompt === "/undo" || trimmedPrompt === "/redo") {
       const command = trimmedPrompt === "/undo" ? "undo" : "redo";
-      const success = await sessionCommand(command);
-      if (success) {
+      const result = await sessionCommand(selectedBoard.boardId, command);
+      if (result.ok) {
         setPrompt("");
         setParts([]);
       } else {
         setSubmitError(
-          `Could not ${command} this session. Your prompt is unchanged; check the board connection and try again.`
+          result.error ??
+            `Could not ${command} repository changes. Your prompt is unchanged; check the board connection and try again.`
         );
       }
       return;
@@ -421,14 +422,19 @@ export function PromptInput() {
       if (item.id === "builtin:undo" || item.id === "builtin:redo") {
         const command = item.id === "builtin:undo" ? "undo" : "redo";
         setSubmitError(null);
-        const success = await sessionCommand(command);
-        if (success) {
+        if (!selectedBoard) {
+          setSubmitError("Select a board before changing repository history.");
+          return;
+        }
+        const result = await sessionCommand(selectedBoard.boardId, command);
+        if (result.ok) {
           autocomplete.close();
           setTextareaRect(null);
           setPrompt("");
         } else {
           setSubmitError(
-            `Could not ${command} this session. Your prompt is unchanged; check the board connection and try again.`
+            result.error ??
+              `Could not ${command} repository changes. Your prompt is unchanged; check the board connection and try again.`
           );
         }
         return;
@@ -443,7 +449,7 @@ export function PromptInput() {
 
       insertPart(item);
     },
-    [autocomplete, insertPart, sessionCommand]
+    [autocomplete, insertPart, selectedBoard, sessionCommand]
   );
 
   const handleExpandDirectory = useCallback(
