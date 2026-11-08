@@ -32,7 +32,10 @@ import { WorkspaceHub } from "../src/ws/hub";
 import { startScriptedEngine } from "./fixtures/opencode-engine";
 
 const SNAPSHOT_HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-const BROWSER_FIXTURE_ORIGIN = "http://localhost:3001";
+const BROWSER_FIXTURE_ORIGINS = [
+  "http://localhost:3001",
+  "http://127.0.0.1:3001",
+];
 
 interface QualificationRun {
   boardId: string;
@@ -252,7 +255,7 @@ export async function startPhase6Harness() {
     const app = new Elysia()
       .use(
         cors({
-          origin: [BROWSER_FIXTURE_ORIGIN],
+          origin: BROWSER_FIXTURE_ORIGINS,
           credentials: true,
           maxAge: 86_400,
           methods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -264,7 +267,7 @@ export async function startPhase6Harness() {
           token,
           ticketStore: workspace.meta,
           isProduction: false,
-          localOrigins: [BROWSER_FIXTURE_ORIGIN],
+          localOrigins: BROWSER_FIXTURE_ORIGINS,
           pairingTokenStore: new DevicePairingTokenStore(),
         })
       )
