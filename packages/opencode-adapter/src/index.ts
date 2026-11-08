@@ -13,6 +13,7 @@ import { PermissionHandler } from "./features/permissions/permission-handler";
 import { ProjectManager } from "./features/projects/project-manager";
 import { ProviderManager } from "./features/providers/provider-manager";
 import { QuestionHandler } from "./features/questions/question-handler";
+import { WorkspaceReferenceManager } from "./features/references/reference-manager";
 import { SessionManager } from "./features/session/session-manager";
 import { TuiManager } from "./features/tui/tui-manager";
 
@@ -75,6 +76,11 @@ export type {
   QuestionRequest,
 } from "./features/questions/question-handler";
 export type {
+  CommandReference,
+  FileReference,
+} from "./features/references/reference-manager";
+export { ReferenceLookupError } from "./features/references/reference-manager";
+export type {
   SessionCommandInput,
   SessionCreateInput,
   SessionFileDiff,
@@ -102,6 +108,7 @@ export class OpenCodeAdapter {
   readonly questions: QuestionHandler;
   readonly projects: ProjectManager;
   readonly providers: ProviderManager;
+  readonly references: WorkspaceReferenceManager;
   readonly tui: TuiManager;
 
   constructor(client: OpencodeClient, normalizationScope = "default") {
@@ -115,6 +122,7 @@ export class OpenCodeAdapter {
     this.questions = new QuestionHandler(client);
     this.projects = new ProjectManager(client);
     this.providers = new ProviderManager(client);
+    this.references = new WorkspaceReferenceManager(client);
     this.tui = new TuiManager(client);
   }
 

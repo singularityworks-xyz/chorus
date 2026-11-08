@@ -119,7 +119,7 @@ export function PromptInput() {
     addRecentModel,
   } = useWorkspace();
 
-  const autocomplete = useAutocomplete(selectedBoard?.repo.directory);
+  const autocomplete = useAutocomplete(selectedBoard?.boardId);
 
   useEffect(() => {
     if (restoredPrompt) {
@@ -128,6 +128,19 @@ export function PromptInput() {
       restorePrompt("");
     }
   }, [restoredPrompt, restorePrompt]);
+
+  useEffect(() => {
+    if (!autocomplete.isOpen) {
+      setTextareaRect(null);
+      return;
+    }
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      return;
+    }
+    const rect = textarea.getBoundingClientRect();
+    setTextareaRect({ top: rect.top, left: rect.left, width: rect.width });
+  }, [autocomplete.isOpen]);
 
   useEffect(() => {
     setIsMounted(true);
@@ -406,15 +419,6 @@ export function PromptInput() {
 
     const cursorPos = e.target.selectionStart;
     autocomplete.checkTrigger(e.target.value, cursorPos);
-
-    if (autocomplete.isOpen) {
-      const rect = e.target.getBoundingClientRect();
-      setTextareaRect({
-        top: rect.top,
-        left: rect.left,
-        width: rect.width,
-      });
-    }
   };
 
   const handleSelectAutocomplete = useCallback(
@@ -722,6 +726,7 @@ export function PromptInput() {
         </form>
         <CommandPalette
           anchorRect={textareaRect}
+          error={autocomplete.error}
           isLoading={autocomplete.isLoading}
           items={autocomplete.items}
           onClose={() => {
@@ -729,6 +734,7 @@ export function PromptInput() {
             setTextareaRect(null);
           }}
           onExpandDirectory={handleExpandDirectory}
+          onRetry={autocomplete.retry}
           onSelect={handleSelectAutocomplete}
         />
       </div>

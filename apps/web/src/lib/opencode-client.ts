@@ -1,171 +1,138 @@
 import {
   apiErrorSchema,
+  boardAutocompleteResponseSchema,
   type SessionFileDiff,
   sessionFileDiffsSchema,
 } from "@chorus/contracts";
-import posthog from "posthog-js";
 
 export type { SessionFileDiff } from "@chorus/contracts";
 
-const OPENCODE_BASE_URL =
-  process.env.NEXT_PUBLIC_OPENCODE_URL ?? "http://localhost:4096";
-
 const IS_DEV = process.env.NODE_ENV !== "production";
 
-interface FetchOptions {
-  directory?: string;
-}
-
-function logApiError(
-  url: string,
-  response: Response,
-  context?: Record<string, unknown>
-) {
-  if (IS_DEV) {
-    console.error(`[opencode-client] HTTP ${response.status}`, {
-      url,
-      context,
-    });
-  }
-  posthog.capture("opencode_api_error", {
-    url,
-    status: response.status,
-    statusText: response.statusText,
-    context,
-  });
-}
-
-async function safeFetch<T>(
-  url: string,
-  context?: Record<string, unknown>
-): Promise<T> {
-  try {
-    const response = await fetch(url, {
-      signal: AbortSignal.timeout(5000),
-      headers: { Accept: "application/json" },
-    });
-
-    if (!response.ok) {
-      logApiError(url, response, context);
-      return [] as unknown as T;
-    }
-
-    const contentType = response.headers.get("content-type") ?? "";
-    if (!contentType.includes("application/json")) {
-      if (IS_DEV) {
-        console.error(
-          `[opencode-client] Expected JSON but got: ${contentType}`,
-          { url, context }
-        );
-      }
-      posthog.capture("opencode_api_wrong_content_type", {
-        url,
-        contentType,
-        context,
-      });
-      return [] as unknown as T;
-    }
-
-    const text = await response.text();
-    if (!text) {
-      return [] as unknown as T;
-    }
-    return JSON.parse(text) as T;
-  } catch (error) {
-    if (IS_DEV) {
-      console.error("[opencode-client] Fetch failed", {
-        url,
-        errorMessage: error instanceof Error ? error.message : String(error),
-        errorType: error instanceof Error ? error.name : typeof error,
-        context,
-      });
-    }
-    posthog.capture("opencode_api_failed", {
-      url,
-      errorMessage: error instanceof Error ? error.message : String(error),
-      errorType: error instanceof Error ? error.name : typeof error,
-      context,
-    });
-    return [] as unknown as T;
-  }
+interface AutocompleteOptions {
+  signal?: AbortSignal;
 }
 
 export interface OpencodeSkill {
-  content: string;
-  description: string;
-  location: string;
+  description?: string;
   name: string;
 }
 
 export interface OpencodeCommand {
-  agent?: string;
   description?: string;
-  hints: string[];
-  model?: string;
   name: string;
-  source?: "command" | "mcp" | "skill";
-  subtask?: boolean;
-  template: string;
 }
 
 export interface OpencodeFileNode {
-  absolute: string;
-  ignored?: boolean;
   name: string;
   path: string;
   type: "file" | "directory";
 }
 
+async function fetchBoardAutocomplete(
+  boardId: string,
+  query: URLSearchParams,
+  options?: AutocompleteOptions
+) {
+  const url = `/api/boards/${encodeURIComponent(boardId)}/autocomplete?${query.toString()}`;
+  let response: Response;
+  try {
+    const timeout = AbortSignal.timeout(5000);
+    const signal = options?.signal
+      ? AbortSignal.any([options.signal, timeout])
+      : timeout;
+    response = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw error;
+    }
+    throw new Error(
+      "Could not reach Chorus. Check the server connection and try again."
+    );
+  }
+
+  const payload: unknown = await response.json().catch(() => undefined);
+  if (!response.ok) {
+    const parsedError = apiErrorSchema.safeParse(payload);
+    throw new Error(
+      parsedError.success
+        ? parsedError.data.message
+        : "Could not load board suggestions. Try again."
+    );
+  }
+
+  const parsed = boardAutocompleteResponseSchema.safeParse(payload);
+  if (!parsed.success) {
+    throw new Error(
+      "The server returned invalid board suggestions. Try again."
+    );
+  }
+  return parsed.data;
+}
+
 export async function fetchSkills(
-  _options?: FetchOptions
+  boardId: string,
+  options?: AutocompleteOptions
 ): Promise<OpencodeSkill[]> {
-  return await safeFetch<OpencodeSkill[]>(`${OPENCODE_BASE_URL}/skill`, {
-    endpoint: "skill",
-  });
+  const params = new URLSearchParams({ kind: "skills" });
+  const result = await fetchBoardAutocomplete(boardId, params, options);
+  if (result.kind !== "skills") {
+    throw new Error(
+      "The server returned the wrong board suggestions. Try again."
+    );
+  }
+  return result.skills;
 }
 
 export async function fetchCommands(
-  _options?: FetchOptions
+  boardId: string,
+  options?: AutocompleteOptions
 ): Promise<OpencodeCommand[]> {
-  return await safeFetch<OpencodeCommand[]>(`${OPENCODE_BASE_URL}/command`, {
-    endpoint: "command",
-  });
+  const params = new URLSearchParams({ kind: "commands" });
+  const result = await fetchBoardAutocomplete(boardId, params, options);
+  if (result.kind !== "commands") {
+    throw new Error(
+      "The server returned the wrong board suggestions. Try again."
+    );
+  }
+  return result.commands;
 }
 
 export async function fetchFiles(
+  boardId: string,
   query: string,
-  options?: FetchOptions
+  options?: AutocompleteOptions
 ): Promise<string[]> {
-  const params = new URLSearchParams({
-    query: query || ".",
-    limit: "50",
-  });
-  if (options?.directory) {
-    params.set("directory", options.directory);
+  const params = new URLSearchParams({ kind: "files", query });
+  const result = await fetchBoardAutocomplete(boardId, params, options);
+  if (result.kind !== "files") {
+    throw new Error(
+      "The server returned the wrong board suggestions. Try again."
+    );
   }
-  return await safeFetch<string[]>(`${OPENCODE_BASE_URL}/find/file?${params}`, {
-    endpoint: "find/file",
-    query,
-    ...options,
-  });
+  return result.files;
 }
 
 export async function fetchDirectory(
+  boardId: string,
   path: string,
-  options?: FetchOptions
+  options?: AutocompleteOptions
 ): Promise<OpencodeFileNode[]> {
-  const params = new URLSearchParams({ path });
-  if (options?.directory) {
-    params.set("directory", options.directory);
+  const params = new URLSearchParams({ kind: "directory", path });
+  const result = await fetchBoardAutocomplete(boardId, params, options);
+  if (result.kind !== "directory") {
+    throw new Error(
+      "The server returned the wrong board suggestions. Try again."
+    );
   }
-  return await safeFetch<OpencodeFileNode[]>(
-    `${OPENCODE_BASE_URL}/file?${params}`,
-    {
-      endpoint: "file",
-      path,
-      ...options,
-    }
-  );
+  return result.entries.map((entry) => ({
+    name: entry.path.split("/").filter(Boolean).at(-1) ?? entry.path,
+    path: entry.path,
+    type: entry.type,
+  }));
 }
 
 export async function fetchSessionDiff(

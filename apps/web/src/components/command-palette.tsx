@@ -4,10 +4,12 @@ import type { AutocompleteItem } from "@/hooks/use-autocomplete";
 
 interface CommandPaletteProps {
   anchorRect: { top: number; left: number; width: number } | null;
+  error: string | null;
   isLoading: boolean;
   items: AutocompleteItem[];
   onClose: () => void;
   onExpandDirectory?: (item: AutocompleteItem) => void;
+  onRetry: () => void;
   onSelect: (item: AutocompleteItem) => void;
 }
 
@@ -19,10 +21,12 @@ const ICONS = {
 
 export function CommandPalette({
   items,
+  error,
   isLoading,
   onSelect,
   onClose,
   onExpandDirectory,
+  onRetry,
   anchorRect,
 }: CommandPaletteProps) {
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -32,6 +36,12 @@ export function CommandPalette({
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+        return;
+      }
+
       const currentItems = itemsRef.current;
       if (currentItems.length === 0) {
         return;
@@ -55,9 +65,6 @@ export function CommandPalette({
             onSelect(selected);
           }
         }
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
       }
     },
     [selectedIndex, onSelect, onClose, onExpandDirectory]
@@ -79,7 +86,7 @@ export function CommandPalette({
     selectedEl?.scrollIntoView({ block: "nearest" });
   }, [selectedIndex]);
 
-  if (!anchorRect || items.length === 0) {
+  if (!anchorRect || (!(isLoading || error) && items.length === 0)) {
     return null;
   }
 
@@ -107,67 +114,92 @@ export function CommandPalette({
         transform: "translateY(-100%)",
       }}
     >
-      <div
-        className="max-h-64 overflow-y-auto p-1"
-        ref={listRef}
-        role="listbox"
-      >
-        {isLoading ? (
-          <div className="px-3 py-4 text-center text-white/40 text-xs">
-            Loading...
+      <div aria-busy={isLoading} className="max-h-64 overflow-y-auto p-1">
+        {isLoading && (
+          <div
+            className="px-3 py-3 text-center text-white/40 text-xs"
+            role="status"
+          >
+            Loading suggestions…
           </div>
-        ) : (
-          items.map((item, index) => {
-            const isDirectory = item.isDirectory === true;
-            let Icon: typeof FileText = FileText;
-            if (isDirectory) {
-              Icon = Folder;
-            } else if (item.type != null && item.type in ICONS) {
-              Icon = ICONS[item.type];
-            }
+        )}
+        {error && !isLoading && (
+          <div
+            className="flex items-center gap-3 px-3 py-2 text-xs"
+            role="alert"
+          >
+            <span className="min-w-0 flex-1 text-rose-200/90">{error}</span>
+            <button
+              className="shrink-0 rounded-md border border-white/10 px-2 py-1 text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+              onClick={onRetry}
+              type="button"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+        {!(isLoading || error) && items.length === 0 && (
+          <div
+            className="px-3 py-3 text-center text-white/40 text-xs"
+            role="status"
+          >
+            No suggestions found.
+          </div>
+        )}
+        {items.length > 0 && (
+          <div ref={listRef} role="listbox">
+            {items.map((item, index) => {
+              const isDirectory = item.isDirectory === true;
+              let Icon: typeof FileText = FileText;
+              if (isDirectory) {
+                Icon = Folder;
+              } else if (item.type != null && item.type in ICONS) {
+                Icon = ICONS[item.type];
+              }
 
-            return (
-              <div
-                aria-selected={index === selectedIndex}
-                className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2 text-sm transition-colors hover:bg-white/10 data-[selected=true]:bg-white/15"
-                data-index={index}
-                data-selected={index === selectedIndex}
-                key={item.id}
-                onClick={() => onSelect(item)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    onSelect(item);
-                  }
-                }}
-                onMouseEnter={() => setSelectedIndex(index)}
-                role="option"
-                tabIndex={0}
-              >
-                <Icon
-                  className={`h-4 w-4 shrink-0 ${
-                    isDirectory ? "text-amber-400/70" : "text-white/50"
-                  }`}
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate font-medium text-white/90">
-                    {item.label}
-                  </div>
-                  {item.description && (
-                    <div className="truncate text-white/40 text-xs">
-                      {item.description}
+              return (
+                <div
+                  aria-selected={index === selectedIndex}
+                  className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-2 text-sm transition-colors hover:bg-white/10 data-[selected=true]:bg-white/15"
+                  data-index={index}
+                  data-selected={index === selectedIndex}
+                  key={item.id}
+                  onClick={() => onSelect(item)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onSelect(item);
+                    }
+                  }}
+                  onMouseEnter={() => setSelectedIndex(index)}
+                  role="option"
+                  tabIndex={0}
+                >
+                  <Icon
+                    className={`h-4 w-4 shrink-0 ${
+                      isDirectory ? "text-amber-400/70" : "text-white/50"
+                    }`}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-medium text-white/90">
+                      {item.label}
                     </div>
+                    {item.description && (
+                      <div className="truncate text-white/40 text-xs">
+                        {item.description}
+                      </div>
+                    )}
+                  </div>
+                  {isDirectory && onExpandDirectory && (
+                    <span className="text-[10px] text-white/25">Tab ↹</span>
+                  )}
+                  {index === selectedIndex && !isDirectory && (
+                    <ArrowUp className="h-3 w-3 rotate-90 text-white/30" />
                   )}
                 </div>
-                {isDirectory && onExpandDirectory && (
-                  <span className="text-[10px] text-white/25">Tab ↹</span>
-                )}
-                {index === selectedIndex && !isDirectory && (
-                  <ArrowUp className="h-3 w-3 rotate-90 text-white/30" />
-                )}
-              </div>
-            );
-          })
+              );
+            })}
+          </div>
         )}
       </div>
     </div>

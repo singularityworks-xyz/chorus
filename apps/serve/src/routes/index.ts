@@ -1,9 +1,12 @@
 import {
+  boardAutocompleteRequestSchema,
+  boardAutocompleteResponseSchema,
   boardSessionHistoryCommandSchema,
   queueBoardPromptInputSchema,
   sessionFileDiffsSchema,
 } from "@chorus/contracts";
 import { createLogger } from "@chorus/logger";
+import { ReferenceLookupError } from "@chorus/oc-adapter";
 import { Elysia, t } from "elysia";
 import { assertRegisteredRoot, UnregisteredRootError } from "../auth/roots";
 import type { OpenCodeBridge } from "../bridge/opencode/bridge";
@@ -31,6 +34,10 @@ const logger = createLogger(
   },
   "ROUTES"
 );
+const LEADING_SLASHES = /^\/+/;
+const LEADING_DOT_SEGMENTS = /^(\.\/)+/;
+const PATH_SEPARATORS = /[\\/]/;
+const WINDOWS_DRIVE_PREFIX = /^[A-Za-z]:/;
 
 function boardTaskCommandStatus(error: BoardTaskCommandError): number {
   switch (error.code) {
@@ -60,6 +67,14 @@ function mapRouteError(error: unknown): {
   }
   if (error instanceof EngineUnavailableError) {
     return { code: error.code, message: error.message, status: 503 };
+  }
+  if (error instanceof ReferenceLookupError) {
+    return {
+      code: "autocomplete_unavailable",
+      message:
+        "Could not load board suggestions. Check the provider connection and retry.",
+      status: 502,
+    };
   }
   if (error instanceof UnknownSessionError) {
     return { code: "unknown_session", message: error.message, status: 404 };
@@ -171,6 +186,90 @@ export function createHttpRoutes(
       }))
 
       .get("/bridge/status", () => bridge.getStatus())
+
+      .get(
+        "/boards/:boardID/autocomplete",
+        async ({ params, query, set }) => {
+          const parsed = boardAutocompleteRequestSchema.safeParse(query);
+          if (!parsed.success) {
+            set.status = 422;
+            return {
+              code: "invalid_autocomplete_request",
+              message: "Choose a valid board suggestion lookup and try again.",
+            };
+          }
+
+          const board = workspaceStore.getBoard(params.boardID);
+          if (!board) {
+            throw new BoardTaskCommandError(
+              "board_not_found",
+              "This board is no longer available. Reopen it and try again."
+            );
+          }
+
+          boardTasks.assertBoardOpen(board.boardId);
+          const directory = board.repo.worktree ?? board.repo.directory;
+          await boardTasks.assertCheckoutAuthorized(directory);
+
+          const request = parsed.data;
+          switch (request.kind) {
+            case "commands":
+              return boardAutocompleteResponseSchema.parse({
+                kind: request.kind,
+                commands: await bridge.listAutocompleteCommands(directory),
+              });
+            case "skills":
+              return boardAutocompleteResponseSchema.parse({
+                kind: request.kind,
+                skills: await bridge.listAutocompleteSkills(directory),
+              });
+            case "files":
+              return boardAutocompleteResponseSchema.parse({
+                kind: request.kind,
+                files: (
+                  await bridge.findAutocompleteFiles(request.query, directory)
+                ).map((entry) => entry.path),
+              });
+            case "directory": {
+              const relativePath = normalizeAutocompletePath(request.path);
+              if (relativePath === null) {
+                set.status = 422;
+                return {
+                  code: "invalid_autocomplete_path",
+                  message: "Choose a folder inside this board and try again.",
+                };
+              }
+              return boardAutocompleteResponseSchema.parse({
+                kind: request.kind,
+                entries: await bridge.listAutocompleteDirectory(
+                  relativePath,
+                  directory
+                ),
+              });
+            }
+            default:
+              set.status = 422;
+              return {
+                code: "invalid_autocomplete_request",
+                message:
+                  "Choose a valid board suggestion lookup and try again.",
+              };
+          }
+        },
+        {
+          params: t.Object({ boardID: t.String() }),
+          query: t.Object({
+            kind: t.Union([
+              t.Literal("commands"),
+              t.Literal("skills"),
+              t.Literal("files"),
+              t.Literal("directory"),
+            ]),
+            query: t.Optional(t.String({ maxLength: 256 })),
+            path: t.Optional(t.String({ maxLength: 1024 })),
+          }),
+        }
+      )
 
       .post(
         "/tasks",
@@ -757,4 +856,20 @@ export function createHttpRoutes(
         }
       )
   );
+}
+
+/** Converts slash-triggered paths to board-relative paths and rejects escapes. */
+function normalizeAutocompletePath(path: string): string | null {
+  const relative = path
+    .replace(LEADING_SLASHES, "")
+    .replace(LEADING_DOT_SEGMENTS, "");
+  if (
+    path.startsWith("\\") ||
+    WINDOWS_DRIVE_PREFIX.test(relative) ||
+    relative.includes("\0") ||
+    relative.split(PATH_SEPARATORS).some((segment) => segment === "..")
+  ) {
+    return null;
+  }
+  return relative || ".";
 }

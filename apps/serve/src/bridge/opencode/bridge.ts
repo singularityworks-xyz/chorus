@@ -528,6 +528,26 @@ export class OpenCodeBridge {
     return adapter.sessions.diff(sessionID, target);
   }
 
+  async listAutocompleteCommands(directory: string) {
+    const adapter = await this.#adapterFor(directory);
+    return adapter.references.listCommands(directory);
+  }
+
+  async listAutocompleteSkills(directory: string) {
+    const adapter = await this.#adapterFor(directory);
+    return adapter.references.listSkills(directory);
+  }
+
+  async findAutocompleteFiles(query: string, directory: string) {
+    const adapter = await this.#adapterFor(directory);
+    return adapter.references.findFiles(query, directory);
+  }
+
+  async listAutocompleteDirectory(path: string, directory: string) {
+    const adapter = await this.#adapterFor(directory);
+    return adapter.references.listDirectory(path, directory);
+  }
+
   async waitForSessionIdle(
     sessionID: string,
     directory: string,
