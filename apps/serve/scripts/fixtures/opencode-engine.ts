@@ -160,7 +160,17 @@ export function startScriptedEngine() {
     }
     const body = replySchema.parse(await request.json());
     entry.approved = body.reply !== "reject";
-    if (!entry.approved) {
+    if (entry.approved) {
+      emit(directory, {
+        id: eventId(),
+        type: "message.part.updated",
+        properties: {
+          sessionID: entry.session.id,
+          part: reasoningPart(entry),
+          time: Date.now(),
+        },
+      });
+    } else {
       status(entry, false);
     }
     return Response.json(true);

@@ -51,15 +51,13 @@ test("scripted provider catalog and reasoning deltas cross the real SDK and proj
       () => {
         const board = harness.store.getBoard(run.boardId);
         return Boolean(
-          Object.values(board?.columns ?? {})
-            .flat()
-            .some((task) =>
-              task.run?.steps.some(
-                (step) =>
-                  step.kind === "thinking" &&
-                  step.content?.includes("Checking the board state.")
-              )
+          board?.columns.in_progress.some((task) =>
+            task.run?.steps.some(
+              (step) =>
+                step.kind === "thinking" &&
+                step.content?.includes("Checking the board state.")
             )
+          )
         );
       },
       5000,
