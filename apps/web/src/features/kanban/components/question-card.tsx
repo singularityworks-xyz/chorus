@@ -1,13 +1,10 @@
 "use client";
 
-import {
-  acceptedCommandResponseSchema,
-  apiErrorSchema,
-  type PendingApprovalRequest,
-} from "@chorus/contracts";
+import type { PendingApprovalRequest } from "@chorus/contracts";
 import { CheckIcon, Loader2Icon, MessageSquareIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import { requireAcceptedCommand } from "../command-client";
 import {
   questionAnswerKey,
   validateQuestionAnswers,
@@ -35,24 +32,6 @@ interface QuestionRequestCardProps {
   requestIndex: number;
   selected: Record<string, number[]>;
   submitting: boolean;
-}
-
-async function requireAcceptedQuestionCommand(
-  response: Response,
-  fallback: string
-): Promise<void> {
-  const payload: unknown = await response.json().catch(() => undefined);
-  if (!response.ok) {
-    const error = apiErrorSchema.safeParse(payload);
-    throw new Error(error.success ? error.data.message : fallback);
-  }
-
-  const accepted = acceptedCommandResponseSchema.safeParse(payload);
-  if (!(accepted.success && accepted.data.accepted)) {
-    throw new Error(
-      "The server did not accept this request. Refresh and retry."
-    );
-  }
 }
 
 function questionCommandError(error: unknown, action: "answer" | "dismiss") {
@@ -355,10 +334,12 @@ export function QuestionCard({ requests, sessionID }: QuestionCardProps) {
             signal: AbortSignal.timeout(10_000),
           }
         );
-        await requireAcceptedQuestionCommand(
-          response,
-          "Could not send your answer. Your selections are still here; try again."
-        );
+        await requireAcceptedCommand(response, {
+          fallback:
+            "Could not send your answer. Your selections are still here; try again.",
+          rejectedMessage:
+            "The server did not accept this answer. Refresh and retry.",
+        });
         setActionMessage("Answer sent. Waiting for the agent to continue…");
       } catch (error) {
         setActionError(questionCommandError(error, "answer"));
@@ -390,10 +371,9 @@ export function QuestionCard({ requests, sessionID }: QuestionCardProps) {
           `/api/tasks/${encodeURIComponent(sessionID)}/questions/${encodeURIComponent(question.requestId)}/reject`,
           { method: "POST", signal: AbortSignal.timeout(10_000) }
         );
-        await requireAcceptedQuestionCommand(
-          response,
-          "Could not dismiss the agent's question. Try again."
-        );
+        await requireAcceptedCommand(response, {
+          fallback: "Could not dismiss the agent's question. Try again.",
+        });
         setActionMessage(
           "Question dismissed. Waiting for the agent to continue…"
         );

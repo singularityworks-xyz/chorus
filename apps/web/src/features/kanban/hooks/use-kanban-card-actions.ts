@@ -1,15 +1,26 @@
 "use client";
 
-import {
-  acceptedCommandResponseSchema,
-  apiErrorSchema,
-  boardTaskCommandResponseSchema,
-  type Columns,
-  type Task,
-} from "@chorus/contracts";
+import type { Columns, Task } from "@chorus/contracts";
 import posthog from "posthog-js";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useWorkspace } from "@/features/workspace/workspace-context";
+import { requireAcceptedCommand } from "../command-client";
+import {
+  type BoardTaskAction,
+  requestBoardTaskCommand,
+} from "../task-command-client";
+
+const TASK_ACTION_TIMEOUT_MS = 10_000;
+
+function taskActionErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error && error.name === "TimeoutError") {
+    return "The request timed out. Refresh the board to check whether the action completed before retrying.";
+  }
+  if (error instanceof TypeError) {
+    return "Could not reach Chorus. Check the connection and refresh the board before retrying.";
+  }
+  return error instanceof Error ? error.message : fallback;
+}
 
 export interface KanbanTaskActionState {
   awaitingEvent?: boolean;
@@ -36,21 +47,6 @@ export interface KanbanCardActions {
   reviewMode: "manual" | "auto";
   reviewModeError: string | null;
   reviewModePending: boolean;
-}
-
-async function requireAccepted(response: Response, fallback: string) {
-  const payload: unknown = await response.json().catch(() => undefined);
-  if (!response.ok) {
-    const error = apiErrorSchema.safeParse(payload);
-    throw new Error(error.success ? error.data.message : fallback);
-  }
-
-  const accepted = acceptedCommandResponseSchema.safeParse(payload);
-  if (accepted.success && !accepted.data.accepted) {
-    throw new Error(
-      "The server did not accept this action. Refresh the board and try again."
-    );
-  }
 }
 
 function taskPendingApprovals(task: Task) {
@@ -89,13 +85,16 @@ async function submitTaskApproval({
         "This permission request has no provider session. Refresh the board and try again."
       );
     }
-    await requireAccepted(
+    await requireAcceptedCommand(
       await fetch(`/api/tasks/${encodeURIComponent(taskSessionId)}/approve`, {
         body: JSON.stringify({ requestID: permission.requestId }),
         headers: { "content-type": "application/json" },
         method: "POST",
+        signal: AbortSignal.timeout(TASK_ACTION_TIMEOUT_MS),
       }),
-      "Could not approve this permission request. Try again."
+      {
+        fallback: "Could not approve this permission request. Try again.",
+      }
     );
     return;
   }
@@ -112,7 +111,7 @@ async function submitTaskApproval({
   }
 
   const planText = plan || task.plan || task.title;
-  await requireAccepted(
+  await requireAcceptedCommand(
     await fetch(
       `/api/boards/${encodeURIComponent(boardId)}/tasks/${encodeURIComponent(task.id)}/finalize-review`,
       {
@@ -122,9 +121,13 @@ async function submitTaskApproval({
         }),
         headers: { "content-type": "application/json" },
         method: "POST",
+        signal: AbortSignal.timeout(TASK_ACTION_TIMEOUT_MS),
       }
     ),
-    "Could not finalize this plan. Your edits are still on the card; try again."
+    {
+      fallback:
+        "Could not finalize this plan. Your edits are still on the card; try again.",
+    }
   );
 }
 
@@ -153,13 +156,14 @@ async function submitTaskRejection({
         "This permission request has no provider session. Refresh the board and try again."
       );
     }
-    await requireAccepted(
+    await requireAcceptedCommand(
       await fetch(`/api/tasks/${encodeURIComponent(taskSessionId)}/reject`, {
         body: JSON.stringify({ requestID: permission.requestId }),
         headers: { "content-type": "application/json" },
         method: "POST",
+        signal: AbortSignal.timeout(TASK_ACTION_TIMEOUT_MS),
       }),
-      "Could not reject this permission request. Try again."
+      { fallback: "Could not reject this permission request. Try again." }
     );
     return;
   }
@@ -171,12 +175,15 @@ async function submitTaskRejection({
         "This question has no provider session. Refresh the board and try again."
       );
     }
-    await requireAccepted(
+    await requireAcceptedCommand(
       await fetch(
         `/api/tasks/${encodeURIComponent(taskSessionId)}/questions/${encodeURIComponent(question.requestId)}/reject`,
-        { method: "POST" }
+        {
+          method: "POST",
+          signal: AbortSignal.timeout(TASK_ACTION_TIMEOUT_MS),
+        }
       ),
-      "Could not reject this question. Try again."
+      { fallback: "Could not reject this question. Try again." }
     );
     return;
   }
@@ -186,12 +193,18 @@ async function submitTaskRejection({
     );
   }
 
-  await requireAccepted(
+  await requireAcceptedCommand(
     await fetch(
       `/api/boards/${encodeURIComponent(boardId)}/tasks/${encodeURIComponent(task.id)}/reject-review`,
-      { method: "POST" }
+      {
+        method: "POST",
+        signal: AbortSignal.timeout(TASK_ACTION_TIMEOUT_MS),
+      }
     ),
-    "Could not reject this plan. Your task remains on the board; try again."
+    {
+      fallback:
+        "Could not reject this plan. Your task remains on the board; try again.",
+    }
   );
 }
 
@@ -218,6 +231,7 @@ export function useKanbanCardActions({
   >({});
   const reviewModeRef = useRef(reviewMode);
   const reviewModeCommandRef = useRef(0);
+  const inFlightTaskActionRef = useRef(new Set<string>());
   const { updateBoardReviewMode } = useWorkspace();
 
   // Server events own lifecycle columns. The hook keeps no optimistic lifecycle
@@ -292,6 +306,9 @@ export function useKanbanCardActions({
         });
         return;
       }
+      if (inFlightTaskActionRef.current.has(taskId)) {
+        return;
+      }
       if (!sessionId && task.outcome !== "awaiting_review") {
         setTaskActionState(taskId, {
           error: "This board has no active session to approve.",
@@ -299,16 +316,17 @@ export function useKanbanCardActions({
         return;
       }
 
+      inFlightTaskActionRef.current.add(taskId);
       setTaskActionState(taskId, { pending: "approve" });
-      posthog.capture("kanban_review_approve_start", {
-        boardId,
-        hasAnswers: answers.some((answer) => answer.length > 0),
-        hasPlan: !!plan,
-        sessionId,
-        taskId,
-      });
 
       try {
+        posthog.capture("kanban_review_approve_start", {
+          boardId,
+          hasAnswers: answers.some((answer) => answer.length > 0),
+          hasPlan: !!plan,
+          sessionId,
+          taskId,
+        });
         await submitTaskApproval({
           answers,
           boardId,
@@ -327,10 +345,10 @@ export function useKanbanCardActions({
           taskId,
         });
       } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Could not approve this task. Try again.";
+        const message = taskActionErrorMessage(
+          error,
+          "Could not approve this task. Try again."
+        );
         setTaskActionState(taskId, { error: message });
         posthog.capture("kanban_review_approve_error", {
           boardId,
@@ -338,6 +356,8 @@ export function useKanbanCardActions({
           sessionId,
           taskId,
         });
+      } finally {
+        inFlightTaskActionRef.current.delete(taskId);
       }
     },
     [boardId, localColumns, sessionId, setTaskActionState]
@@ -355,6 +375,9 @@ export function useKanbanCardActions({
         });
         return;
       }
+      if (inFlightTaskActionRef.current.has(taskId)) {
+        return;
+      }
       if (!sessionId && task.outcome !== "awaiting_review") {
         setTaskActionState(taskId, {
           error: "This board has no active session to reject.",
@@ -362,6 +385,7 @@ export function useKanbanCardActions({
         return;
       }
 
+      inFlightTaskActionRef.current.add(taskId);
       setTaskActionState(taskId, { pending: "reject" });
       try {
         await submitTaskRejection({ boardId, sessionId, task });
@@ -371,10 +395,10 @@ export function useKanbanCardActions({
           message: "Request accepted. Waiting for the board to update…",
         });
       } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Could not reject this task. Try again.";
+        const message = taskActionErrorMessage(
+          error,
+          "Could not reject this task. Try again."
+        );
         setTaskActionState(taskId, { error: message });
         posthog.capture("kanban_review_reject_error", {
           boardId,
@@ -382,13 +406,15 @@ export function useKanbanCardActions({
           sessionId,
           taskId,
         });
+      } finally {
+        inFlightTaskActionRef.current.delete(taskId);
       }
     },
     [boardId, localColumns, sessionId, setTaskActionState]
   );
 
   const runTaskCommand = useCallback(
-    async (taskId: string, action: "run" | "retry") => {
+    async (taskId: string, action: BoardTaskAction) => {
       const task = Object.values(localColumns)
         .flat()
         .find((candidate) => candidate.id === taskId);
@@ -400,29 +426,14 @@ export function useKanbanCardActions({
         return;
       }
 
+      if (inFlightTaskActionRef.current.has(taskId)) {
+        return;
+      }
+      inFlightTaskActionRef.current.add(taskId);
       setTaskActionState(taskId, { pending: action });
       try {
-        const response = await fetch(
-          `/api/boards/${encodeURIComponent(boardId)}/tasks/${encodeURIComponent(taskId)}/${action}`,
-          { method: "POST" }
-        );
-        const payload: unknown = await response.json().catch(() => undefined);
-        if (!response.ok) {
-          const error = apiErrorSchema.safeParse(payload);
-          throw new Error(
-            error.success
-              ? error.data.message
-              : `Could not ${action} this task. Try again.`
-          );
-        }
-
-        const command = boardTaskCommandResponseSchema.safeParse(payload);
-        if (!command.success) {
-          throw new Error(
-            "The server returned an invalid task response. Refresh the board before trying again."
-          );
-        }
-        if (command.data.status === "already_running") {
+        const command = await requestBoardTaskCommand(boardId, taskId, action);
+        if (command.status === "already_running") {
           setTaskActionState(taskId, {
             message: "This task is already running.",
           });
@@ -430,11 +441,13 @@ export function useKanbanCardActions({
         }
         setTaskActionState(taskId, undefined);
       } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : `Could not ${action} this task. Try again.`;
+        const message = taskActionErrorMessage(
+          error,
+          `Could not ${action} this task. Try again.`
+        );
         setTaskActionState(taskId, { error: message });
+      } finally {
+        inFlightTaskActionRef.current.delete(taskId);
       }
     },
     [boardId, localColumns, setTaskActionState]

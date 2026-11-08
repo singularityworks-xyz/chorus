@@ -1,9 +1,5 @@
 "use client";
 
-import {
-  acceptedCommandResponseSchema,
-  apiErrorSchema,
-} from "@chorus/contracts";
 import { BorderlessFileView, InlineDiffView } from "@chorus/monaco";
 import {
   BrainIcon,
@@ -23,6 +19,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
+import { requireAcceptedCommand } from "../command-client";
 import { copyTextToClipboard } from "../utils/copy-text-to-clipboard";
 import { type GroupedStep, groupSteps } from "../utils/group-steps";
 
@@ -597,6 +594,18 @@ interface AgentOutputCardProps {
   taskTitle: string;
 }
 
+function stopCommandErrorMessage(error: unknown) {
+  if (error instanceof Error && error.name === "TimeoutError") {
+    return "The stop request timed out. The task may still be running; refresh the board before retrying.";
+  }
+  if (error instanceof TypeError) {
+    return "Could not reach Chorus. Check the connection and refresh the board before retrying.";
+  }
+  return error instanceof Error
+    ? error.message
+    : "Could not stop this task. Try again.";
+}
+
 export function AgentOutputCard({
   boardId,
   isActive,
@@ -630,30 +639,16 @@ export function AgentOutputCard({
     try {
       const response = await fetch(
         `/api/boards/${encodeURIComponent(boardId)}/tasks/${encodeURIComponent(taskId)}/abort`,
-        { method: "POST" }
+        { method: "POST", signal: AbortSignal.timeout(10_000) }
       );
-      const payload: unknown = await response.json().catch(() => undefined);
-      if (!response.ok) {
-        const error = apiErrorSchema.safeParse(payload);
-        throw new Error(
-          error.success
-            ? error.data.message
-            : "Could not stop this task. Try again."
-        );
-      }
-      const accepted = acceptedCommandResponseSchema.safeParse(payload);
-      if (accepted.success && !accepted.data.accepted) {
-        throw new Error(
-          "The engine did not accept the stop request. The task is still running."
-        );
-      }
+      await requireAcceptedCommand(response, {
+        fallback: "Could not stop this task. Try again.",
+        rejectedMessage:
+          "The engine did not accept the stop request. The task is still running.",
+      });
       setStopAccepted(true);
     } catch (error) {
-      setAbortError(
-        error instanceof Error
-          ? error.message
-          : "Could not stop this task. Try again."
-      );
+      setAbortError(stopCommandErrorMessage(error));
     } finally {
       setAborting(false);
     }
