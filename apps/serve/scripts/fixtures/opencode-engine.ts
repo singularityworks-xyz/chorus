@@ -10,6 +10,7 @@ interface FixtureSession {
   currentMessageId: string;
   currentReasoningPartId: string;
   currentTextPartId: string;
+  pendingQuestionId?: string;
   prompted: boolean;
   reasoning: string;
   session: Session;
@@ -19,9 +20,18 @@ interface FixtureSession {
 
 const SESSION_ROUTE = /^\/session\/([^/]+)(?:\/(.+))?$/;
 const PERMISSION_ROUTE = /^\/permission\/permission-(session-\d+)\/reply$/;
+const QUESTION_ROUTE = /^\/question\/([^/]+)\/(reply|reject)$/;
 const createSchema = z.object({ title: z.string().optional() });
 const promptSchema = z.object({ agent: z.string().optional() });
 const replySchema = z.object({ reply: z.enum(["once", "always", "reject"]) });
+const questionReplySchema = z.object({
+  answers: z.array(
+    z.object({
+      customAnswer: z.string().optional(),
+      optionIndices: z.array(z.number()).optional(),
+    })
+  ),
+});
 const revertSchema = z.object({
   messageID: z.string(),
   partID: z.string().optional(),
@@ -207,6 +217,46 @@ export function startScriptedEngine() {
     });
   }
 
+  function askQuestion(sessionID: string): string {
+    const entry = sessions.get(sessionID);
+    if (!(entry?.busy && entry.approved)) {
+      throw new Error("scripted session is not approved and running");
+    }
+    if (entry.pendingQuestionId) {
+      throw new Error("scripted session already has a pending question");
+    }
+
+    const requestID = `question-${sessionID}-${entry.turnNumber}`;
+    entry.pendingQuestionId = requestID;
+    emit(entry.session.directory, {
+      id: eventId(),
+      type: "question.asked",
+      properties: {
+        id: requestID,
+        sessionID,
+        questions: [
+          {
+            custom: false,
+            header: "Implementation choice",
+            multiple: false,
+            options: [
+              {
+                description: "Keep the behavior the task started with.",
+                label: "Preserve current behavior",
+              },
+              {
+                description: "Change the behavior based on the new request.",
+                label: "Apply the requested change",
+              },
+            ],
+            question: "Which behavior should the scripted task keep?",
+          },
+        ],
+      },
+    });
+    return requestID;
+  }
+
   function scopedSessions(directory: string) {
     return [...sessions.values()].filter(
       (entry) => entry.session.directory === directory
@@ -273,6 +323,55 @@ export function startScriptedEngine() {
     }
     return Response.json(true);
   }
+
+  async function questionReply(request: Request, url: URL, directory: string) {
+    const match = QUESTION_ROUTE.exec(url.pathname);
+    const requestID = match?.[1];
+    const entry = [...sessions.values()].find(
+      (candidate) =>
+        candidate.session.directory === directory &&
+        candidate.pendingQuestionId === requestID
+    );
+    if (!(entry && requestID && match?.[2])) {
+      return new Response(null, { status: 404 });
+    }
+
+    if (match[2] === "reply") {
+      const body = questionReplySchema.parse(await request.json());
+      const firstAnswer = body.answers[0];
+      const selectedOption = firstAnswer?.optionIndices?.[0];
+      let answer = firstAnswer?.customAnswer;
+      if (answer === undefined && selectedOption === 0) {
+        answer = "Preserve current behavior";
+      } else if (answer === undefined && selectedOption === 1) {
+        answer = "Apply the requested change";
+      }
+      answer ??= "Answer recorded";
+      entry.pendingQuestionId = undefined;
+      const delta = ` The user chose: ${answer}.`;
+      entry.text += delta;
+      emit(directory, {
+        id: eventId(),
+        type: "message.part.delta",
+        properties: {
+          delta,
+          field: "text",
+          messageID: entry.currentMessageId,
+          partID: entry.currentTextPartId,
+          sessionID: entry.session.id,
+        },
+      });
+      setTimeout(() => {
+        status(entry, false);
+      }, 100);
+      return Response.json(true);
+    }
+
+    entry.pendingQuestionId = undefined;
+    status(entry, false);
+    return Response.json(true);
+  }
+
   async function sessionRequest(request: Request, url: URL, directory: string) {
     const match = SESSION_ROUTE.exec(url.pathname);
     const entry = match?.[1] ? sessions.get(match[1]) : undefined;
@@ -349,6 +448,9 @@ export function startScriptedEngine() {
     async fetch(request) {
       const url = new URL(request.url);
       const directory = url.searchParams.get("directory") ?? "";
+      if (QUESTION_ROUTE.test(url.pathname)) {
+        return questionReply(request, url, directory);
+      }
       switch (url.pathname) {
         case "/global/health":
           return Response.json({ healthy: true, version: "1.19.0" });
@@ -446,7 +548,39 @@ export function startScriptedEngine() {
               }))
           );
         case "/question":
-          return Response.json([]);
+          return Response.json(
+            scopedSessions(directory).flatMap((entry) =>
+              entry.pendingQuestionId
+                ? [
+                    {
+                      id: entry.pendingQuestionId,
+                      sessionID: entry.session.id,
+                      questions: [
+                        {
+                          custom: false,
+                          header: "Implementation choice",
+                          multiple: false,
+                          options: [
+                            {
+                              description:
+                                "Keep the behavior the task started with.",
+                              label: "Preserve current behavior",
+                            },
+                            {
+                              description:
+                                "Change the behavior based on the new request.",
+                              label: "Apply the requested change",
+                            },
+                          ],
+                          question:
+                            "Which behavior should the scripted task keep?",
+                        },
+                      ],
+                    },
+                  ]
+                : []
+            )
+          );
         case "/file/content": {
           const entry = scopedSessions(directory)[0];
           const path = url.searchParams.get("path");
@@ -552,6 +686,7 @@ export function startScriptedEngine() {
     appendDelta,
     appendReasoningDelta,
     appendActiveReasoningDelta,
+    askQuestion,
     complete(sessionID: string) {
       const entry = sessions.get(sessionID);
       if (!entry?.approved) {

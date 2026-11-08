@@ -1,5 +1,6 @@
 import { startPhase6Harness } from "./phase-6-harness";
 
+const seedQuestionMode = process.env.CHORUS_BROWSER_FIXTURE_QUESTION === "1";
 const reasoningDeltas = [
   " Checking the current board and task state.",
   " The selected model is shared across these boards.",
@@ -9,6 +10,19 @@ const reasoningDeltas = [
 ];
 
 const harness = await startPhase6Harness({ interactive: true });
+if (seedQuestionMode) {
+  const boardId = harness.boardIds.at(-1);
+  if (!boardId) {
+    throw new Error("Question browser fixture has no board");
+  }
+  const run = await harness.queueInteractiveTask(
+    boardId,
+    "Choose how the scripted fixture should handle this task",
+    "auto"
+  );
+  await harness.approvePermission(run.sessionId, `permission-${run.sessionId}`);
+  harness.engine.askQuestion(run.sessionId);
+}
 let deltaIndex = 0;
 let streamFailure: unknown;
 let resolveShutdown: (() => void) | undefined;
@@ -17,19 +31,22 @@ const stopped = new Promise<void>((resolve) => {
   process.once("SIGINT", resolve);
   process.once("SIGTERM", resolve);
 });
-const streamTimer = setInterval(() => {
-  const delta = reasoningDeltas[deltaIndex % reasoningDeltas.length];
-  deltaIndex += 1;
-  if (delta) {
-    try {
-      harness.engine.appendActiveReasoningDelta(delta);
-    } catch (error) {
-      streamFailure = error;
-      process.stderr.write(`Fixture stream stopped: ${String(error)}\n`);
-      resolveShutdown?.();
+const streamTimer = setInterval(
+  () => {
+    const delta = reasoningDeltas[deltaIndex % reasoningDeltas.length];
+    deltaIndex += 1;
+    if (delta) {
+      try {
+        harness.engine.appendActiveReasoningDelta(delta);
+      } catch (error) {
+        streamFailure = error;
+        process.stderr.write(`Fixture stream stopped: ${String(error)}\n`);
+        resolveShutdown?.();
+      }
     }
-  }
-}, 30);
+  },
+  seedQuestionMode ? 200 : 30
+);
 
 process.stdout.write(
   `${JSON.stringify({

@@ -154,6 +154,93 @@ test("manual review streams a plan and finalizes into an approved build run", as
   }
 }, 30_000);
 
+test("scripted question replies clear the request and finish the targeted task", async () => {
+  const harness = await startPhase6Harness({ interactive: true });
+  try {
+    const boardId = harness.boardIds.at(-1);
+    if (!boardId) {
+      throw new Error("interactive fixture has no board");
+    }
+
+    const run = await harness.queueInteractiveTask(
+      boardId,
+      "Wait for the user to choose an implementation behavior",
+      "auto"
+    );
+    await harness.approvePermission(
+      run.sessionId,
+      `permission-${run.sessionId}`
+    );
+    await waitForQualification(
+      () =>
+        harness.store
+          .getBoard(boardId)
+          ?.columns.in_progress.some((task) => task.id === run.taskId) ?? false
+    );
+
+    const requestId = harness.engine.askQuestion(run.sessionId);
+    await waitForQualification(
+      () =>
+        harness.store
+          .getBoard(boardId)
+          ?.columns.approve.some((task) =>
+            task.pendingApprovals?.some(
+              (request) => request.requestId === requestId
+            )
+          ) ?? false
+    );
+
+    const board = harness.store.getBoard(boardId);
+    const directory = board?.repo.worktree ?? board?.repo.directory;
+    if (!directory) {
+      throw new Error("question fixture board has no checkout");
+    }
+    const adapter = OpenCodeAdapter.from({
+      baseUrl: harness.engine.baseUrl,
+      directory,
+    });
+    expect(await adapter.questions.list()).toMatchObject([
+      {
+        id: requestId,
+        sessionID: run.sessionId,
+        questions: [
+          {
+            header: "Implementation choice",
+            question: "Which behavior should the scripted task keep?",
+          },
+        ],
+      },
+    ]);
+
+    const response = await harness.replyInteractiveQuestion(
+      run.sessionId,
+      requestId
+    );
+    expect(response).toMatchObject({
+      accepted: true,
+      requestID: requestId,
+      sessionID: run.sessionId,
+    });
+    await waitForQualification(
+      () =>
+        harness.store
+          .getBoard(boardId)
+          ?.columns.done.some((task) => task.id === run.taskId) ?? false
+    );
+    expect(await adapter.questions.list()).toEqual([]);
+    expect(
+      harness.store
+        .getBoard(boardId)
+        ?.columns.done.find((task) => task.id === run.taskId)
+        ?.run?.steps.some((step) =>
+          step.content?.includes("The user chose: Preserve current behavior.")
+        )
+    ).toBe(true);
+  } finally {
+    await harness.close();
+  }
+}, 30_000);
+
 test("scripted provider catalog and reasoning deltas cross the real SDK and projector", async () => {
   const harness = await startPhase6Harness();
   try {
