@@ -15,13 +15,12 @@ import {
   TriangleAlertIcon,
   WrenchIcon,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { requireAcceptedCommand } from "../command-client";
 import { copyTextToClipboard } from "../utils/copy-text-to-clipboard";
 import { type GroupedStep, groupSteps } from "../utils/group-steps";
+import { StreamedContentPanel } from "./streamed-content-panel";
 
 export type AgentStepKind =
   | "thinking"
@@ -80,7 +79,6 @@ export function FileContentUnavailable({
 }
 
 const EMPTY_AGENT_STEPS: AgentStep[] = [];
-const MARKDOWN_PLUGINS = [remarkGfm];
 const MARKDOWN_REFRESH_INTERVAL_MS = 100;
 const COPY_STATE_PRESENTATION = {
   copying: {
@@ -125,20 +123,6 @@ function useStreamedMarkdownContent(content: string, isStreaming: boolean) {
 
   return isStreaming ? displayedContent : content;
 }
-
-const MarkdownContent = memo(function MarkdownContent({
-  className,
-  content,
-}: {
-  className: string;
-  content: string;
-}) {
-  return (
-    <div className={className}>
-      <ReactMarkdown remarkPlugins={MARKDOWN_PLUGINS}>{content}</ReactMarkdown>
-    </div>
-  );
-});
 
 const STEP_META: Record<
   AgentStepKind,
@@ -250,12 +234,11 @@ function GroupedThinkingBlock({
       </div>
 
       {expanded && hasContent && (
-        <div className="ml-5 rounded-xs border border-violet-500/10 bg-violet-500/[0.03] px-3 py-2.5">
-          <MarkdownContent
-            className="text-[0.72rem] text-violet-300/60 leading-relaxed"
-            content={displayedContent}
-          />
-        </div>
+        <StreamedContentPanel
+          className="border-violet-500/10 bg-violet-500/[0.03] text-violet-300/60"
+          content={displayedContent}
+          kind="thinking"
+        />
       )}
     </div>
   );
@@ -395,12 +378,11 @@ function GroupedResponseBlock({
       )}
 
       {expanded && hasContent && (
-        <div className="ml-5 rounded-xs border border-sky-500/10 bg-sky-500/[0.03] px-3 py-2.5">
-          <MarkdownContent
-            className="text-[0.72rem] text-sky-300/70 leading-relaxed"
-            content={displayedContent}
-          />
-        </div>
+        <StreamedContentPanel
+          className="border-sky-500/10 bg-sky-500/[0.03] text-sky-300/70"
+          content={displayedContent}
+          kind="response"
+        />
       )}
     </div>
   );
