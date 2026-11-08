@@ -1,6 +1,14 @@
 import { Database } from "bun:sqlite";
-import { chmodSync, copyFileSync, mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  constants as fsConstants,
+  mkdirSync,
+  rmSync,
+} from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 
 /**
  * SQLite layer for the Chorus event log (spec §5).
@@ -140,6 +148,21 @@ function migratePushSubscriptions(db: Database): void {
 
 export function resolveDbPath(dataDir: string): string {
   return join(dataDir, CHORUS_DB_FILENAME);
+}
+
+function databaseIntegrity(databasePath: string): string {
+  let probe: Database | null = null;
+  try {
+    probe = new Database(databasePath, { readonly: true, create: false });
+    const row = probe
+      .query<{ integrity_check: string }, []>("PRAGMA integrity_check")
+      .get();
+    return row?.integrity_check ?? "unknown";
+  } catch (error) {
+    return `unreadable: ${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    probe?.close();
+  }
 }
 
 /**
@@ -614,6 +637,64 @@ export class ChorusDatabase {
     this.#db.query("VACUUM INTO ?").run(destination);
   }
 
+  /** Creates or validates a private, immutable rollback copy. */
+  createVerifiedBackup(destination: string): boolean {
+    const resolvedDestination = resolve(destination);
+    if (resolvedDestination === this.path) {
+      throw new Error("A workspace backup cannot replace the active database.");
+    }
+
+    const directory = dirname(resolvedDestination);
+    mkdirSync(directory, { mode: 0o700, recursive: true });
+    chmodSync(directory, 0o700);
+
+    if (existsSync(resolvedDestination)) {
+      const integrity = databaseIntegrity(resolvedDestination);
+      if (integrity !== "ok") {
+        throw new Error(
+          `The existing workspace migration backup is invalid (${integrity}); refusing to migrate.`
+        );
+      }
+      chmodSync(resolvedDestination, 0o600);
+      return false;
+    }
+
+    const temporaryPath = join(
+      directory,
+      `.${basename(resolvedDestination)}.${randomUUID()}.tmp`
+    );
+    let destinationCreated = false;
+    try {
+      this.#db.query("VACUUM INTO ?").run(temporaryPath);
+      chmodSync(temporaryPath, 0o600);
+      const temporaryIntegrity = databaseIntegrity(temporaryPath);
+      if (temporaryIntegrity !== "ok") {
+        throw new Error(
+          `The workspace backup failed its integrity check (${temporaryIntegrity}).`
+        );
+      }
+
+      copyFileSync(
+        temporaryPath,
+        resolvedDestination,
+        fsConstants.COPYFILE_EXCL
+      );
+      destinationCreated = true;
+      chmodSync(resolvedDestination, 0o600);
+      return true;
+    } catch (cause) {
+      if (destinationCreated) {
+        rmSync(resolvedDestination, { force: true });
+      }
+      throw new Error(
+        `Could not create a verified workspace migration backup at ${resolvedDestination}.`,
+        { cause }
+      );
+    } finally {
+      rmSync(temporaryPath, { force: true });
+    }
+  }
+
   close(): void {
     if (this.#closed) {
       return;
@@ -649,7 +730,10 @@ export function restoreDatabaseFile(
 
   let probe: Database | null = null;
   try {
-    probe = new Database(dbPath, { readonly: true });
+    // SQLite cannot open a WAL-mode database read-only when it needs to create
+    // the shared-memory sidecar. The restore directory is private and writable,
+    // so open the already-existing file read/write for the integrity check.
+    probe = new Database(dbPath, { create: false });
     const row = probe
       .query<{ integrity_check: string }, []>("PRAGMA integrity_check")
       .get();

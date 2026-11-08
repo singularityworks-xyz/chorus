@@ -1,9 +1,20 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { WorkspaceMutation } from "@chorus/contracts";
+import {
+  type WorkspaceMutation,
+  workspaceSnapshotSchema,
+} from "@chorus/contracts";
 import type { NormalizedAgentEvent } from "@chorus/oc-adapter";
+import { restoreDatabaseFile } from "./db";
 import { WorkspaceStore } from "./store";
 
 const dirs: string[] = [];
@@ -203,6 +214,52 @@ describe("WorkspaceStore persistence", () => {
       providerID: "anthropic",
       modelID: "claude",
     });
+
+    const backupPath = join(
+      dir,
+      "backups",
+      "before-global-model-selection-v1.db"
+    );
+    if (process.platform !== "win32") {
+      expect(fileMode(join(dir, "backups"))).toBe(0o700);
+    }
+    expect(fileMode(backupPath)).toBe(0o600);
+    const rollbackDir = mkdtempSync(
+      join(tmpdir(), "chorus-global-model-rollback-")
+    );
+    dirs.push(rollbackDir);
+    const restored = restoreDatabaseFile(rollbackDir, backupPath);
+    expect(restored.integrity).toBe("ok");
+
+    const backupDatabase = new Database(restored.path, { readonly: true });
+    const snapshotRow = backupDatabase
+      .query<{ blob: string }, []>(
+        "SELECT blob FROM snapshots ORDER BY seq DESC LIMIT 1"
+      )
+      .get();
+    backupDatabase.close();
+    if (!snapshotRow) {
+      throw new Error(
+        "The migration backup did not contain a workspace snapshot."
+      );
+    }
+    const persistedBlob: unknown = JSON.parse(snapshotRow.blob);
+    if (
+      typeof persistedBlob !== "object" ||
+      persistedBlob === null ||
+      !("snapshot" in persistedBlob)
+    ) {
+      throw new Error("The migration backup snapshot has an invalid shape.");
+    }
+    const backupSnapshot = workspaceSnapshotSchema.parse(
+      persistedBlob.snapshot
+    );
+    expect(backupSnapshot.preferences.defaultModelSelection).toBeNull();
+    expect(backupSnapshot.boards[0]?.modelSelection).toEqual({
+      providerID: "anthropic",
+      modelID: "claude",
+    });
+
     const migratedSeq = second.headSeq();
     await second.close();
 
@@ -241,6 +298,43 @@ describe("WorkspaceStore persistence", () => {
     expect(
       recovered.getSnapshot().preferences.defaultModelSelection
     ).toBeNull();
+    expect(() => statSync(join(dir, "backups"))).toThrow();
+  });
+
+  test("refuses to migrate when its existing rollback backup is corrupt", async () => {
+    const dir = mkdtempSync(
+      join(tmpdir(), "chorus-global-model-corrupt-backup-")
+    );
+    dirs.push(dir);
+    const first = createStoreAt(dir);
+    await first.load();
+    const boardId = await seedBoard(first);
+    await first.applyMutation(
+      mutation("board.model.set", {
+        boardId,
+        model: { providerID: "anthropic", modelID: "claude" },
+      })
+    );
+    await first.close();
+
+    const backupDirectory = join(dir, "backups");
+    mkdirSync(backupDirectory, { recursive: true });
+    writeFileSync(
+      join(backupDirectory, "before-global-model-selection-v1.db"),
+      "not a SQLite database"
+    );
+
+    const recovered = createStoreAt(dir);
+    await expect(recovered.load()).rejects.toThrow(
+      "existing workspace migration backup is invalid"
+    );
+    expect(
+      recovered.getSnapshot().preferences.defaultModelSelection
+    ).toBeNull();
+    expect(recovered.getBoard(boardId)?.modelSelection).toEqual({
+      providerID: "anthropic",
+      modelID: "claude",
+    });
   });
 
   test("every mutation type produces exactly one event", async () => {

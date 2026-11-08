@@ -2,7 +2,7 @@
 
 import { constants as fsConstants } from "node:fs";
 import { access, copyFile, readFile, rename, unlink } from "node:fs/promises";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import {
   applyEventToBoard,
   type BoardSeed,
@@ -346,6 +346,10 @@ export class WorkspaceStore {
     if (!model) {
       return;
     }
+
+    this.#db.createVerifiedBackup(
+      join(this.#db.dataDir, "backups", "before-global-model-selection-v1.db")
+    );
 
     await this.applyMutation({
       baseRevision: null,
