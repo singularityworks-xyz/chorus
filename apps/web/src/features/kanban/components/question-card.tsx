@@ -9,6 +9,7 @@ import {
 import { CheckIcon, Loader2Icon, MessageSquareIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
+import { validateQuestionAnswers } from "../utils/question-answer-validation";
 
 interface QuestionCardProps {
   sessionID: string;
@@ -126,9 +127,19 @@ export function QuestionCard({ sessionID }: QuestionCardProps) {
 
   const handleSubmit = useCallback(
     async (question: PendingQuestion) => {
-      setSubmitting(true);
       setActionError(null);
       setActionMessage(null);
+      const validationError = validateQuestionAnswers(
+        question,
+        selected,
+        customAnswers
+      );
+      if (validationError) {
+        setActionError(validationError);
+        return;
+      }
+
+      setSubmitting(true);
       try {
         const answers = question.questions.map((_q, qIndex) => {
           const answerKey = `${question.id}:${qIndex}`;
@@ -222,7 +233,20 @@ export function QuestionCard({ sessionID }: QuestionCardProps) {
   }
 
   if (questions.length === 0) {
-    return null;
+    return (
+      <div className="flex flex-col gap-2 rounded-xs border border-white/5 bg-white/2 px-3 py-2.5">
+        <p className="text-[0.7rem] text-white/45" role="status">
+          No active question was returned. The board may be out of date.
+        </p>
+        <button
+          className="self-start rounded-xs border border-white/10 px-2 py-1 text-[0.65rem] text-white/60 hover:bg-white/5"
+          onClick={() => loadQuestions()}
+          type="button"
+        >
+          Check again
+        </button>
+      </div>
+    );
   }
 
   return (
