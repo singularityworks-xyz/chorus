@@ -1,11 +1,11 @@
 {
   "name": "chorus",
-  "version": "0.2.71",
+  "version": "0.2.72",
   "private": true,
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
-    "test": "bun test",
+    "test": "bun test --parallel=4",
     "changeset": "changeset",
     "prepare": "lefthook install",
     "version:autobump": "bun scripts/version/autobump.ts",
