@@ -66,7 +66,7 @@ jobs:
       - name: Install Dependencies
         run: bun ci
       - name: Unit Tests
-        run: bun test
+        run: bun test --parallel=4
 
   relay-postgres:
     name: Relay PostgreSQL
