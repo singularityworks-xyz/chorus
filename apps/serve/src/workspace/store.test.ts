@@ -272,6 +272,167 @@ describe("WorkspaceStore persistence", () => {
     expect(third.headSeq()).toBe(migratedSeq);
   });
 
+  test("rehearses migration and rollback with a representative workspace install", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chorus-global-model-rehearsal-"));
+    dirs.push(dir);
+    const initial = createStoreAt(dir);
+    await initial.load();
+
+    const boardIds: string[] = [];
+    for (const [index, projectName] of ["Alpha", "Beta", "Gamma"].entries()) {
+      const directory = `/srv/chorus-rehearsal/${projectName.toLowerCase()}`;
+      const commit = await initial.applyMutation(
+        mutation("board.create", {
+          seed: {
+            title: `${projectName} repository`,
+            repo: {
+              directory,
+              projectId: `project-${index + 1}`,
+              projectName,
+              sandboxes: [],
+              worktree: `${directory}/.chorus-worktrees/board-${index + 1}`,
+            },
+          },
+        })
+      );
+      const event = commit?.events[0];
+      if (!commit || event?.type !== "board.created") {
+        throw new Error("expected a rehearsal board to be committed");
+      }
+      boardIds.push(event.board.boardId);
+    }
+
+    const [alphaId, betaId, gammaId] = boardIds;
+    if (!(alphaId && betaId && gammaId)) {
+      throw new Error("representative rehearsal must create three boards");
+    }
+    await initial.applyMutation(
+      mutation("board.model.set", {
+        boardId: alphaId,
+        model: { providerID: "anthropic", modelID: "claude" },
+      })
+    );
+    await initial.applyMutation(
+      mutation("board.review_mode.set", {
+        boardId: betaId,
+        reviewMode: "manual",
+      })
+    );
+    await initial.applyMutation(
+      mutation("board.move", {
+        boardId: gammaId,
+        position: { x: 640, y: 280 },
+      })
+    );
+    await initial.applyMutation(
+      mutation("board.columns.replace", {
+        boardId: gammaId,
+        columns: {
+          approve: [],
+          done: [
+            {
+              id: "historical-task",
+              label: "feature",
+              labelVariant: "success-light",
+              outcome: "succeeded",
+              run: {
+                elapsed: "0m 05s",
+                model: "anthropic/claude-previous",
+                sessionId: "historical-session",
+                startedAt: Date.now(),
+                steps: [
+                  {
+                    id: "historical-response",
+                    kind: "response",
+                    status: "done",
+                    summary: "Historical output stays attached to its run.",
+                  },
+                ],
+                taskTitle: "Preserve this completed run",
+              },
+              title: "Preserve this completed run",
+            },
+          ],
+          in_progress: [],
+          queue: [],
+        },
+      })
+    );
+    await initial.applyMutation(
+      mutation("preference.dismiss_composer_hint", {})
+    );
+    await initial.applyMutation(
+      mutation("preference.board_view_mode.set", { mode: "stacked" })
+    );
+    await initial.applyMutation(
+      mutation("preference.recently_used_models.add", {
+        model: { providerID: "openai", modelID: "gpt-5" },
+      })
+    );
+    await initial.applyMutation(mutation("board.select", { boardId: betaId }));
+
+    const legacySnapshot = initial.getSnapshot();
+    await initial.close();
+
+    const migrated = createStoreAt(dir);
+    await migrated.load();
+    const migratedSnapshot = migrated.getSnapshot();
+    expect(migratedSnapshot.preferences.defaultModelSelection).toEqual({
+      providerID: "anthropic",
+      modelID: "claude",
+    });
+    expect(migratedSnapshot.boards).toEqual(legacySnapshot.boards);
+    expect(migratedSnapshot.selectedBoardId).toBe(
+      legacySnapshot.selectedBoardId
+    );
+    expect(migratedSnapshot.previousWorkspaces).toEqual(
+      legacySnapshot.previousWorkspaces
+    );
+    expect(migratedSnapshot.preferences).toEqual({
+      ...legacySnapshot.preferences,
+      defaultModelSelection: { providerID: "anthropic", modelID: "claude" },
+    });
+
+    const backupPath = join(
+      dir,
+      "backups",
+      "before-global-model-selection-v1.db"
+    );
+    const rollbackDir = mkdtempSync(
+      join(tmpdir(), "chorus-global-model-rehearsal-rollback-")
+    );
+    dirs.push(rollbackDir);
+    const restored = restoreDatabaseFile(rollbackDir, backupPath);
+    expect(restored.integrity).toBe("ok");
+    const rollbackDatabase = new Database(restored.path, { readonly: true });
+    const rollbackSnapshotRow = rollbackDatabase
+      .query<{ blob: string }, []>(
+        "SELECT blob FROM snapshots ORDER BY seq DESC LIMIT 1"
+      )
+      .get();
+    rollbackDatabase.close();
+    if (!rollbackSnapshotRow) {
+      throw new Error("restored rollback database has no workspace snapshot");
+    }
+    const rollbackBlob: unknown = JSON.parse(rollbackSnapshotRow.blob);
+    if (
+      typeof rollbackBlob !== "object" ||
+      rollbackBlob === null ||
+      !("snapshot" in rollbackBlob)
+    ) {
+      throw new Error("restored rollback snapshot has an invalid shape");
+    }
+    const rollbackSnapshot = workspaceSnapshotSchema.parse(
+      rollbackBlob.snapshot
+    );
+    expect(rollbackSnapshot).toEqual(legacySnapshot);
+    expect(
+      rollbackSnapshot.boards.find((board) => board.boardId === gammaId)
+        ?.columns.done?.[0]?.run?.model
+    ).toBe("anthropic/claude-previous");
+    await migrated.close();
+  });
+
   test("does not choose between conflicting legacy board models", async () => {
     const dir = mkdtempSync(join(tmpdir(), "chorus-global-model-conflict-"));
     dirs.push(dir);
