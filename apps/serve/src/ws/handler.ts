@@ -11,7 +11,11 @@ import {
   attachForkedSession,
   resolveSessionDirectory,
 } from "../tasks/session-directory";
-import type { WorkspaceStore } from "../workspace/store";
+import {
+  type PendingApprovalActionResult,
+  pendingApprovalConflictMessage,
+  type WorkspaceStore,
+} from "../workspace/store";
 import type { HubSocket, WorkspaceHub } from "./hub";
 import type { WsMessage } from "./types";
 import {
@@ -45,6 +49,18 @@ function toHubSocket(ctx: unknown): HubSocket {
       : {}),
     send: (data: string) => elysiaCtx.send(data),
   };
+}
+
+function assertPendingApprovalActionAvailable<T>(
+  result: PendingApprovalActionResult<T>
+): { status: "accepted"; value: T } | { status: "rejected" } {
+  if (
+    result.status === "already_resolving" ||
+    result.status === "not_pending"
+  ) {
+    throw new Error(pendingApprovalConflictMessage(result.status));
+  }
+  return result;
 }
 
 /**
@@ -420,27 +436,28 @@ async function handleCommand(
 
     case WS_MESSAGE_TYPE.TASK_APPROVE: {
       const payload = validate(WS_MESSAGE_TYPE.TASK_APPROVE, msg.payload);
-
-      const result = await bridge.replyPermission({
-        directory: await directoryFor(payload.sessionID),
-        requestID: payload.requestID,
-        sessionID: payload.sessionID,
-        reply: "once",
-        message: payload.message,
-      });
-      if (result) {
-        await workspaceStore.resolvePendingApproval(
+      const directory = await directoryFor(payload.sessionID);
+      const result = assertPendingApprovalActionAvailable(
+        await workspaceStore.runPendingApprovalAction(
           payload.sessionID,
           payload.requestID,
-          true
-        );
-      }
+          () =>
+            bridge.replyPermission({
+              directory,
+              requestID: payload.requestID,
+              sessionID: payload.sessionID,
+              reply: "once",
+              message: payload.message,
+            }),
+          { accepts: (accepted) => accepted, resume: true }
+        )
+      );
 
       wsSend({
         type: WS_RESPONSE_TYPE.TASK_APPROVED,
         payload: {
           requestID: payload.requestID,
-          accepted: result,
+          accepted: result.status === "accepted",
         },
         timestamp: Date.now(),
       });
@@ -449,26 +466,28 @@ async function handleCommand(
 
     case WS_MESSAGE_TYPE.TASK_REJECT: {
       const payload = validate(WS_MESSAGE_TYPE.TASK_REJECT, msg.payload);
-
-      const result = await bridge.replyPermission({
-        directory: await directoryFor(payload.sessionID),
-        requestID: payload.requestID,
-        sessionID: payload.sessionID,
-        reply: "reject",
-        message: payload.message,
-      });
-      if (result) {
-        await workspaceStore.resolvePendingApproval(
+      const directory = await directoryFor(payload.sessionID);
+      const result = assertPendingApprovalActionAvailable(
+        await workspaceStore.runPendingApprovalAction(
           payload.sessionID,
-          payload.requestID
-        );
-      }
+          payload.requestID,
+          () =>
+            bridge.replyPermission({
+              directory,
+              requestID: payload.requestID,
+              sessionID: payload.sessionID,
+              reply: "reject",
+              message: payload.message,
+            }),
+          { accepts: (accepted) => accepted }
+        )
+      );
 
       wsSend({
         type: WS_RESPONSE_TYPE.TASK_REJECTED,
         payload: {
           requestID: payload.requestID,
-          accepted: result,
+          accepted: result.status === "accepted",
         },
         timestamp: Date.now(),
       });
@@ -550,15 +569,19 @@ async function handleCommand(
         msg.payload
       );
 
-      await bridge.replyQuestion({
-        directory: await directoryFor(payload.sessionID),
-        requestID: payload.requestID,
-        answers: payload.answers,
-      });
-      await workspaceStore.resolvePendingApproval(
-        payload.sessionID,
-        payload.requestID,
-        true
+      const directory = await directoryFor(payload.sessionID);
+      assertPendingApprovalActionAvailable(
+        await workspaceStore.runPendingApprovalAction(
+          payload.sessionID,
+          payload.requestID,
+          () =>
+            bridge.replyQuestion({
+              directory,
+              requestID: payload.requestID,
+              answers: payload.answers,
+            }),
+          { resume: true }
+        )
       );
 
       wsSend({
@@ -578,13 +601,13 @@ async function handleCommand(
         msg.payload
       );
 
-      await bridge.rejectQuestion(
-        payload.requestID,
-        await directoryFor(payload.sessionID)
-      );
-      await workspaceStore.resolvePendingApproval(
-        payload.sessionID,
-        payload.requestID
+      const directory = await directoryFor(payload.sessionID);
+      assertPendingApprovalActionAvailable(
+        await workspaceStore.runPendingApprovalAction(
+          payload.sessionID,
+          payload.requestID,
+          () => bridge.rejectQuestion(payload.requestID, directory)
+        )
       );
 
       wsSend({

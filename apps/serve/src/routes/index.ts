@@ -26,7 +26,10 @@ import {
   resolveSessionDirectory,
   UnknownSessionError,
 } from "../tasks/session-directory";
-import type { WorkspaceStore } from "../workspace/store";
+import {
+  pendingApprovalConflictMessage,
+  type WorkspaceStore,
+} from "../workspace/store";
 
 const logger = createLogger(
   {
@@ -55,6 +58,17 @@ function boardTaskCommandStatus(error: BoardTaskCommandError): number {
     default:
       return 409;
   }
+}
+
+function pendingApprovalConflict(
+  status: "already_resolving" | "not_pending",
+  set: { status?: number | string }
+): { code: string; message: string } {
+  set.status = 409;
+  return {
+    code: "pending_approval_conflict",
+    message: pendingApprovalConflictMessage(status),
+  };
 }
 
 function mapRouteError(error: unknown): {
@@ -382,26 +396,32 @@ export function createHttpRoutes(
 
       .post(
         "/tasks/:sessionID/approve",
-        async ({ params, body }) => {
-          const result = await bridge.replyPermission({
-            directory: await directoryFor(params.sessionID),
-            requestID: body.requestID,
-            sessionID: params.sessionID,
-            reply: "once",
-            message: body.message,
-          });
-          if (result) {
-            await workspaceStore.resolvePendingApproval(
-              params.sessionID,
-              body.requestID,
-              true
-            );
+        async ({ params, body, set }) => {
+          const directory = await directoryFor(params.sessionID);
+          const result = await workspaceStore.runPendingApprovalAction(
+            params.sessionID,
+            body.requestID,
+            () =>
+              bridge.replyPermission({
+                directory,
+                requestID: body.requestID,
+                sessionID: params.sessionID,
+                reply: "once",
+                message: body.message,
+              }),
+            { accepts: (accepted) => accepted, resume: true }
+          );
+          if (
+            result.status === "already_resolving" ||
+            result.status === "not_pending"
+          ) {
+            return pendingApprovalConflict(result.status, set);
           }
 
           return {
             sessionID: params.sessionID,
             requestID: body.requestID,
-            accepted: result,
+            accepted: result.status === "accepted",
             timestamp: Date.now(),
           };
         },
@@ -418,25 +438,32 @@ export function createHttpRoutes(
 
       .post(
         "/tasks/:sessionID/reject",
-        async ({ params, body }) => {
-          const result = await bridge.replyPermission({
-            directory: await directoryFor(params.sessionID),
-            requestID: body.requestID,
-            sessionID: params.sessionID,
-            reply: "reject",
-            message: body.message,
-          });
-          if (result) {
-            await workspaceStore.resolvePendingApproval(
-              params.sessionID,
-              body.requestID
-            );
+        async ({ params, body, set }) => {
+          const directory = await directoryFor(params.sessionID);
+          const result = await workspaceStore.runPendingApprovalAction(
+            params.sessionID,
+            body.requestID,
+            () =>
+              bridge.replyPermission({
+                directory,
+                requestID: body.requestID,
+                sessionID: params.sessionID,
+                reply: "reject",
+                message: body.message,
+              }),
+            { accepts: (accepted) => accepted }
+          );
+          if (
+            result.status === "already_resolving" ||
+            result.status === "not_pending"
+          ) {
+            return pendingApprovalConflict(result.status, set);
           }
 
           return {
             sessionID: params.sessionID,
             requestID: body.requestID,
-            accepted: result,
+            accepted: result.status === "accepted",
             timestamp: Date.now(),
           };
         },
@@ -515,22 +542,30 @@ export function createHttpRoutes(
 
       .post(
         "/tasks/:sessionID/questions/:requestID/reply",
-        async ({ params, body }) => {
-          await bridge.replyQuestion({
-            directory: await directoryFor(params.sessionID),
-            requestID: params.requestID,
-            answers: body.answers,
-          });
-          await workspaceStore.resolvePendingApproval(
+        async ({ params, body, set }) => {
+          const directory = await directoryFor(params.sessionID);
+          const result = await workspaceStore.runPendingApprovalAction(
             params.sessionID,
             params.requestID,
-            true
+            () =>
+              bridge.replyQuestion({
+                directory,
+                requestID: params.requestID,
+                answers: body.answers,
+              }),
+            { resume: true }
           );
+          if (
+            result.status === "already_resolving" ||
+            result.status === "not_pending"
+          ) {
+            return pendingApprovalConflict(result.status, set);
+          }
 
           return {
             sessionID: params.sessionID,
             requestID: params.requestID,
-            accepted: true,
+            accepted: result.status === "accepted",
             timestamp: Date.now(),
           };
         },
@@ -553,20 +588,24 @@ export function createHttpRoutes(
 
       .post(
         "/tasks/:sessionID/questions/:requestID/reject",
-        async ({ params }) => {
-          await bridge.rejectQuestion(
-            params.requestID,
-            await directoryFor(params.sessionID)
-          );
-          await workspaceStore.resolvePendingApproval(
+        async ({ params, set }) => {
+          const directory = await directoryFor(params.sessionID);
+          const result = await workspaceStore.runPendingApprovalAction(
             params.sessionID,
-            params.requestID
+            params.requestID,
+            () => bridge.rejectQuestion(params.requestID, directory)
           );
+          if (
+            result.status === "already_resolving" ||
+            result.status === "not_pending"
+          ) {
+            return pendingApprovalConflict(result.status, set);
+          }
 
           return {
             sessionID: params.sessionID,
             requestID: params.requestID,
-            accepted: true,
+            accepted: result.status === "accepted",
             timestamp: Date.now(),
           };
         },

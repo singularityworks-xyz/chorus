@@ -163,8 +163,10 @@ function readSnapshotHash(value: unknown): string {
 /** Real repositories, SDK, HTTP commands, SQLite writer and authenticated WS mirrors. */
 export async function startPhase6Harness({
   interactive = false,
+  questionReplyDelayMs,
 }: {
   interactive?: boolean;
+  questionReplyDelayMs?: number;
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "chorus-qualification-"));
   const repositories: string[] = [];
@@ -208,7 +210,7 @@ export async function startPhase6Harness({
   }
 
   try {
-    const engine = startScriptedEngine();
+    const engine = startScriptedEngine({ questionReplyDelayMs });
     stopEngine = () => engine.stop();
 
     for (let index = 0; index < 3; index += 1) {

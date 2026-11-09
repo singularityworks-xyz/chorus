@@ -137,7 +137,36 @@ describe("HTTP routes", () => {
     const bridge = makeMockBridge();
     const boardTasks = makeMockBoardTasks();
     const updateBoardSession = mock(async () => undefined);
-    const resolvePendingApproval = mock(async () => false);
+    const resolvePendingApproval = mock(
+      async (_sessionID: string, _requestID: string, _resume: boolean) => false
+    );
+    const runPendingApprovalAction = mock(
+      async (
+        sessionID: string,
+        requestID: string,
+        action: () => Promise<unknown>,
+        options?: {
+          accepts?: (value: unknown) => boolean;
+          resume?: boolean;
+        }
+      ): Promise<
+        | { status: "accepted"; value: unknown }
+        | { status: "already_resolving" }
+        | { status: "not_pending" }
+        | { status: "rejected" }
+      > => {
+        const value = await action();
+        if (options?.accepts && !options.accepts(value)) {
+          return { status: "rejected" as const };
+        }
+        await resolvePendingApproval(
+          sessionID,
+          requestID,
+          options?.resume ?? false
+        );
+        return { status: "accepted" as const, value };
+      }
+    );
     const app = new Elysia().use(
       createHttpRoutes(
         bridge as never,
@@ -164,6 +193,7 @@ describe("HTTP routes", () => {
               : undefined,
           getSnapshot: () => ({ boards: [] }),
           resolvePendingApproval,
+          runPendingApprovalAction,
           updateBoardSession,
         } as never
       )
@@ -173,6 +203,7 @@ describe("HTTP routes", () => {
       bridge,
       boardTasks,
       resolvePendingApproval,
+      runPendingApprovalAction,
       updateBoardSession,
     };
   }
@@ -745,7 +776,8 @@ describe("HTTP routes", () => {
 
   describe("question commands", () => {
     test("answers a question with an explicit accepted acknowledgment", async () => {
-      const { app, bridge, resolvePendingApproval } = makeApp();
+      const { app, bridge, resolvePendingApproval, runPendingApprovalAction } =
+        makeApp();
 
       const response = await app.handle(
         new Request(
@@ -779,6 +811,33 @@ describe("HTTP routes", () => {
         "question-1",
         true
       );
+      expect(runPendingApprovalAction).toHaveBeenCalledTimes(1);
+    });
+
+    test("reports a conflict when another client is already answering", async () => {
+      const { app, bridge, runPendingApprovalAction } = makeApp();
+      runPendingApprovalAction.mockImplementation(async () => ({
+        status: "already_resolving",
+      }));
+
+      const response = await app.handle(
+        new Request(
+          "http://localhost/tasks/sess-1/questions/question-1/reply",
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ answers: [] }),
+          }
+        )
+      );
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        code: "pending_approval_conflict",
+        message:
+          "Another client is already responding to this request. Wait for the board to sync before trying again.",
+      });
+      expect(bridge.replyQuestion).not.toHaveBeenCalled();
     });
 
     test("rejects a question with an explicit accepted acknowledgment", async () => {

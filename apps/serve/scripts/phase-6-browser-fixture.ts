@@ -13,6 +13,9 @@ switch (questionMode) {
     break;
 }
 const seedQuestionMode = questionCount > 0;
+const questionReplyDelayMs = Number(
+  process.env.CHORUS_BROWSER_FIXTURE_QUESTION_REPLY_DELAY_MS ?? 0
+);
 const reasoningDeltas = [
   " Checking the current board and task state.",
   " The selected model is shared across these boards.",
@@ -21,7 +24,10 @@ const reasoningDeltas = [
   " The visible response is keeping pace with the event stream.",
 ];
 
-const harness = await startPhase6Harness({ interactive: true });
+const harness = await startPhase6Harness({
+  interactive: true,
+  questionReplyDelayMs,
+});
 if (seedQuestionMode) {
   const boardId = harness.boardIds.at(-1);
   if (!boardId) {

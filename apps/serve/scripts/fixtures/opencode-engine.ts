@@ -42,7 +42,11 @@ const FIXTURE_CHANGE_PATH = "result.txt";
 const FIXTURE_CHANGE_CONTENT = "Scripted fixture change\n";
 
 /** Scripted external engine: every event crosses the actual SDK HTTP/SSE path. */
-export function startScriptedEngine() {
+export function startScriptedEngine({
+  questionReplyDelayMs = 0,
+}: {
+  questionReplyDelayMs?: number;
+} = {}) {
   const sessions = new Map<string, FixtureSession>();
   const streams = new Map<
     string,
@@ -51,6 +55,9 @@ export function startScriptedEngine() {
   const encoder = new TextEncoder();
   let eventNumber = 0;
   let activeReasoningCursor = 0;
+  const safeQuestionReplyDelayMs = Number.isFinite(questionReplyDelayMs)
+    ? Math.min(10_000, Math.max(0, Math.floor(questionReplyDelayMs)))
+    : 0;
   const pendingPlanTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const keepAliveTimers = new Set<ReturnType<typeof setInterval>>();
 
@@ -350,6 +357,11 @@ export function startScriptedEngine() {
     }
 
     if (match[2] === "reply") {
+      if (safeQuestionReplyDelayMs > 0) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, safeQuestionReplyDelayMs)
+        );
+      }
       const body = questionReplySchema.parse(await request.json());
       const firstAnswer = body.answers[0];
       const selectedOption = firstAnswer?.optionIndices?.[0];

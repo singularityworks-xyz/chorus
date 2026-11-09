@@ -897,6 +897,90 @@ describe("WorkspaceStore agent events", () => {
     });
   });
 
+  test("only one concurrent client can answer a pending approval", async () => {
+    const store = createStore();
+    await store.load();
+    const boardId = await seedActiveBoard(store);
+    await store.applyAgentEvent(
+      agentEvent({
+        activity: "waiting_for_approval",
+        permission: "edit",
+        permissionID: "permission-shared",
+      })
+    );
+
+    let releaseAction: (() => void) | undefined;
+    let markActionStarted: (() => void) | undefined;
+    const actionGate = new Promise<void>((resolve) => {
+      releaseAction = resolve;
+    });
+    const actionStarted = new Promise<void>((resolve) => {
+      markActionStarted = resolve;
+    });
+    let actionCalls = 0;
+    const firstResponse = store.runPendingApprovalAction(
+      "sess-1",
+      "permission-shared",
+      async () => {
+        actionCalls += 1;
+        markActionStarted?.();
+        await actionGate;
+        return true;
+      },
+      { accepts: (accepted) => accepted, resume: true }
+    );
+
+    await actionStarted;
+    const secondResponse = await store.runPendingApprovalAction(
+      "sess-1",
+      "permission-shared",
+      () => {
+        actionCalls += 1;
+        return Promise.resolve(true);
+      },
+      { accepts: (accepted) => accepted, resume: true }
+    );
+    expect(secondResponse).toEqual({ status: "already_resolving" });
+    expect(actionCalls).toBe(1);
+
+    releaseAction?.();
+    expect(await firstResponse).toEqual({ status: "accepted", value: true });
+    expect(store.getBoard(boardId)?.columns.in_progress[0]).toMatchObject({
+      id: "task-1",
+      pendingApprovals: [],
+    });
+  });
+
+  test("failed provider responses leave requests retryable", async () => {
+    const store = createStore();
+    await store.load();
+    const boardId = await seedActiveBoard(store);
+    await store.applyAgentEvent(
+      agentEvent({
+        activity: "waiting_for_approval",
+        permission: "edit",
+        permissionID: "permission-retry",
+      })
+    );
+
+    await expect(
+      store.runPendingApprovalAction("sess-1", "permission-retry", () =>
+        Promise.reject(new Error("provider unavailable"))
+      )
+    ).rejects.toThrow("provider unavailable");
+    expect(
+      store.getBoard(boardId)?.columns.approve[0]?.pendingApproval?.requestId
+    ).toBe("permission-retry");
+
+    const retried = await store.runPendingApprovalAction(
+      "sess-1",
+      "permission-retry",
+      async () => true,
+      { accepts: (accepted) => accepted, resume: true }
+    );
+    expect(retried).toEqual({ status: "accepted", value: true });
+  });
+
   test("an agent event expands into several sequenced events", async () => {
     const store = createStore();
     await store.load();

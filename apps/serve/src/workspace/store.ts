@@ -72,6 +72,20 @@ export interface StoreCommit {
   lastSeq: number;
 }
 
+export type PendingApprovalActionResult<T> =
+  | { status: "accepted"; value: T }
+  | { status: "already_resolving" }
+  | { status: "not_pending" }
+  | { status: "rejected" };
+
+export function pendingApprovalConflictMessage(
+  status: "already_resolving" | "not_pending"
+): string {
+  return status === "already_resolving"
+    ? "Another client is already responding to this request. Wait for the board to sync before trying again."
+    : "This request is no longer waiting for a response. Refresh the board to see the current task state.";
+}
+
 /** Beyond this many distinct boards/sessions, the drop-warning map resets. */
 const MAX_DROPPED_WARNING_KEYS = 256;
 
@@ -224,6 +238,7 @@ export class WorkspaceStore {
 
   /** Subscribers notified once per commit, after memory is swapped. */
   readonly #commitListeners = new Set<(commit: StoreCommit) => void>();
+  readonly #pendingApprovalActions = new Set<string>();
   #closing = false;
   #closePromise: Promise<void> | null = null;
 
@@ -576,6 +591,72 @@ export class WorkspaceStore {
       this.#commit(events, board.boardId, null);
       return true;
     });
+  }
+
+  /**
+   * Runs one provider response for a pending approval/question request.
+   *
+   * The reservation is made inside the workspace write queue so requests from
+   * separate HTTP and WebSocket clients cannot both pass a stale-state check.
+   * Provider I/O happens outside the queue; other board events keep flowing
+   * while the engine processes the answer. Failed or declined provider calls
+   * release the reservation and leave the request available for a retry.
+   */
+  async runPendingApprovalAction<T>(
+    sessionId: string,
+    requestId: string,
+    action: () => Promise<T>,
+    options: {
+      accepts?: (value: T) => boolean;
+      resume?: boolean;
+    } = {}
+  ): Promise<PendingApprovalActionResult<T>> {
+    const actionKey = JSON.stringify([sessionId, requestId]);
+    const claim = await this.#enqueue(async () => {
+      if (this.#pendingApprovalActions.has(actionKey)) {
+        return "already_resolving" as const;
+      }
+
+      const board = this.#snapshot.boards.find(
+        (entry) => entry.session.sessionId === sessionId
+      );
+      const isPending = board
+        ? Object.values(board.columns)
+            .flat()
+            .some((task) =>
+              (
+                task.pendingApprovals ??
+                (task.pendingApproval ? [task.pendingApproval] : [])
+              ).some((request) => request.requestId === requestId)
+            )
+        : false;
+      if (!isPending) {
+        return "not_pending" as const;
+      }
+
+      this.#pendingApprovalActions.add(actionKey);
+      return "claimed" as const;
+    });
+
+    if (claim !== "claimed") {
+      return { status: claim };
+    }
+
+    try {
+      const value = await action();
+      if (options.accepts && !options.accepts(value)) {
+        return { status: "rejected" };
+      }
+
+      await this.resolvePendingApproval(
+        sessionId,
+        requestId,
+        options.resume ?? false
+      );
+      return { status: "accepted", value };
+    } finally {
+      this.#pendingApprovalActions.delete(actionKey);
+    }
   }
 
   /**
