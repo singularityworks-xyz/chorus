@@ -345,6 +345,10 @@ Pending permission and question replies now reserve `(session, request)` inside 
 
 Direct browser control on an isolated Next dev copy at `localhost:3024` and a disposable ten-second delayed-question fixture verified the same-request collision end to end. Both tabs had the question loaded and a response selected before submission; the first tab displayed “Sending…”, and the second tab received the actionable “Another client is already responding to this request. Wait for the board to sync before trying again.” message while the first request was still in flight. The first answer then completed, the task moved to Done, and the reasoning stream appeared. `bun run check`, `bun run check-types`, and `bun test` pass (1,113 passed, 17 skipped, 0 failed; 12,910 assertions). No Playwright runner or live provider was used. Network/restart recovery and the full desktop/mobile matrix remain open.
 
+### Current verification refresh — 9 November 2026
+
+After adding the representative migration/rollback rehearsal, `bun run check` and `bun run check-types` pass. The full suite passes 1,114 tests with 17 external PostgreSQL/voice cases skipped, 0 failures, and 12,918 assertions. The monorepo `bun run build` passes with Next.js 16.2.2, including optimized compilation, TypeScript, all 28 static pages, and Turbo completion. The skipped external-service cases and the remaining browser, recovery, real-engine, and provider smoke gates stay open.
+
 ## Documentation constraints and references
 
 Context7 was not exposed among the tools available during this planning session. Before implementation, use Context7 if available and verify each touched library against the installed version. No framework upgrades are required by this plan.
