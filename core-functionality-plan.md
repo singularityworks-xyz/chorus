@@ -1,6 +1,6 @@
 # Chorus core functionality implementation plan
 
-Started: 8 November 2026; updated: 9 November 2026. Status: implementation in progress. The roadmap below was created before code changes began; this progress record distinguishes landed slices from production gates that still need work.
+Started: 8 November 2026; updated: 10 November 2026. Status: implementation in progress. The roadmap below was created before code changes began; this progress record distinguishes landed slices from production gates that still need work.
 
 ## Execution progress
 
@@ -358,6 +358,10 @@ This closes the pinned-engine/local-provider compatibility gate. Its direct SDK 
 ### Chorus task routes with pinned OpenCode and a local provider — 9 November 2026
 
 `apps/serve/scripts/chorus-provider-execution-smoke.ts` starts a disposable local OpenAI-compatible endpoint, two pinned OpenCode 1.19.0 per-worktree engines sharing a temporary `OPENCODE_DB`, a real `WorkspaceStore`, and the Chorus `/tasks` HTTP route. It persists one global model, creates two isolated Git boards, and deliberately includes an invalid model override in each client request. The fixture verifies both route acknowledgments, exact local model/prompt requests, ordered assistant text projected into the matching task stream, successful terminal outcomes, and clean shutdown of both engines and all temporary state. It passed with exactly two local provider requests and no live provider credentials or paid generation. `bun run check`, `bun run check-types`, and the full suite pass (1,114 passed, 17 external PostgreSQL/voice cases skipped, 0 failed; 12,918 assertions). A separate default-sandbox suite attempt could not bind its temporary loopback listeners; the successful suite run used the same explicit local-loopback allowance as the smoke. Live provider authentication/execution, browser-visible real-provider output, restart/network recovery, full desktop/mobile acceptance, and production-clone/canary rollback remain open.
+
+### Direct browser recovery and repository history — 10 November 2026
+
+Using browser control on an isolated Next development copy at `localhost:3101` with the disposable `phase-6-browser-fixture.ts` service, a running task and its expanded thinking stream survived a page reload and returned to Live. The Stop action completed the task into Done with Retry available. Repository Undo disabled itself and enabled Redo; Redo then re-enabled Undo and disabled itself. Settings and the workspace API exposed the shared `fixture/scripted` model. The fixture deliberately appends short reasoning deltas at 30 ms intervals, so the visible transcript grows continuously during this check. This verifies recovery and button-state transitions; process-restart/network-loss behavior, desktop/mobile layout coverage, and production-clone/canary rollback remain open. No Playwright runner, user workspace, live provider credentials, or paid inference was used, and the existing `localhost:3000` application was left untouched.
 
 ## Documentation constraints and references
 
