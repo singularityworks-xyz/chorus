@@ -32,6 +32,7 @@ import {
   computeBoardLayout,
   getAutoLayoutBoardIds,
 } from "@/features/canvas/lib/board-layout";
+import { hasCanvasViewport } from "@/features/canvas/lib/canvas-viewport";
 import type { Columns } from "@/features/kanban/components/kanban";
 import {
   KANBAN_CARD_NODE_TYPE,
@@ -438,6 +439,10 @@ export function BackgroundCanvas() {
   >(null);
   const isNodeClickRef = useRef(false);
   const removeInFlightRef = useRef(false);
+  const hasMeasuredCanvasViewport = hasCanvasViewport(
+    canvasSize.width,
+    canvasSize.height
+  );
 
   useEffect(() => {
     setIsMounted(true);
@@ -761,7 +766,10 @@ export function BackgroundCanvas() {
 
   return (
     <div className="h-full w-full" ref={containerRef}>
-      {isMounted ? (
+      {/* The desktop canvas stays mounted inside a CSS-hidden wrapper on mobile.
+          React Flow must wait for a measured viewport so its zero-sized hidden
+          store cannot emit invalid transforms into the SVG background. */}
+      {isMounted && hasMeasuredCanvasViewport ? (
         <ReactFlow
           className="background-flow dark"
           defaultViewport={DEFAULT_VIEWPORT}
