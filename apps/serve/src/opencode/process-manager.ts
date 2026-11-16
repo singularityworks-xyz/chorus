@@ -266,9 +266,16 @@ export class OpenCodeProcessManager {
     });
 
     this.#owned = true;
-    this.#spawn();
-    await this.#awaitReady();
-    this.#startLivenessChecks();
+    try {
+      this.#spawn();
+      await this.#awaitReady();
+      this.#startLivenessChecks();
+    } catch (error) {
+      // A failed readiness or lockstep check must not leave a detached child
+      // running after Serve has already failed to start.
+      await this.stop();
+      throw error;
+    }
   }
 
   /**
@@ -483,6 +490,11 @@ export class OpenCodeProcessManager {
         env: this.#databasePath
           ? createOpenCodeEnvironment(this.#databasePath)
           : { ...process.env },
+        // A terminal Ctrl+C is delivered to the whole foreground process group.
+        // Keep the child in its own group so Serve can stop it deliberately
+        // after flushing state instead of treating the shared signal as a crash
+        // and starting a replacement during shutdown.
+        detached: true,
         stderr: "pipe",
         stdout: "pipe",
         windowsHide: true,
@@ -606,7 +618,7 @@ export class OpenCodeProcessManager {
     }
   }
 
-  async stop(): Promise<void> {
+  beginShutdown(): void {
     this.#stopping = true;
     this.#ready = false;
     this.#stopLivenessChecks();
@@ -614,6 +626,10 @@ export class OpenCodeProcessManager {
       clearTimeout(this.#restartTimer);
       this.#restartTimer = null;
     }
+  }
+
+  async stop(): Promise<void> {
+    this.beginShutdown();
 
     const proc = this.#proc;
     if (!proc) {
@@ -627,13 +643,7 @@ export class OpenCodeProcessManager {
   }
 
   async forceKill(): Promise<void> {
-    this.#stopping = true;
-    this.#ready = false;
-    this.#stopLivenessChecks();
-    if (this.#restartTimer) {
-      clearTimeout(this.#restartTimer);
-      this.#restartTimer = null;
-    }
+    this.beginShutdown();
 
     const proc = this.#proc;
     if (!proc) {

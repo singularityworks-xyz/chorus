@@ -18,6 +18,7 @@ const logger = createLogger(
 
 export interface ManagedEngine {
   assertReady(expectedVersion?: string): Promise<void>;
+  beginShutdown?(): void;
   forceKill?(): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -206,8 +207,15 @@ export class EngineRegistry {
     entry.lastUsedAt = this.#now();
   }
 
-  async stop(): Promise<void> {
+  beginShutdown(): void {
     this.#stopped = true;
+    for (const manager of this.#managers) {
+      manager.beginShutdown?.();
+    }
+  }
+
+  async stop(): Promise<void> {
+    this.beginShutdown();
     const pending = [...this.#pending.values()];
     await Promise.allSettled(
       [...this.#managers].map((manager) => manager.stop())
@@ -220,7 +228,7 @@ export class EngineRegistry {
   }
 
   async forceKill(): Promise<void> {
-    this.#stopped = true;
+    this.beginShutdown();
     const managers = [...this.#managers];
     this.#entries.clear();
     this.#pending.clear();

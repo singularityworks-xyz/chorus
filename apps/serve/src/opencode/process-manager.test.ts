@@ -135,6 +135,34 @@ describe("opencode engine address", () => {
       }
     });
 
+    test("beginShutdown immediately marks an adopted engine unavailable", async () => {
+      const server = Bun.serve({
+        fetch: () => Response.json({ healthy: true, version: "1.19.0" }),
+        hostname: "127.0.0.1",
+        port: 0,
+      });
+      const manager = new OpenCodeProcessManager({
+        directory: "/tmp",
+        port: server.port,
+      });
+
+      try {
+        await manager.start();
+        expect(manager.ready).toBe(true);
+
+        manager.beginShutdown();
+
+        expect(manager.ready).toBe(false);
+        await manager.stop();
+        expect(
+          (await fetch(`http://127.0.0.1:${String(server.port)}/global/health`))
+            .ok
+        ).toBe(true);
+      } finally {
+        server.stop(true);
+      }
+    });
+
     test("an unhealthy endpoint is not adopted as a working engine", async () => {
       // A responder that is up but reports itself unhealthy — the shape of a
       // wedged engine, as distinct from nothing listening.

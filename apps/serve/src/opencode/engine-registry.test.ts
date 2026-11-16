@@ -49,6 +49,7 @@ function createHarness({
     managerFactory: (input) => {
       const manager: ManagedEngine = {
         assertReady: mock(async () => undefined),
+        beginShutdown: mock(() => undefined),
         start: mock(async () => undefined),
         stop: mock(async () => undefined),
       };
@@ -60,6 +61,23 @@ function createHarness({
 }
 
 describe("EngineRegistry", () => {
+  test("beginShutdown disables allocations and notifies owned managers", async () => {
+    const directory = fixtureDirectory();
+    const { managers, registry } = createHarness();
+    try {
+      await registry.adapterForDirectory(directory);
+
+      registry.beginShutdown();
+
+      expect(managers[0]?.manager.beginShutdown).toHaveBeenCalledTimes(1);
+      await expect(
+        registry.adapterForDirectory(fixtureDirectory())
+      ).rejects.toBeInstanceOf(EngineUnavailableError);
+    } finally {
+      await registry.stop();
+    }
+  });
+
   test("shutdown cancels startup and queued allocations without leaking an engine", async () => {
     let releaseStartup: () => void = () => undefined;
     let notifyStarted: () => void = () => undefined;
@@ -71,6 +89,7 @@ describe("EngineRegistry", () => {
     });
     const manager: ManagedEngine = {
       assertReady: mock(async () => undefined),
+      beginShutdown: mock(() => undefined),
       start: mock(() => {
         notifyStarted();
         return startup;

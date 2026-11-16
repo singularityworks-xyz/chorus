@@ -648,16 +648,23 @@ logger.info("server-running", {
 
 const SHUTDOWN_TIMEOUT_MS = 5000;
 let isShuttingDown = false;
+let shutdownPhase = "idle";
 
 async function gracefulShutdown(signal: string): Promise<void> {
   if (isShuttingDown) {
     return;
   }
   isShuttingDown = true;
+  // Disable engine restarts before asynchronous state flushing. Otherwise an
+  // engine that exits while the workspace is draining can be mistaken for a
+  // crash and restarted during graceful shutdown.
+  processManager?.beginShutdown();
+  engineRegistry?.beginShutdown();
+  shutdownPhase = "stopping-dispatcher";
   logger.info("server-shutdown", { signal });
 
   const shutdownTimeout = setTimeout(() => {
-    logger.warn("shutdown-timeout-force-kill");
+    logger.warn("shutdown-timeout-force-kill", { phase: shutdownPhase });
     remoteAccess.forceKill();
     forceKillOpencode();
     process.exit(1);
@@ -669,21 +676,33 @@ async function gracefulShutdown(signal: string): Promise<void> {
     // and later async flushes (snapshot/coalescer) slot in without
     // reordering.
     pushDispatcher.stop();
+    shutdownPhase = "closing-remote-access";
     await remoteAccess.close();
+    shutdownPhase = "closing-workspace-hub";
     hub.close();
+    shutdownPhase = "stopping-opencode-bridge";
     bridge.stop();
-    await app.server?.stop();
+    shutdownPhase = "stopping-http-server";
+    // Bun's default stop waits for every open WebSocket to close. The hub has
+    // already sent the 1001 shutdown frame to registered clients; close any
+    // remaining active requests and unregistered sockets so shutdown remains
+    // bounded even while browsers or health checks are reconnecting.
+    await app.server?.stop(true);
+    shutdownPhase = "stopping-local-entry";
     await localEntry?.stop(true);
     // Order matters: stop intake, then tear down state channels, then flush
     // durable state, then children. store.close() drains the serial queue,
     // writes a final snapshot, and folds the WAL so a cold copy of chorus.db is
     // a complete backup.
+    shutdownPhase = "flushing-workspace-store";
     await workspaceStore.close();
+    shutdownPhase = "stopping-managed-engines";
     await Promise.all([
       processManager?.stop() ?? Promise.resolve(),
       engineRegistry?.stop() ?? Promise.resolve(),
     ]);
     clearTimeout(shutdownTimeout);
+    shutdownPhase = "complete";
     logger.info("shutdown-complete");
     process.exit(0);
   } catch (error) {
