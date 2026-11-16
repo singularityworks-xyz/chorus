@@ -23,6 +23,23 @@ const reasoningDeltas = [
   " The stream is arriving in ordered, incremental updates.",
   " The visible response is keeping pace with the event stream.",
 ];
+const reasoningByteLimit = Number(
+  process.env.CHORUS_BROWSER_FIXTURE_REASONING_BYTES ?? 0
+);
+if (
+  !Number.isSafeInteger(reasoningByteLimit) ||
+  reasoningByteLimit < 0 ||
+  reasoningByteLimit > 64 * 1024 * 1024
+) {
+  throw new RangeError(
+    "CHORUS_BROWSER_FIXTURE_REASONING_BYTES must be an integer from 0 to 67108864"
+  );
+}
+
+function createReasoningChunk(size: number, index: number): string {
+  const paragraph = `Reasoning segment ${String(index).padStart(6, "0")}: tracing board state, provider choice, and task history.\n\n`;
+  return paragraph.repeat(Math.ceil(size / paragraph.length)).slice(0, size);
+}
 
 const harness = await startPhase6Harness({
   interactive: true,
@@ -44,20 +61,40 @@ if (seedQuestionMode) {
   }
 }
 let deltaIndex = 0;
+let streamedBytes = 0;
 let streamFailure: unknown;
 let resolveShutdown: (() => void) | undefined;
+let streamTimer: ReturnType<typeof setInterval>;
 const stopped = new Promise<void>((resolve) => {
   resolveShutdown = resolve;
   process.once("SIGINT", resolve);
   process.once("SIGTERM", resolve);
 });
-const streamTimer = setInterval(
+streamTimer = setInterval(
   () => {
-    const delta = reasoningDeltas[deltaIndex % reasoningDeltas.length];
+    const remainingBytes = reasoningByteLimit - streamedBytes;
+    if (reasoningByteLimit > 0 && remainingBytes <= 0) {
+      clearInterval(streamTimer);
+      return;
+    }
+
+    const delta =
+      reasoningByteLimit > 0
+        ? createReasoningChunk(Math.min(16 * 1024, remainingBytes), deltaIndex)
+        : reasoningDeltas[deltaIndex % reasoningDeltas.length];
     deltaIndex += 1;
     if (delta) {
       try {
-        harness.engine.appendActiveReasoningDelta(delta);
+        const appended = harness.engine.appendActiveReasoningDelta(delta);
+        if (appended && reasoningByteLimit > 0) {
+          streamedBytes += delta.length;
+          if (streamedBytes >= reasoningByteLimit) {
+            clearInterval(streamTimer);
+            process.stdout.write(
+              `Reasoning fixture emitted ${streamedBytes} bytes.\n`
+            );
+          }
+        }
       } catch (error) {
         streamFailure = error;
         process.stderr.write(`Fixture stream stopped: ${String(error)}\n`);
