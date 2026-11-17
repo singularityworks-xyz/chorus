@@ -163,6 +163,38 @@ test("mirrors recover ordered replay after an abrupt TCP transport loss", async 
   }
 }, 30_000);
 
+test("mirrors stay ordered and converge through a delayed TCP transport", async () => {
+  const harness = await startPhase6Harness({
+    tcpFaultProxyLatencyMs: 40,
+    tcpFaultProxyMirrors: 10,
+  });
+  try {
+    const before = harness.store.headSeq();
+    harness.appendBatch(4);
+    await waitForQualification(
+      () => {
+        const head = harness.store.headSeq();
+        return (
+          head > before &&
+          harness.mirrors.every(
+            (mirror) => !mirror.error && mirror.seq === head
+          )
+        );
+      },
+      10_000,
+      () => harness.diagnostics()
+    );
+
+    expect(harness.diagnostics().p95LatencyMs).toBeGreaterThanOrEqual(30);
+    expect(harness.diagnostics().p95LatencyMs).toBeLessThan(1000);
+    for (const mirror of harness.mirrors) {
+      expect(mirror.boards).toEqual(harness.store.getSnapshot().boards);
+    }
+  } finally {
+    await harness.close();
+  }
+}, 30_000);
+
 test("interactive browser fixture starts with idle boards and one shared default model", async () => {
   const harness = await startPhase6Harness({ interactive: true });
   try {

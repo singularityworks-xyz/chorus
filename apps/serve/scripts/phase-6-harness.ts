@@ -9,6 +9,7 @@ import {
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
+import { Transform } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import {
   applyEventToBoard,
@@ -173,6 +174,14 @@ function validateTcpFaultProxyCount(count: number): void {
   }
 }
 
+function validateTcpFaultProxyLatency(latencyMs: number): void {
+  if (!Number.isInteger(latencyMs) || latencyMs < 0 || latencyMs > 2000) {
+    throw new Error(
+      "tcpFaultProxyLatencyMs must be an integer from 0 to 2000."
+    );
+  }
+}
+
 function qualificationWebSocketUrl(
   base: string,
   ticket: string,
@@ -184,12 +193,16 @@ function qualificationWebSocketUrl(
 
 async function startTransportFaultProxies(
   count: number,
-  destinationPort: number
+  destinationPort: number,
+  latencyMs: number
 ): Promise<Map<number, TransportFaultProxy>> {
   const proxies = new Map<number, TransportFaultProxy>();
   try {
     for (let index = 0; index < count; index += 1) {
-      proxies.set(index, await startTransportFaultProxy(destinationPort));
+      proxies.set(
+        index,
+        await startTransportFaultProxy(destinationPort, latencyMs)
+      );
     }
     return proxies;
   } catch (error) {
@@ -201,11 +214,14 @@ async function startTransportFaultProxies(
 }
 
 async function startTransportFaultProxy(
-  destinationPort: number
+  destinationPort: number,
+  latencyMs: number
 ): Promise<TransportFaultProxy> {
   const connections = new Set<{ client: Socket; upstream: Socket }>();
   const server: Server = createServer((client) => {
     const upstream = connect({ host: "127.0.0.1", port: destinationPort });
+    const clientToServer = createTransportDelayStream(latencyMs);
+    const serverToClient = createTransportDelayStream(latencyMs);
     const connection = { client, upstream };
     connections.add(connection);
     let closed = false;
@@ -215,6 +231,8 @@ async function startTransportFaultProxy(
       }
       closed = true;
       connections.delete(connection);
+      clientToServer.destroy();
+      serverToClient.destroy();
       (socket === client ? upstream : client).destroy();
     };
 
@@ -222,8 +240,8 @@ async function startTransportFaultProxy(
     client.on("error", () => closePeer(client));
     upstream.on("close", () => closePeer(upstream));
     upstream.on("error", () => closePeer(upstream));
-    client.pipe(upstream);
-    upstream.pipe(client);
+    client.pipe(clientToServer).pipe(upstream);
+    upstream.pipe(serverToClient).pipe(client);
   });
 
   await new Promise<void>((resolveListen, reject) => {
@@ -260,6 +278,30 @@ async function startTransportFaultProxy(
       );
     },
   };
+}
+
+function createTransportDelayStream(latencyMs: number): Transform {
+  const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      if (latencyMs === 0) {
+        callback(null, chunk);
+        return;
+      }
+      const timer = setTimeout(() => {
+        pendingTimers.delete(timer);
+        callback(null, chunk);
+      }, latencyMs);
+      pendingTimers.add(timer);
+    },
+    destroy(error, callback) {
+      for (const timer of pendingTimers) {
+        clearTimeout(timer);
+      }
+      pendingTimers.clear();
+      callback(error);
+    },
+  });
 }
 
 function wireComparable(value: unknown): unknown {
@@ -314,12 +356,15 @@ export async function startPhase6Harness({
   interactive = false,
   questionReplyDelayMs,
   tcpFaultProxyMirrors = 0,
+  tcpFaultProxyLatencyMs = 0,
 }: {
   interactive?: boolean;
   questionReplyDelayMs?: number;
   tcpFaultProxyMirrors?: number;
+  tcpFaultProxyLatencyMs?: number;
 } = {}) {
   validateTcpFaultProxyCount(tcpFaultProxyMirrors);
+  validateTcpFaultProxyLatency(tcpFaultProxyLatencyMs);
   const root = mkdtempSync(join(tmpdir(), "chorus-qualification-"));
   const repositories: string[] = [];
   let store: WorkspaceStore | undefined;
@@ -510,7 +555,8 @@ export async function startPhase6Harness({
     const cookie = `${sessionCookie}; ${deviceCookie}`;
     transportFaultProxies = await startTransportFaultProxies(
       tcpFaultProxyMirrors,
-      app.server?.port ?? 0
+      app.server?.port ?? 0,
+      tcpFaultProxyLatencyMs
     );
     async function request(path: string, body?: unknown) {
       const response = await fetch(`${base}${path}`, {
