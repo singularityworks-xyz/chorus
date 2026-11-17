@@ -427,6 +427,10 @@ The phase-6 harness now routes two authenticated WebSocket mirrors through dispo
 
 The qualification proxy can delay each relayed TCP chunk by a bounded interval and cancels pending delay timers during teardown. With all ten authenticated mirrors routed through a 40 ms delay, the test observes p95 server-event-to-client lag of at least 30 ms and below one second; all mirrors remain error-free, contiguous, and equal to the complete board snapshot. The full phase-6 harness passes (8 tests, 81 assertions), and the full repository suite passes (1,135 passed, 17 environment-gated skips, 0 failures; 13,132 assertions). This covers deterministic relay delay; IP-level packet loss, mobile/browser responsiveness under delay, and delayed delivery during the long-load soak remain open.
 
+### Board Stop request reliability — 17 November 2026
+
+Commit `6aa21c8` extracts the Stop request into a focused client that URL-encodes board/task IDs, bounds the request, validates server acknowledgment, and gives server, timeout, and network failures actionable messages. The button uses a synchronous in-flight guard against duplicate requests. The focused Stop client/output suite passes (10 tests, 28 assertions); `bun run check`, all nine package type checks, and the production Webpack build pass. The full repository suite passes (1,138 passed, 17 environment-gated skips, 0 failed; 13,148 assertions). Interactive browser-control verification remains open; unit and integration results are not counted as browser acceptance.
+
 ## Documentation constraints and references
 
 Context7 was not exposed among the tools available during this planning session. Before implementation, use Context7 if available and verify each touched library against the installed version. No framework upgrades are required by this plan.
