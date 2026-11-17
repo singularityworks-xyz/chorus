@@ -447,6 +447,10 @@ Run and Retry now share the server's one-live-task rule in desktop and mobile bo
 
 `BoardSessionHistoryActions` now owns the visible precondition and feedback rules for repository Undo/Redo. Both actions are disabled during board/history activity, while a command is pending, and while history availability loads; command-specific titles show which operation is pending, and failed or busy states expose Retry or Refresh with an accessible alert/status. The rendered component tests pass alongside the history-client suite (11 tests, 39 assertions). The full suite passes (1,163 passed, 17 environment-gated skips, 0 failed; 13,231 assertions); `bun run check`, all nine package type checks, and the production Webpack build pass. The requested interactive ChatGPT-browser pass for the full repository history lifecycle remains open.
 
+### Active-run model stability and retry default — 17 November 2026
+
+The task-service regression changes the workspace's default model while a task is active, verifies the active attempt retains its recorded `anthropic/claude` model, completes it, then retries its saved prompt and verifies the retry uses the current global `openai/gpt-5` default despite the old saved model. The focused `BoardTaskService` suite passes (42 tests, 133 assertions). This pins active-run stability and current-default behavior for later attempts; external-provider and browser gates remain open.
+
 ## Documentation constraints and references
 
 Context7 was not exposed among the tools available during this planning session. Before implementation, use Context7 if available and verify each touched library against the installed version. No framework upgrades are required by this plan.

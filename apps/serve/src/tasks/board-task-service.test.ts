@@ -493,6 +493,76 @@ describe("BoardTaskService", () => {
     rmSync(dir, { force: true, recursive: true });
   });
 
+  test("keeps active work on its selected model and retries with the current global model", async () => {
+    const bridge = makeMockBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-board-model-change-retry-"));
+    const workspaceStore = new WorkspaceStore(dir);
+    await workspaceStore.load();
+    const boardId = await seedBoard(workspaceStore, { state: "uninitialized" });
+    const service = new BoardTaskService(bridge as never, workspaceStore);
+
+    const firstRun = await service.queuePrompt({
+      boardId,
+      directory: "/tmp/repo",
+      model: { modelID: "gpt-5", providerID: "openai" },
+      reviewMode: "auto",
+      text: "keep the active run stable",
+    });
+    const startedAt = Date.now();
+    await workspaceStore.applyBoardEvents(boardId, [
+      {
+        boardId,
+        taskId: firstRun.taskId,
+        ts: startedAt,
+        type: "card.started",
+      },
+      {
+        boardId,
+        model: "anthropic/claude",
+        sessionId: firstRun.sessionId,
+        startedAt,
+        taskId: firstRun.taskId,
+        taskTitle: "keep the active run stable",
+        ts: startedAt + 1,
+        type: "run.started",
+      },
+    ]);
+
+    await workspaceStore.applyMutation({
+      baseRevision: null,
+      clientId: "task-test",
+      mutationId: `change-default-model-${crypto.randomUUID()}`,
+      payload: { model: { modelID: "gpt-5", providerID: "openai" } },
+      type: "preference.default_model.set",
+    });
+
+    expect(
+      workspaceStore.getBoard(boardId)?.columns.in_progress[0]?.run?.model
+    ).toBe("anthropic/claude");
+
+    await workspaceStore.applyBoardEvents(boardId, [
+      {
+        boardId,
+        taskId: firstRun.taskId,
+        ts: startedAt + 2,
+        type: "card.completed",
+      },
+    ]);
+
+    const retry = await service.retryTask(boardId, firstRun.taskId);
+    expect(retry.status).toBe("accepted");
+    expect(bridge.promptSessionAsync).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        model: { modelID: "gpt-5", providerID: "openai" },
+        text: "keep the active run stable",
+      })
+    );
+
+    await workspaceStore.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
   test("provider dispatch failure leaves a visible failed card with its prompt", async () => {
     const bridge = makeMockBridge();
     bridge.promptSessionAsync.mockRejectedValue(
