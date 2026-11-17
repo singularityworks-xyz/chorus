@@ -147,7 +147,12 @@ export function ModelPicker({
   return (
     <Popover.Root onOpenChange={setOpen} open={open}>
       <Popover.Trigger
-        aria-label="Choose model"
+        aria-label={getTriggerAccessibleLabel({
+          loading,
+          selectedModel,
+          triggerCopy,
+          value,
+        })}
         className={cn(
           "flex min-w-[13rem] max-w-[16rem] select-none items-center justify-between gap-2 rounded-xs border border-input bg-transparent px-2.5 py-1 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50",
           className
@@ -938,6 +943,31 @@ function getTriggerCopy(input: {
     label: "Choose model",
     meta: "Select a model",
   };
+}
+
+function getTriggerAccessibleLabel(input: {
+  loading: boolean;
+  selectedModel: OpencodeModelSummary | null;
+  triggerCopy: TriggerCopy;
+  value: string;
+}): string {
+  if (input.loading) {
+    return "Choose model. Loading the model catalog.";
+  }
+
+  if (input.selectedModel) {
+    return `Choose model. Current selection: ${input.selectedModel.name}, ${input.selectedModel.providerName} (${input.selectedModel.providerID}/${input.selectedModel.modelID}).`;
+  }
+
+  if (input.value === DEFAULT_MODEL_KEY) {
+    return `Choose model. Current selection: ${input.triggerCopy.label}. ${input.triggerCopy.meta}.`;
+  }
+
+  if (input.value) {
+    return `Choose model. Saved selection ${input.value} is unavailable.`;
+  }
+
+  return "Choose model. No model selected.";
 }
 
 function getDefaultTriggerLabel(
