@@ -420,6 +420,7 @@ const projectService = new ProjectService(
   (directory) => bridge.subscribeDirectory(directory)
 );
 
+let lastLoggedWorkspaceCommitSeq = 0;
 bridge.subscribe(async (event) => {
   // No raw opencode event fan-out. Agent events reach clients as sequenced
   // Chorus events through the store, so external payload shapes never appear on
@@ -455,11 +456,18 @@ bridge.subscribe(async (event) => {
     return;
   }
 
+  if (commit.lastSeq <= lastLoggedWorkspaceCommitSeq) {
+    return;
+  }
+  lastLoggedWorkspaceCommitSeq = commit.lastSeq;
+
   logger.info("workspace-commit", {
-    sessionID: event.sessionID,
     boardId: commit.boardId,
     seq: commit.lastSeq,
     events: commit.events.map((entry) => entry.type),
+    ...(commit.boardId && event.sessionID
+      ? { sessionID: event.sessionID }
+      : {}),
   });
 });
 

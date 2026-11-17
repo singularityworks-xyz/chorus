@@ -88,6 +88,9 @@ export function pendingApprovalConflictMessage(
 
 /** Beyond this many distinct boards/sessions, the drop-warning map resets. */
 const MAX_DROPPED_WARNING_KEYS = 256;
+const AGENT_DELTA_BATCH_WINDOW_MS = 50;
+const MAX_AGENT_DELTA_BATCH_EVENTS = 256;
+const MAX_AGENT_DELTA_BATCH_CHARS = 256 * 1024;
 
 const BOARD_X_OFFSET = 180;
 const BOARD_Y_OFFSET = 120;
@@ -153,6 +156,23 @@ const EMPTY_PREFERENCES: WorkspaceSnapshotInput["preferences"] = {
 interface PersistedBlob {
   snapshot: WorkspaceSnapshot;
   v: number;
+}
+
+interface PendingAgentDelta {
+  event: NormalizedAgentEvent;
+  reject: (error: unknown) => void;
+  resolve: (commit: StoreCommit | null) => void;
+}
+
+type StepDeltaWorkspaceEvent = Extract<
+  WorkspaceEvent,
+  { type: "step.delta_appended" }
+>;
+
+function isStepDeltaWorkspaceEvent(
+  event: WorkspaceEvent
+): event is StepDeltaWorkspaceEvent {
+  return event.type === "step.delta_appended";
 }
 
 /**
@@ -239,6 +259,10 @@ export class WorkspaceStore {
   /** Subscribers notified once per commit, after memory is swapped. */
   readonly #commitListeners = new Set<(commit: StoreCommit) => void>();
   readonly #pendingApprovalActions = new Set<string>();
+  #agentEventTail: Promise<void> = Promise.resolve();
+  #pendingAgentDeltas: PendingAgentDelta[] = [];
+  #pendingAgentDeltaChars = 0;
+  #agentDeltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
   #closing = false;
   #closePromise: Promise<void> | null = null;
 
@@ -377,6 +401,8 @@ export class WorkspaceStore {
 
   /** Resolves when every queued state change has committed. */
   async drain(): Promise<void> {
+    this.#flushPendingAgentDeltas();
+    await this.#agentEventTail;
     await this.#enqueue(async () => undefined);
   }
 
@@ -391,15 +417,14 @@ export class WorkspaceStore {
     }
 
     this.#closing = true;
-    const closePromise = this.#queue.promise.then(() => {
-      this.#writeSnapshotNow();
-      this.#db.checkpointTruncate();
-      this.#db.close();
-    });
-    this.#queue.promise = closePromise.then(
-      () => undefined,
-      () => undefined
-    );
+    this.#flushPendingAgentDeltas();
+    const closePromise = this.#agentEventTail
+      .then(() => this.#queue.promise)
+      .then(() => {
+        this.#writeSnapshotNow();
+        this.#db.checkpointTruncate();
+        this.#db.close();
+      });
     this.#closePromise = closePromise;
     return closePromise;
   }
@@ -771,7 +796,208 @@ export class WorkspaceStore {
       return null;
     }
 
-    return this.#enqueue(async () => this.#applyAgentEventToStore(agentEvent));
+    if (this.#closing) {
+      throw new Error("workspace store is closing or closed");
+    }
+
+    if (typeof agentEvent.delta === "string") {
+      return this.#queueAgentDelta(agentEvent);
+    }
+
+    this.#flushPendingAgentDeltas();
+    return this.#queueAgentWork(() =>
+      Promise.resolve(this.#applyAgentEventToStore(agentEvent))
+    );
+  }
+
+  #queueAgentDelta(event: NormalizedAgentEvent): Promise<StoreCommit | null> {
+    return new Promise((resolve, reject) => {
+      this.#pendingAgentDeltas.push({ event, reject, resolve });
+      this.#pendingAgentDeltaChars += event.delta?.length ?? 0;
+
+      if (
+        this.#pendingAgentDeltas.length >= MAX_AGENT_DELTA_BATCH_EVENTS ||
+        this.#pendingAgentDeltaChars >= MAX_AGENT_DELTA_BATCH_CHARS
+      ) {
+        this.#flushPendingAgentDeltas();
+        return;
+      }
+
+      if (this.#agentDeltaFlushTimer === null) {
+        this.#agentDeltaFlushTimer = setTimeout(() => {
+          this.#agentDeltaFlushTimer = null;
+          this.#flushPendingAgentDeltas();
+        }, AGENT_DELTA_BATCH_WINDOW_MS);
+        this.#agentDeltaFlushTimer.unref?.();
+      }
+    });
+  }
+
+  #flushPendingAgentDeltas(): void {
+    if (this.#agentDeltaFlushTimer !== null) {
+      clearTimeout(this.#agentDeltaFlushTimer);
+      this.#agentDeltaFlushTimer = null;
+    }
+
+    if (this.#pendingAgentDeltas.length === 0) {
+      return;
+    }
+
+    const pending = this.#pendingAgentDeltas;
+    this.#pendingAgentDeltas = [];
+    this.#pendingAgentDeltaChars = 0;
+    const commit = this.#queueAgentWork(() =>
+      Promise.resolve(
+        this.#applyAgentDeltaBatchToStore(pending.map(({ event }) => event))
+      )
+    );
+    commit.then(
+      (value) => {
+        for (const item of pending) {
+          item.resolve(value);
+        }
+      },
+      (error: unknown) => {
+        for (const item of pending) {
+          item.reject(error);
+        }
+      }
+    );
+  }
+
+  #queueAgentWork<T>(work: () => Promise<T>): Promise<T> {
+    const result = this.#agentEventTail.then(() =>
+      this.#enqueueNow(work, true)
+    );
+    this.#agentEventTail = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+
+  #applyAgentDeltaBatchToStore(
+    agentEvents: NormalizedAgentEvent[]
+  ): StoreCommit | null {
+    const receipts = new Map<string, { id: string; ts: number }>();
+    const deltas = new Map<
+      string,
+      {
+        event: StepDeltaWorkspaceEvent;
+        chunks: string[];
+        timestamp: number;
+      }
+    >();
+
+    for (const agentEvent of agentEvents) {
+      this.#collectAgentDelta(agentEvent, receipts, deltas);
+    }
+
+    const events = [...deltas.values()].map(({ event, chunks, timestamp }) => ({
+      ...event,
+      delta: chunks.join(""),
+      ts: timestamp,
+    }));
+    const persistedReceipts = [...receipts.values()];
+    if (events.length === 0) {
+      this.#persistAgentReceipts(persistedReceipts);
+      return null;
+    }
+
+    const boardIds = new Set(events.map((event) => event.boardId));
+    const boardId = boardIds.size === 1 ? (events[0]?.boardId ?? null) : null;
+    const commit = this.#commit(events, boardId, null, [], persistedReceipts);
+    this.#pruneAgentReceiptsPeriodically(persistedReceipts.length);
+    return commit;
+  }
+
+  #collectAgentDelta(
+    agentEvent: NormalizedAgentEvent,
+    receipts: Map<string, { id: string; ts: number }>,
+    deltas: Map<
+      string,
+      {
+        event: StepDeltaWorkspaceEvent;
+        chunks: string[];
+        timestamp: number;
+      }
+    >
+  ): void {
+    const sessionId = agentEvent.sessionID;
+    if (!sessionId) {
+      return;
+    }
+
+    const board = this.#snapshot.boards.find(
+      (entry) => entry.session.sessionId === sessionId
+    );
+    if (!board) {
+      return;
+    }
+
+    const receipt = this.#agentReceipt(board.boardId, sessionId, agentEvent);
+    if (receipt && this.#hasAgentReceipt(receipt, receipts)) {
+      return;
+    }
+
+    const converted = toWorkspaceEvents(agentEvent, {
+      boardId: board.boardId,
+      taskId: board.session.currentTaskId ?? "",
+    });
+    const delta = converted.find(isStepDeltaWorkspaceEvent);
+    if (!delta || delta.taskId === "") {
+      if (converted.length > 0) {
+        this.#warnDroppedOnce(board.boardId, agentEvent);
+      }
+      this.#recordAgentReceipt(receipt, receipts);
+      return;
+    }
+
+    const key = JSON.stringify([delta.boardId, delta.taskId, delta.stepId]);
+    const existing = deltas.get(key);
+    if (existing) {
+      existing.chunks.push(delta.delta);
+      existing.timestamp = delta.ts;
+    } else {
+      deltas.set(key, {
+        event: delta,
+        chunks: [delta.delta],
+        timestamp: delta.ts,
+      });
+    }
+    this.#recordAgentReceipt(receipt, receipts);
+  }
+
+  #agentReceipt(
+    boardId: string,
+    sessionId: string,
+    event: NormalizedAgentEvent
+  ): { id: string; ts: number } | undefined {
+    if (!event.sourceEventId) {
+      return undefined;
+    }
+    return {
+      id: JSON.stringify([boardId, sessionId, event.sourceEventId]),
+      ts: Date.now(),
+    };
+  }
+
+  #hasAgentReceipt(
+    receipt: { id: string; ts: number },
+    batchReceipts: Map<string, { id: string; ts: number }>
+  ): boolean {
+    return (
+      batchReceipts.has(receipt.id) || this.#db.hasAgentReceipt(receipt.id)
+    );
+  }
+
+  #recordAgentReceipt(
+    receipt: { id: string; ts: number } | undefined,
+    receipts: Map<string, { id: string; ts: number }>
+  ): void {
+    if (receipt) {
+      receipts.set(receipt.id, receipt);
+    }
   }
 
   #applyAgentEventToStore(
@@ -833,12 +1059,19 @@ export class WorkspaceStore {
     if (!receipt) {
       return;
     }
-    this.#db.appendEvents([], null, [], receipt);
-    this.#pruneAgentReceiptsPeriodically();
+    this.#persistAgentReceipts([receipt]);
   }
 
-  #pruneAgentReceiptsPeriodically(): void {
-    this.#agentReceiptsSincePrune += 1;
+  #persistAgentReceipts(receipts: Array<{ id: string; ts: number }>): void {
+    if (receipts.length === 0) {
+      return;
+    }
+    this.#db.appendEvents([], null, [], receipts);
+    this.#pruneAgentReceiptsPeriodically(receipts.length);
+  }
+
+  #pruneAgentReceiptsPeriodically(receiptCount = 1): void {
+    this.#agentReceiptsSincePrune += receiptCount;
     if (this.#agentReceiptsSincePrune < AGENT_RECEIPT_PRUNE_INTERVAL) {
       return;
     }
@@ -1448,6 +1681,20 @@ export class WorkspaceStore {
       return Promise.reject(new Error("workspace store is closing or closed"));
     }
 
+    this.#flushPendingAgentDeltas();
+    return this.#agentEventTail.then(() =>
+      // Once accepted above, preserve this operation through close. close()
+      // waits for the event tail and then the queue; rejecting here would drop
+      // a pre-close write that was waiting behind a buffered stream batch.
+      this.#enqueueNow(work, true)
+    );
+  }
+
+  #enqueueNow<T>(work: () => Promise<T>, allowClosing = false): Promise<T> {
+    if (this.#closing && !allowClosing) {
+      return Promise.reject(new Error("workspace store is closing or closed"));
+    }
+
     const result = this.#queue.promise.then(work);
     this.#queue.promise = result.then(
       () => undefined,
@@ -1466,7 +1713,9 @@ export class WorkspaceStore {
     boardId: string | null,
     mutationKey: { id: string; ts: number } | null,
     metaChanges: MetaChange[] = [],
-    agentReceipt?: { id: string; ts: number }
+    agentReceipt?:
+      | { id: string; ts: number }
+      | Array<{ id: string; ts: number }>
   ): StoreCommit {
     let candidate = this.#snapshot;
     for (const event of events) {

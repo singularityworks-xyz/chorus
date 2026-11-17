@@ -298,6 +298,7 @@ export interface HubStats {
   coalescerDepth: number;
   criticalOnlyClients: number;
   droppedFrames: number;
+  dropReasons: Record<string, number>;
   headSeq: number;
 }
 
@@ -307,6 +308,7 @@ export class WorkspaceHub {
   /** Same clients as `#clients`, keyed by connection id. Kept adjacent so the two
    * cannot drift: every removal path must update both. */
   readonly #clientsById = new Map<string, Client>();
+  readonly #dropReasons = new Map<string, number>();
   readonly #store: WorkspaceStore;
   readonly #now: () => number;
   readonly #coalesceMs: number;
@@ -352,7 +354,7 @@ export class WorkspaceHub {
     // unreachable by unregister.
     const existing = this.#clientsById.get(socket.id);
     if (existing) {
-      this.#drop(existing);
+      this.#drop(existing, "connection-replaced");
     }
 
     const client: Client = {
@@ -385,7 +387,7 @@ export class WorkspaceHub {
   unregister(socket: HubSocket): void {
     const client = this.#clientsById.get(socket.id);
     if (client) {
-      this.#drop(client);
+      this.#drop(client, "socket-closed");
     }
   }
 
@@ -396,7 +398,7 @@ export class WorkspaceHub {
     );
     for (const client of clients) {
       client.socket.close?.(1000, "signed out");
-      this.#drop(client);
+      this.#drop(client, "signed-out");
     }
     return clients.length;
   }
@@ -438,6 +440,7 @@ export class WorkspaceHub {
       ),
       criticalOnlyClients,
       droppedFrames,
+      dropReasons: Object.fromEntries(this.#dropReasons),
       headSeq: this.#store.headSeq(),
     };
   }
@@ -486,7 +489,7 @@ export class WorkspaceHub {
       // Spec §6: cap per-client command rate. Dropping the socket is the point;
       // a silent throttle would just let a flood continue.
       client.socket.close?.(WS_CLOSE_RATE_LIMITED, "command rate exceeded");
-      this.unregister(socket);
+      this.#drop(client, "command-rate-limit");
       return;
     }
 
@@ -961,8 +964,11 @@ export class WorkspaceHub {
    * itself, and clearing only the set left the id map holding a dead client, so
    * a later frame on that id resolved to a closed socket.
    */
-  #drop(client: Client): void {
-    this.#clients.delete(client);
+  #drop(client: Client, reason: string): void {
+    if (!this.#clients.delete(client)) {
+      return;
+    }
+    this.#dropReasons.set(reason, (this.#dropReasons.get(reason) ?? 0) + 1);
     if (this.#clientsById.get(client.id) === client) {
       this.#clientsById.delete(client.id);
     }
@@ -976,7 +982,7 @@ export class WorkspaceHub {
       for (const client of [...this.#clients]) {
         if (client.lastPongAt < cutoff) {
           client.socket.close?.(4000, "pong timeout");
-          this.#drop(client);
+          this.#drop(client, "pong-timeout");
           continue;
         }
         // Routed through #send so a ping that is itself refused counts toward
@@ -1008,7 +1014,7 @@ export class WorkspaceHub {
 
     for (const client of [...this.#clients]) {
       client.socket.close?.(1001, "server shutting down");
-      this.#drop(client);
+      this.#drop(client, "server-shutdown");
     }
   }
 
@@ -1060,7 +1066,7 @@ export class WorkspaceHub {
         WS_CLOSE_UNAUTHORIZED,
         "device session expired or revoked"
       );
-      this.#drop(client);
+      this.#drop(client, "device-revoked");
       return;
     }
     const status = client.socket.send(JSON.stringify(message));
@@ -1086,7 +1092,7 @@ export class WorkspaceHub {
     // control event is dropped too — silently, into a counter nobody alerts on.
     if (client.consecutiveDrops >= MAX_CONSECUTIVE_DROPS) {
       client.socket.close?.(1011, "frames dropped");
-      this.#drop(client);
+      this.#drop(client, "frames-dropped");
     }
   }
 

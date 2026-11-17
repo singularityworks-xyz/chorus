@@ -443,6 +443,9 @@ export async function startPhase6Harness({
       socket.addEventListener("close", (event) => {
         mirror.error ??= `socket closed (${event.code}): ${event.reason}`;
       });
+      socket.addEventListener("error", () => {
+        mirror.error ??= "socket transport error";
+      });
     }
     await waitForQualification(() =>
       mirrors.every((mirror) => mirror.initialized)
@@ -642,6 +645,25 @@ export async function startPhase6Harness({
       root,
       serveBaseUrl: base,
       accessToken: token,
+      diagnostics() {
+        const recentLatencies = latencies.filter((latency) => latency > 0);
+        const sortedLatencies = [...recentLatencies].sort((a, b) => a - b);
+        return {
+          frameCount,
+          headSeq: workspace.headSeq(),
+          hub: workspaceHub.stats(),
+          mirrors: mirrors.map((mirror, mirrorIndex) => ({
+            error: mirror.error,
+            initialized: mirror.initialized,
+            mirrorIndex,
+            readyState: mirror.socket.readyState,
+            resyncing: mirror.resyncing,
+            seq: mirror.seq,
+          })),
+          p95LatencyMs:
+            sortedLatencies[Math.floor(sortedLatencies.length * 0.95)] ?? 0,
+        };
+      },
       queueInteractiveTask,
       async finalizeReview(
         boardId: string,

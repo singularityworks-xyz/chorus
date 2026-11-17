@@ -547,6 +547,7 @@ describe("command rate limit", () => {
 
     expect(socket.closeCalls.at(-1)?.code).toBe(4429);
     expect(hub.clientCount()).toBe(0);
+    expect(hub.stats().dropReasons["command-rate-limit"]).toBe(1);
 
     hub.close();
   });
@@ -1061,6 +1062,7 @@ describe("heartbeat", () => {
     expect(socket.closeCalls.at(-1)?.code).toBe(4000);
     expect(socket.closeCalls.at(-1)?.reason).toBe("pong timeout");
     expect(hub.clientCount()).toBe(0);
+    expect(hub.stats().dropReasons["pong-timeout"]).toBe(1);
 
     // Regression: the heartbeat used to clear only the client set, leaving the
     // id map holding a dead client. A late frame on that id then resolved to a

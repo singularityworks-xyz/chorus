@@ -463,9 +463,17 @@ export class ChorusDatabase {
     events: EventToAppend[],
     mutationKey: { id: string; ts: number } | null,
     metaChanges: MetaChange[] = [],
-    agentReceipt?: { id: string; ts: number }
+    agentReceipt?:
+      | { id: string; ts: number }
+      | Array<{ id: string; ts: number }>
   ): { firstSeq: number; lastSeq: number } {
-    if (events.length === 0 && !agentReceipt) {
+    let agentReceipts: Array<{ id: string; ts: number }> = [];
+    if (Array.isArray(agentReceipt)) {
+      agentReceipts = agentReceipt;
+    } else if (agentReceipt) {
+      agentReceipts = [agentReceipt];
+    }
+    if (events.length === 0 && agentReceipts.length === 0) {
       const head = this.headSeq();
       return { firstSeq: head + 1, lastSeq: head };
     }
@@ -474,21 +482,29 @@ export class ChorusDatabase {
       .transaction(() => {
         let seq = this.headSeq();
 
-        if (agentReceipt) {
-          this.#db
-            .query(
-              "INSERT INTO agent_receipts (receipt_id, received_at) VALUES (?, ?)"
-            )
-            .run(agentReceipt.id, agentReceipt.ts);
+        if (agentReceipts.length > 0) {
+          const insertReceipt = this.#db.query(
+            "INSERT INTO agent_receipts (receipt_id, received_at) VALUES (?, ?)"
+          );
+          for (const receipt of agentReceipts) {
+            insertReceipt.run(receipt.id, receipt.ts);
+          }
         }
 
-        for (const event of events) {
-          seq += 1;
-          this.#db
-            .query(
-              "INSERT INTO events (seq, ts, board_id, type, payload) VALUES (?, ?, ?, ?, ?)"
-            )
-            .run(seq, event.ts, event.boardId, event.type, event.payload);
+        if (events.length > 0) {
+          const insertEvent = this.#db.query(
+            "INSERT INTO events (seq, ts, board_id, type, payload) VALUES (?, ?, ?, ?, ?)"
+          );
+          for (const event of events) {
+            seq += 1;
+            insertEvent.run(
+              seq,
+              event.ts,
+              event.boardId,
+              event.type,
+              event.payload
+            );
+          }
         }
 
         this.setMeta(HEAD_SEQ_KEY, String(seq));
