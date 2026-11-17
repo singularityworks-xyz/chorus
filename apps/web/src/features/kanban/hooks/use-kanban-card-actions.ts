@@ -10,11 +10,18 @@ import {
   requestBoardTaskCommand,
 } from "../task-command-client";
 import {
+  hasObservedTaskCommand,
+  isBoardTaskCommandBusy,
+} from "../utils/board-task-state";
+import {
   type AwaitingTaskActionEvent,
   shouldClearAwaitingTaskAction,
 } from "../utils/task-approval-state";
 
 const TASK_ACTION_TIMEOUT_MS = 10_000;
+const TASK_COMMAND_EVENT_TIMEOUT_MS = 20_000;
+const TASK_COMMAND_EVENT_TIMEOUT_MESSAGE =
+  "The request was accepted, but the board has not confirmed it yet. Refresh the board to check its status before trying again.";
 
 function taskActionErrorMessage(error: unknown, fallback: string) {
   if (error instanceof Error && error.name === "TimeoutError") {
@@ -28,6 +35,9 @@ function taskActionErrorMessage(error: unknown, fallback: string) {
 
 export interface KanbanTaskActionState {
   awaitingEvent?: AwaitingTaskActionEvent;
+  awaitingTaskCommandId?: string;
+  awaitingTaskCommandStartedAt?: number;
+  awaitingTaskCommandTimedOut?: boolean;
   error?: string;
   message?: string;
   pending?: "approve" | "reject" | "run" | "retry";
@@ -35,6 +45,7 @@ export interface KanbanTaskActionState {
 
 export interface KanbanCardActions {
   actionStates: Record<string, KanbanTaskActionState | undefined>;
+  boardBusy: boolean;
   handleApprove: (
     taskId: string,
     plan: string,
@@ -236,7 +247,9 @@ export function useKanbanCardActions({
   const reviewModeRef = useRef(reviewMode);
   const reviewModeCommandRef = useRef(0);
   const inFlightTaskActionRef = useRef(new Set<string>());
+  const inFlightBoardTaskCommandRef = useRef(false);
   const { updateBoardReviewMode } = useWorkspace();
+  const boardBusy = isBoardTaskCommandBusy(localColumns, actionStates);
 
   // Server events own lifecycle columns. The hook keeps no optimistic lifecycle
   // transitions that could leave a card missing after a rejected command.
@@ -282,6 +295,78 @@ export function useKanbanCardActions({
       return next;
     });
   }, [actionStates, columns]);
+
+  useEffect(() => {
+    const taskIdsToClear = Object.entries(actionStates)
+      .filter(
+        ([, state]) =>
+          state?.awaitingTaskCommandId &&
+          hasObservedTaskCommand(state.awaitingTaskCommandId, columns)
+      )
+      .map(([taskId]) => taskId);
+    if (taskIdsToClear.length === 0) {
+      return;
+    }
+
+    setActionStates((current) => {
+      const next = { ...current };
+      for (const taskId of taskIdsToClear) {
+        if (next[taskId]?.awaitingTaskCommandId) {
+          delete next[taskId];
+        }
+      }
+      return next;
+    });
+  }, [actionStates, columns]);
+
+  useEffect(() => {
+    const waitingCommands = Object.entries(actionStates).flatMap(
+      ([taskId, state]) =>
+        state?.awaitingTaskCommandId && state.awaitingTaskCommandStartedAt
+          ? [
+              {
+                taskId,
+                commandId: state.awaitingTaskCommandId,
+                startedAt: state.awaitingTaskCommandStartedAt,
+              },
+            ]
+          : []
+    );
+    if (waitingCommands.length === 0) {
+      return;
+    }
+
+    const timers = waitingCommands.map(({ taskId, commandId, startedAt }) =>
+      setTimeout(
+        () => {
+          setActionStates((current) => {
+            const state = current[taskId];
+            if (
+              state?.awaitingTaskCommandId !== commandId ||
+              state.awaitingTaskCommandStartedAt !== startedAt
+            ) {
+              return current;
+            }
+            return {
+              ...current,
+              [taskId]: {
+                awaitingTaskCommandId: commandId,
+                awaitingTaskCommandTimedOut: true,
+                error: TASK_COMMAND_EVENT_TIMEOUT_MESSAGE,
+              },
+            };
+          });
+        },
+        Math.max(0, startedAt + TASK_COMMAND_EVENT_TIMEOUT_MS - Date.now())
+      )
+    );
+
+    return () => {
+      for (const timer of timers) {
+        clearTimeout(timer);
+      }
+    };
+  }, [actionStates]);
 
   const setTaskActionState = useCallback(
     (taskId: string, state: KanbanTaskActionState | undefined) => {
@@ -446,17 +531,25 @@ export function useKanbanCardActions({
       if (inFlightTaskActionRef.current.has(taskId)) {
         return;
       }
+      if (
+        inFlightBoardTaskCommandRef.current ||
+        isBoardTaskCommandBusy(localColumns, actionStates)
+      ) {
+        return;
+      }
       inFlightTaskActionRef.current.add(taskId);
+      inFlightBoardTaskCommandRef.current = true;
       setTaskActionState(taskId, { pending: action });
       try {
         const command = await requestBoardTaskCommand(boardId, taskId, action);
-        if (command.status === "already_running") {
-          setTaskActionState(taskId, {
-            message: "This task is already running.",
-          });
-          return;
-        }
-        setTaskActionState(taskId, undefined);
+        setTaskActionState(taskId, {
+          awaitingTaskCommandId: command.taskId,
+          awaitingTaskCommandStartedAt: Date.now(),
+          message:
+            command.status === "already_running"
+              ? "This task is already running. Waiting for the board to update…"
+              : "Request accepted. Waiting for the board to update…",
+        });
       } catch (error) {
         const message = taskActionErrorMessage(
           error,
@@ -465,9 +558,10 @@ export function useKanbanCardActions({
         setTaskActionState(taskId, { error: message });
       } finally {
         inFlightTaskActionRef.current.delete(taskId);
+        inFlightBoardTaskCommandRef.current = false;
       }
     },
-    [boardId, localColumns, setTaskActionState]
+    [actionStates, boardId, localColumns, setTaskActionState]
   );
 
   const handleRun = useCallback(
@@ -532,6 +626,7 @@ export function useKanbanCardActions({
 
   return {
     actionStates,
+    boardBusy,
     handleApprove,
     handleColumnsChange,
     handlePlanChange,

@@ -64,6 +64,7 @@ import {
 } from "@/features/kanban/components/agent-output-card";
 import type { KanbanTaskActionState } from "@/features/kanban/hooks/use-kanban-card-actions";
 import { cn } from "@/lib/utils";
+import { getBoardTaskCommandButtonState } from "../utils/board-task-state";
 import { type GroupedStep, groupSteps } from "../utils/group-steps";
 import {
   getPendingQuestionApprovals,
@@ -569,6 +570,7 @@ function ChangedFileRow({ file }: { file: ChangedFile }) {
 interface TaskCardProps {
   actionState?: KanbanTaskActionState;
   asHandle?: boolean;
+  boardBusy: boolean;
   boardId: string;
   draggable?: boolean;
   onApprove: (
@@ -679,6 +681,7 @@ function TaskCardDiffSection({
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: TaskCard renders multiple conditional sections for different task states (queue, in_progress, review, done)
 function TaskCard({
+  boardBusy,
   boardId,
   task,
   asHandle,
@@ -744,6 +747,19 @@ function TaskCard({
     setQuestionAnswers(newAnswers);
     onQuestionsAnswered(task.id, newAnswers);
   };
+
+  const runButton = getBoardTaskCommandButtonState(
+    "run",
+    actionState,
+    boardBusy,
+    Boolean(task.promptInput)
+  );
+  const retryButton = getBoardTaskCommandButtonState(
+    "retry",
+    actionState,
+    boardBusy,
+    Boolean(task.promptInput)
+  );
 
   const content = (
     <div
@@ -907,11 +923,9 @@ function TaskCard({
               "hover:border-emerald-500/20 hover:bg-emerald-500/12 hover:text-emerald-400",
               "active:scale-[0.97]"
             )}
-            disabled={!!actionState?.pending || !task.promptInput}
+            disabled={runButton.disabled}
             onClick={() => onRun(task.id)}
-            title={
-              task.promptInput ? "Run task" : "The saved prompt is unavailable"
-            }
+            title={runButton.title}
             type="button"
           >
             {actionState?.pending === "run" ? (
@@ -919,7 +933,7 @@ function TaskCard({
             ) : (
               <PlayIcon className="size-3 fill-current" />
             )}
-            {actionState?.pending === "run" ? "Starting…" : "Run"}
+            {runButton.label}
           </button>
         </div>
       )}
@@ -1012,13 +1026,9 @@ function TaskCard({
               "transition-all duration-150 hover:border-white/10 hover:bg-white/8 hover:text-white/55",
               "active:scale-[0.97]"
             )}
-            disabled={!!actionState?.pending || !task.promptInput}
+            disabled={retryButton.disabled}
             onClick={() => onRetry(task.id)}
-            title={
-              task.promptInput
-                ? "Retry task"
-                : "The saved prompt is unavailable"
-            }
+            title={retryButton.title}
             type="button"
           >
             {actionState?.pending === "retry" ? (
@@ -1026,7 +1036,7 @@ function TaskCard({
             ) : (
               <RotateCcwIcon className="size-3" />
             )}
-            {actionState?.pending === "retry" ? "Retrying…" : "Retry"}
+            {retryButton.label}
           </button>
         </div>
       )}
@@ -1318,6 +1328,7 @@ function ColumnHeader({
 
 function TaskList({
   boardId,
+  boardBusy,
   columnId,
   tasks,
   reviewMode,
@@ -1329,6 +1340,7 @@ function TaskList({
   onRetry,
   onRun,
 }: {
+  boardBusy: boolean;
   boardId: string;
   columnId: string;
   tasks: Task[];
@@ -1349,6 +1361,7 @@ function TaskList({
     <TaskCard
       actionState={actionStates?.[task.id]}
       asHandle
+      boardBusy={boardBusy}
       boardId={boardId}
       draggable={columnId === "queue"}
       key={task.id}
@@ -1370,6 +1383,7 @@ function TaskList({
 
 function KanbanColumnRenderer({
   boardId,
+  boardBusy,
   columnId,
   tasks,
   reviewMode,
@@ -1385,6 +1399,7 @@ function KanbanColumnRenderer({
   onRun,
   onCreateTask,
 }: {
+  boardBusy: boolean;
   boardId: string;
   columnId: string;
   tasks: Task[];
@@ -1413,6 +1428,7 @@ function KanbanColumnRenderer({
     >
       <KanbanColumnBody
         actionStates={actionStates}
+        boardBusy={boardBusy}
         boardId={boardId}
         columnId={columnId}
         onApprove={onApprove}
@@ -1442,6 +1458,7 @@ function KanbanColumnRenderer({
  */
 export function KanbanColumnBody({
   boardId,
+  boardBusy,
   columnId,
   tasks,
   reviewMode,
@@ -1457,6 +1474,7 @@ export function KanbanColumnBody({
   onRun,
   onCreateTask,
 }: {
+  boardBusy: boolean;
   boardId: string;
   columnId: string;
   tasks: Task[];
@@ -1518,6 +1536,16 @@ export function KanbanColumnBody({
             </button>
           )}
 
+          {isQueue && boardBusy && (
+            <p
+              className="rounded-xs border border-amber-400/15 bg-amber-400/[0.06] px-2.5 py-2 text-[0.68rem] text-amber-100/70"
+              role="status"
+            >
+              Finish or resolve current work before running or retrying another
+              task.
+            </p>
+          )}
+
           <KanbanColumnContent
             className="nowheel custom-scrollbar flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1 pb-1"
             value={columnId}
@@ -1531,6 +1559,7 @@ export function KanbanColumnBody({
             ) : (
               <TaskList
                 actionStates={actionStates}
+                boardBusy={boardBusy}
                 boardId={boardId}
                 columnId={columnId}
                 onApprove={onApprove}
@@ -1553,6 +1582,7 @@ export function KanbanColumnBody({
 export function KanbanCardContent({
   data,
   actionStates,
+  boardBusy,
   reviewModeError,
   reviewModePending,
   onColumnsChange,
@@ -1567,6 +1597,7 @@ export function KanbanCardContent({
 }: {
   data: KanbanCardData;
   actionStates?: Record<string, KanbanTaskActionState | undefined>;
+  boardBusy: boolean;
   reviewModeError: string | null;
   reviewModePending: boolean;
   onColumnsChange: (columns: Columns) => void;
@@ -1601,6 +1632,7 @@ export function KanbanCardContent({
             <Fragment key={columnId}>
               <KanbanColumnRenderer
                 actionStates={actionStates}
+                boardBusy={boardBusy}
                 boardId={data.id}
                 columnId={columnId}
                 onApprove={onApprove}

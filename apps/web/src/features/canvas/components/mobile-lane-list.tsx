@@ -182,6 +182,7 @@ function MobileBoardBody({
           >
             <KanbanColumnBody
               actionStates={actions.actionStates}
+              boardBusy={actions.boardBusy}
               boardId={boardId}
               columnId={lane}
               onApprove={actions.handleApprove}

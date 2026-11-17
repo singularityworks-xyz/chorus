@@ -61,16 +61,6 @@ export interface KanbanCardNodeData {
 const kanbanHeaderControlClass =
   "flex h-6 items-center rounded-xs font-medium text-[0.65rem] leading-none";
 
-function hasBlockingSessionWork(columns: KanbanCardData["columns"]): boolean {
-  return (
-    Boolean(columns.in_progress?.length) ||
-    (columns.approve ?? []).some(
-      (task) =>
-        task.outcome === "awaiting_review" && task.reviewApproved !== true
-    )
-  );
-}
-
 function focusBoardPrompt(
   boardId: string,
   focusBoardLocally: (boardId: string) => void
@@ -372,6 +362,7 @@ function KanbanCardNodeComponent({
   // lane list runs the same code as this card rather than a copy of it.
   const {
     actionStates,
+    boardBusy,
     handleApprove,
     handleColumnsChange,
     handlePlanChange,
@@ -510,7 +501,7 @@ function KanbanCardNodeComponent({
             <span className="h-3.5 w-px bg-white/10" />
 
             <BoardSessionHistoryControls
-              boardBusy={hasBlockingSessionWork(cardData.columns)}
+              boardBusy={boardBusy}
               boardId={cardData.boardId}
               sessionId={cardData.sessionId}
             />
@@ -605,6 +596,7 @@ function KanbanCardNodeComponent({
           <div className="min-h-0 min-w-0 flex-1 p-4">
             <KanbanCardContent
               actionStates={actionStates}
+              boardBusy={boardBusy}
               data={{
                 id: cardData.boardId,
                 title: cardData.title,
