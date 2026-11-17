@@ -10,7 +10,7 @@ import type {
   SessionForkInput,
   SessionPromptInput,
 } from "@chorus/oc-adapter";
-import { normalizeSessionHistory, OpenCodeAdapter } from "@chorus/oc-adapter";
+import { OpenCodeAdapter } from "@chorus/oc-adapter";
 import { EngineUnavailableError } from "../../opencode/process-manager";
 
 const MAX_RECONCILIATION_RETRIES = 5;
@@ -383,7 +383,7 @@ export class OpenCodeBridge {
                 directory,
                 limit: 200,
               });
-              return normalizeSessionHistory(sessionID, messages, directory);
+              return adapter.normalizeHistory(sessionID, messages);
             } catch (error) {
               this.#logger.warn("session-history-reconciliation-failed", {
                 directory,

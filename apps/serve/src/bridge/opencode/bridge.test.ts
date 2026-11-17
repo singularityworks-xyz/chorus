@@ -11,6 +11,7 @@ import type {
   Session,
   SessionMessageWithParts,
 } from "@chorus/oc-adapter";
+import { normalizeSessionHistory } from "@chorus/oc-adapter";
 import { WorkspaceStore } from "../../workspace/store";
 import { OpenCodeBridge } from "./bridge";
 
@@ -169,6 +170,7 @@ describe("OpenCodeBridge", () => {
     });
     const eventTypes: string[] = [];
     const adapter = {
+      normalizeHistory: normalizeSessionHistory,
       events: {
         subscribe: mock(
           (
@@ -332,6 +334,7 @@ describe("OpenCodeBridge", () => {
         },
       ] as unknown as SessionMessageWithParts[];
       const adapter = {
+        normalizeHistory: normalizeSessionHistory,
         events: {
           subscribe: mock(
             (
@@ -429,6 +432,7 @@ describe("OpenCodeBridge", () => {
     });
     const received: string[] = [];
     const adapter = {
+      normalizeHistory: normalizeSessionHistory,
       events: {
         subscribe: mock(
           (
@@ -521,6 +525,7 @@ describe("OpenCodeBridge", () => {
     });
     let reconciliationCount = 0;
     const adapter = {
+      normalizeHistory: normalizeSessionHistory,
       events: {
         subscribe: mock(
           (

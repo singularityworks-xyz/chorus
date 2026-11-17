@@ -3,9 +3,11 @@ import { createRequire } from "node:module";
 import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2";
 import { createClient as createAdapterClient } from "./features/client/client";
 import { ConfigManager } from "./features/config/config-manager";
+import type { SessionMessageWithParts } from "./features/events/event-stream";
 import {
   EventStream,
   normalizeEvent,
+  normalizeSessionHistory,
   resetMessageTracking,
 } from "./features/events/event-stream";
 import { InstanceManager } from "./features/instance/instance-manager";
@@ -140,6 +142,8 @@ export class OpenCodeAdapter {
   }
 
   normalize = (event: Event) => normalizeEvent(event, this.#normalizationScope);
+  normalizeHistory = (sessionID: string, messages: SessionMessageWithParts[]) =>
+    normalizeSessionHistory(sessionID, messages, this.#normalizationScope);
   /** The SDK version this adapter is compiled against. See decision #5. */
   sdkVersion = sdkVersion;
   resetMessageTracking = resetMessageTracking;

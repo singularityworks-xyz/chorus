@@ -1,13 +1,20 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PendingQuestion } from "@chorus/contracts";
-import type { Event, Session } from "@chorus/oc-adapter";
+import type {
+  Event,
+  Message,
+  Part,
+  Session,
+  SessionMessageWithParts,
+} from "@chorus/oc-adapter";
 import { z } from "zod";
 
 interface FixtureSession {
   approved: boolean;
   busy: boolean;
   canStreamReasoning: boolean;
+  currentAgent: "build" | "plan";
   currentMessageId: string;
   currentReasoningPartId: string;
   currentTextPartId: string;
@@ -115,6 +122,7 @@ export function startScriptedEngine({
     entry.currentMessageId = `message-${entry.session.id}-${entry.turnNumber}`;
     entry.currentReasoningPartId = `reasoning-${entry.session.id}-${entry.turnNumber}`;
     entry.currentTextPartId = `part-${entry.session.id}-${entry.turnNumber}`;
+    entry.currentAgent = agent;
     entry.reasoning = "";
     entry.text = "";
     entry.approved = false;
@@ -328,6 +336,7 @@ export function startScriptedEngine({
     const body = replySchema.parse(await request.json());
     entry.approved = body.reply !== "reject";
     if (entry.approved) {
+      entry.reasoning += " Permission restored and work resumed.";
       emit(directory, {
         id: eventId(),
         type: "message.part.updated",
@@ -422,24 +431,48 @@ export function startScriptedEngine({
       case "abort":
         status(entry, false);
         return Response.json(true);
-      case "message":
-        return Response.json(
-          entry.prompted
-            ? [
-                {
-                  info: {
-                    id: `user-${entry.session.id}`,
-                    sessionID: entry.session.id,
-                    role: "user",
-                    time: { created: entry.session.time.created },
-                    agent: "build",
-                    model: { providerID: "fixture", modelID: "scripted" },
-                  },
-                  parts: [],
-                },
-              ]
-            : []
-        );
+      case "message": {
+        if (!entry.prompted) {
+          return Response.json([] satisfies SessionMessageWithParts[]);
+        }
+
+        const userInfo = {
+          id: `user-${entry.session.id}-${entry.turnNumber}`,
+          sessionID: entry.session.id,
+          role: "user",
+          time: { created: entry.session.time.created },
+          agent: entry.currentAgent,
+          model: { providerID: "fixture", modelID: "scripted" },
+        } satisfies Extract<Message, { role: "user" }>;
+        const assistantInfo = {
+          id: entry.currentMessageId,
+          sessionID: entry.session.id,
+          role: "assistant",
+          time: { created: entry.session.time.created },
+          parentID: userInfo.id,
+          modelID: "scripted",
+          providerID: "fixture",
+          mode: entry.currentAgent,
+          agent: entry.currentAgent,
+          path: {
+            cwd: entry.session.directory,
+            root: entry.session.directory,
+          },
+          cost: 0,
+          tokens: {
+            input: 0,
+            output: 0,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+          },
+        } satisfies Extract<Message, { role: "assistant" }>;
+        const parts = [reasoningPart(entry), part(entry)] satisfies Part[];
+        const history = [
+          { info: userInfo, parts: [] },
+          { info: assistantInfo, parts },
+        ] satisfies SessionMessageWithParts[];
+        return Response.json(history);
+      }
       case "revert": {
         const body = revertSchema.parse(await request.json());
         entry.session.revert = { messageID: body.messageID };
@@ -616,6 +649,7 @@ export function startScriptedEngine({
             approved: false,
             canStreamReasoning: false,
             currentMessageId: `message-${id}-0`,
+            currentAgent: "build",
             currentReasoningPartId: `reasoning-${id}-0`,
             currentTextPartId: `part-${id}-0`,
             pendingQuestions: new Map(),
