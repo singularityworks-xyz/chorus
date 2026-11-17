@@ -22,11 +22,13 @@ const markers = [
   {
     board: "alpha",
     prompt: "chorus-route-smoke-alpha",
+    reasoning: "route-thinking-alpha",
     reply: "route-reply-alpha",
   },
   {
     board: "beta",
     prompt: "chorus-route-smoke-beta",
+    reasoning: "route-thinking-beta",
     reply: "route-reply-beta",
   },
 ] as const;
@@ -54,7 +56,10 @@ function userPrompt(payload: unknown): string | undefined {
   return undefined;
 }
 
-function chunk(content: string | undefined, finishReason: string | null) {
+function chunk(
+  delta: { content?: string; reasoning_content?: string },
+  finishReason: string | null
+) {
   return {
     id: "chatcmpl-chorus-route-fixture",
     object: "chat.completion.chunk",
@@ -63,19 +68,20 @@ function chunk(content: string | undefined, finishReason: string | null) {
     choices: [
       {
         index: 0,
-        delta: content === undefined ? {} : { content },
+        delta,
         finish_reason: finishReason,
       },
     ],
   };
 }
 
-function streamingResponse(reply: string): Response {
+function streamingResponse(reply: string, reasoning: string): Response {
   const frames = [
-    chunk(undefined, null),
-    chunk("route-reply-", null),
-    chunk(reply.slice("route-reply-".length), null),
-    chunk(undefined, "stop"),
+    chunk({}, null),
+    chunk({ reasoning_content: reasoning }, null),
+    chunk({ content: "route-reply-" }, null),
+    chunk({ content: reply.slice("route-reply-".length) }, null),
+    chunk({}, "stop"),
     "data: [DONE]\n\n",
   ];
   return new Response(
@@ -159,7 +165,7 @@ function startLocalProvider() {
           );
         }
         requests.push({ model: payload.model, prompt });
-        return streamingResponse(expected.reply);
+        return streamingResponse(expected.reply, expected.reasoning);
       }
 
       return Response.json(
@@ -418,16 +424,7 @@ try {
         const task = board?.columns.done.find(
           (candidate) => candidate.id === taskId
         );
-        if (!task) {
-          return undefined;
-        }
-        const streamedText = task.run?.steps
-          .filter(
-            (step) => step.kind === "thinking" || step.kind === "response"
-          )
-          .flatMap((step) => (step.content ? [step.content] : []))
-          .join("");
-        return streamedText?.includes(marker.reply) ? task : undefined;
+        return task;
       })
     )
   );
@@ -445,6 +442,24 @@ try {
     if (board?.session.sessionId !== sessionId) {
       throw new Error(
         `${marker.board} reply was attached to the wrong session.`
+      );
+    }
+    const thinking = task.run?.steps
+      .filter((step) => step.kind === "thinking")
+      .flatMap((step) => (step.content ? [step.content] : []))
+      .join("");
+    const response = task.run?.steps
+      .filter((step) => step.kind === "response")
+      .flatMap((step) => (step.content ? [step.content] : []))
+      .join("");
+    if (!thinking?.includes(marker.reasoning)) {
+      throw new Error(
+        `${marker.board} provider reasoning was not projected into the thinking stream.`
+      );
+    }
+    if (!response?.includes(marker.reply)) {
+      throw new Error(
+        `${marker.board} provider response was not projected into the response stream.`
       );
     }
   }
@@ -473,7 +488,7 @@ try {
   }
 
   process.stdout.write(
-    `PASS: Chorus /tasks ran both boards on ${providerID}/${modelID} through pinned OpenCode ${sdkVersion()}, ignored request model overrides, streamed local replies into the correct completed tasks, and made exactly two local provider requests.\n`
+    `PASS: Chorus /tasks ran both boards on ${providerID}/${modelID} through pinned OpenCode ${sdkVersion()}, ignored request model overrides, streamed provider reasoning and replies into the correct completed task streams, and made exactly two local provider requests.\n`
   );
 } catch (error) {
   hasFailure = true;
