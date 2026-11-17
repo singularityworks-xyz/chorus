@@ -48,8 +48,8 @@ export interface KanbanCardNodeData {
   gitStatus?: GitStatus | null;
   hasMobilePrompt?: boolean;
   isRemoving?: boolean;
-  onRemove?: (id: string) => void;
-  onUpdateColumns?: (id: string, columns: KanbanCardData["columns"]) => void;
+  onRemove: (id: string) => void;
+  onUpdateColumns: (id: string, columns: KanbanCardData["columns"]) => void;
   projectName?: string;
   reviewMode?: "manual" | "auto";
   sessionId?: string;
@@ -576,27 +576,21 @@ function KanbanCardNodeComponent({
               </DropdownMenuContent>
             </DropdownMenu>
 
-            {cardData.onRemove && (
-              <>
-                <span className="h-3.5 w-px bg-white/10" />
-                <button
-                  aria-label={`Remove ${cardData.title} board`}
-                  className="rounded-xs p-1 text-white/25 transition-colors hover:bg-white/8 hover:text-white/60 disabled:cursor-wait disabled:opacity-40"
-                  disabled={cardData.isRemoving}
-                  onClick={() => cardData.onRemove?.(id)}
-                  title={
-                    cardData.isRemoving ? "Removing board…" : "Remove board"
-                  }
-                  type="button"
-                >
-                  {cardData.isRemoving ? (
-                    <LoaderCircleIcon className="size-3.5 animate-spin" />
-                  ) : (
-                    <XIcon className="size-3.5" />
-                  )}
-                </button>
-              </>
-            )}
+            <span className="h-3.5 w-px bg-white/10" />
+            <button
+              aria-label={`Remove ${cardData.title} board`}
+              className="rounded-xs p-1 text-white/25 transition-colors hover:bg-white/8 hover:text-white/60 disabled:cursor-wait disabled:opacity-40"
+              disabled={cardData.isRemoving}
+              onClick={() => cardData.onRemove(id)}
+              title={cardData.isRemoving ? "Removing board…" : "Remove board"}
+              type="button"
+            >
+              {cardData.isRemoving ? (
+                <LoaderCircleIcon className="size-3.5 animate-spin" />
+              ) : (
+                <XIcon className="size-3.5" />
+              )}
+            </button>
           </div>
         </div>
 

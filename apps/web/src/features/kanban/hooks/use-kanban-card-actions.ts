@@ -222,7 +222,7 @@ export function useKanbanCardActions({
 }: {
   boardId: string;
   columns: Columns;
-  onUpdateColumns?: (boardId: string, columns: Columns) => void;
+  onUpdateColumns: (boardId: string, columns: Columns) => void;
   reviewMode: "manual" | "auto";
   sessionId?: string | undefined;
 }): KanbanCardActions {
@@ -294,7 +294,7 @@ export function useKanbanCardActions({
     (nextColumns: Columns) => {
       setLocalColumns(nextColumns);
 
-      onUpdateColumns?.(boardId, nextColumns);
+      onUpdateColumns(boardId, nextColumns);
     },
     [boardId, onUpdateColumns]
   );
