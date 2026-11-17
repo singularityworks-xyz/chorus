@@ -6,6 +6,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -52,6 +53,8 @@ interface QualificationRun {
   sessionId: string;
   taskId: string;
 }
+
+type QualificationRequest = (path: string, body?: unknown) => Promise<unknown>;
 
 interface QualificationMirror {
   boards: WorkspaceBoard[];
@@ -147,6 +150,118 @@ export async function waitForQualification(
   }
 }
 
+interface TransportFaultProxy {
+  baseUrl: string;
+  breakConnections(): void;
+  close(): Promise<void>;
+}
+
+function disconnectQualificationMirror(
+  socket: WebSocket,
+  proxy: TransportFaultProxy | undefined
+): void {
+  if (proxy) {
+    proxy.breakConnections();
+    return;
+  }
+  socket.close(1000, "qualification network flap");
+}
+
+function validateTcpFaultProxyCount(count: number): void {
+  if (!Number.isInteger(count) || count < 0 || count > 10) {
+    throw new Error("tcpFaultProxyMirrors must be an integer from 0 to 10.");
+  }
+}
+
+function qualificationWebSocketUrl(
+  base: string,
+  ticket: string,
+  proxy: TransportFaultProxy | undefined
+): string {
+  const socketBase = proxy?.baseUrl ?? base.replace("http:", "ws:");
+  return `${socketBase}/ws?ticket=${encodeURIComponent(ticket)}`;
+}
+
+async function startTransportFaultProxies(
+  count: number,
+  destinationPort: number
+): Promise<Map<number, TransportFaultProxy>> {
+  const proxies = new Map<number, TransportFaultProxy>();
+  try {
+    for (let index = 0; index < count; index += 1) {
+      proxies.set(index, await startTransportFaultProxy(destinationPort));
+    }
+    return proxies;
+  } catch (error) {
+    await Promise.allSettled(
+      [...proxies.values()].map((proxy) => proxy.close())
+    );
+    throw error;
+  }
+}
+
+async function startTransportFaultProxy(
+  destinationPort: number
+): Promise<TransportFaultProxy> {
+  const connections = new Set<{ client: Socket; upstream: Socket }>();
+  const server: Server = createServer((client) => {
+    const upstream = connect({ host: "127.0.0.1", port: destinationPort });
+    const connection = { client, upstream };
+    connections.add(connection);
+    let closed = false;
+    const closePeer = (socket: Socket) => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      connections.delete(connection);
+      (socket === client ? upstream : client).destroy();
+    };
+
+    client.on("close", () => closePeer(client));
+    client.on("error", () => closePeer(client));
+    upstream.on("close", () => closePeer(upstream));
+    upstream.on("error", () => closePeer(upstream));
+    client.pipe(upstream);
+    upstream.pipe(client);
+  });
+
+  await new Promise<void>((resolveListen, reject) => {
+    server.once("error", reject);
+    server.listen({ host: "127.0.0.1", port: 0, exclusive: true }, () => {
+      server.removeAllListeners("error");
+      resolveListen();
+    });
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    await new Promise<void>((resolveClose, reject) =>
+      server.close((error) => (error ? reject(error) : resolveClose()))
+    );
+    throw new Error("Could not start the qualification transport proxy.");
+  }
+
+  const breakConnections = () => {
+    for (const connection of connections) {
+      connections.delete(connection);
+      connection.client.destroy();
+      connection.upstream.destroy();
+    }
+  };
+
+  return {
+    baseUrl: `ws://127.0.0.1:${address.port}`,
+    breakConnections,
+    async close() {
+      breakConnections();
+      await new Promise<void>((resolveClose, reject) =>
+        server.close((error) => (error ? reject(error) : resolveClose()))
+      );
+    },
+  };
+}
+
 function wireComparable(value: unknown): unknown {
   const serialized = JSON.stringify(value);
   return serialized === undefined ? undefined : JSON.parse(serialized);
@@ -165,14 +280,46 @@ function readSnapshotHash(value: unknown): string {
   return value.hash;
 }
 
+function queueQualificationRuns(
+  interactive: boolean,
+  boardIds: string[],
+  getBoard: (boardId: string) => WorkspaceBoard | undefined,
+  request: QualificationRequest
+): Promise<QualificationRun[]> {
+  if (interactive) {
+    return Promise.resolve([]);
+  }
+  return Promise.all(
+    boardIds.map(async (boardId) => {
+      const board = getBoard(boardId);
+      const response = queueBoardPromptResponseSchema.parse(
+        await request("/tasks", {
+          boardId,
+          directory: board?.repo.worktree ?? board?.repo.directory,
+          text: "Scripted isolated change",
+          reviewMode: "auto",
+        })
+      );
+      return {
+        boardId,
+        sessionId: response.sessionId,
+        taskId: response.taskId,
+      };
+    })
+  );
+}
+
 /** Real repositories, SDK, HTTP commands, SQLite writer and authenticated WS mirrors. */
 export async function startPhase6Harness({
   interactive = false,
   questionReplyDelayMs,
+  tcpFaultProxyMirrors = 0,
 }: {
   interactive?: boolean;
   questionReplyDelayMs?: number;
+  tcpFaultProxyMirrors?: number;
 } = {}) {
+  validateTcpFaultProxyCount(tcpFaultProxyMirrors);
   const root = mkdtempSync(join(tmpdir(), "chorus-qualification-"));
   const repositories: string[] = [];
   let store: WorkspaceStore | undefined;
@@ -181,6 +328,7 @@ export async function startPhase6Harness({
   let stopHttp: (() => Promise<void>) | undefined;
   let stopEngine: (() => Promise<void>) | undefined;
   const mirrors: QualificationMirror[] = [];
+  let transportFaultProxies = new Map<number, TransportFaultProxy>();
   const latencies: number[] = [];
   let latencyCursor = 0;
   let frameCount = 0;
@@ -197,6 +345,9 @@ export async function startPhase6Harness({
     for (const mirror of mirrors) {
       mirror.socket.close();
     }
+    await Promise.all(
+      [...transportFaultProxies.values()].map((proxy) => proxy.close())
+    );
     hub?.close();
     bridge?.stop();
     await stopHttp?.();
@@ -357,6 +508,10 @@ export async function startPhase6Harness({
       throw new Error("qualification device registration failed");
     }
     const cookie = `${sessionCookie}; ${deviceCookie}`;
+    transportFaultProxies = await startTransportFaultProxies(
+      tcpFaultProxyMirrors,
+      app.server?.port ?? 0
+    );
     async function request(path: string, body?: unknown) {
       const response = await fetch(`${base}${path}`, {
         method: body === undefined ? "GET" : "POST",
@@ -459,8 +614,9 @@ export async function startPhase6Harness({
       const { ticket } = webSocketTicketResponseSchema.parse(
         await request("/auth/ws-ticket")
       );
+      const proxy = transportFaultProxies.get(index);
       const socket = new WebSocket(
-        `${base.replace("http:", "ws:")}/ws?ticket=${encodeURIComponent(ticket)}`
+        qualificationWebSocketUrl(base, ticket, proxy)
       );
       const mirror = {
         socket,
@@ -478,26 +634,12 @@ export async function startPhase6Harness({
     await waitForQualification(() =>
       mirrors.every((mirror) => mirror.initialized)
     );
-    const runs = interactive
-      ? []
-      : await Promise.all(
-          boardIds.map(async (boardId) => {
-            const board = workspace.getBoard(boardId);
-            const response = queueBoardPromptResponseSchema.parse(
-              await request("/tasks", {
-                boardId,
-                directory: board?.repo.worktree ?? board?.repo.directory,
-                text: "Scripted isolated change",
-                reviewMode: "auto",
-              })
-            );
-            return {
-              boardId,
-              sessionId: response.sessionId,
-              taskId: response.taskId,
-            };
-          })
-        );
+    const runs = await queueQualificationRuns(
+      interactive,
+      boardIds,
+      (boardId) => workspace.getBoard(boardId),
+      request
+    );
     if (!interactive) {
       await waitForQualification(
         () =>
@@ -672,7 +814,10 @@ export async function startPhase6Harness({
         }
         const socket = mirror.socket;
         if (socket.readyState === WebSocket.OPEN) {
-          socket.close(1000, "qualification network flap");
+          disconnectQualificationMirror(
+            socket,
+            transportFaultProxies.get(index)
+          );
         }
         await waitForQualification(
           () => socket.readyState === WebSocket.CLOSED,
@@ -715,8 +860,9 @@ export async function startPhase6Harness({
         const { ticket } = webSocketTicketResponseSchema.parse(
           await request("/auth/ws-ticket")
         );
+        const proxy = transportFaultProxies.get(index);
         const socket = new WebSocket(
-          `${base.replace("http:", "ws:")}/ws?ticket=${encodeURIComponent(ticket)}`
+          qualificationWebSocketUrl(base, ticket, proxy)
         );
         mirror.socket = socket;
         mirror.ready = false;

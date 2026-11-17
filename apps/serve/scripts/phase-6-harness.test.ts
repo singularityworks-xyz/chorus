@@ -26,12 +26,83 @@ test("mirrors recover a network flap with ordered replay and live delivery", asy
     if (!(recovering[0] && recovering[1])) {
       throw new Error("qualification fixture did not create recovery mirrors");
     }
-    const cursors = recovering.map((mirror) => mirror.seq);
-
     await Promise.all([
       harness.disconnectMirror(0),
       harness.disconnectMirror(1),
     ]);
+    const cursors = recovering.map((mirror) => mirror.seq);
+    harness.appendBatch(4);
+    await waitForQualification(
+      () => {
+        const head = harness.store.headSeq();
+        return (
+          head > (cursors[0] ?? 0) &&
+          harness.mirrors.slice(2).every((mirror) => mirror.seq === head)
+        );
+      },
+      10_000,
+      () => harness.diagnostics()
+    );
+
+    const replayHead = harness.store.headSeq();
+    await Promise.all([harness.reconnectMirror(0), harness.reconnectMirror(1)]);
+    await waitForQualification(
+      () => recovering.every((mirror) => mirror.seq === replayHead),
+      10_000,
+      () => harness.diagnostics()
+    );
+
+    for (const [index, mirror] of recovering.entries()) {
+      const cursor = cursors[index];
+      if (cursor === undefined) {
+        throw new Error("qualification mirror cursor was not recorded");
+      }
+      let expectedFromSeq = cursor + 1;
+      for (const range of mirror.recentEventRanges) {
+        expect(range.fromSeq).toBe(expectedFromSeq);
+        expect(range.seq).toBeGreaterThanOrEqual(range.fromSeq);
+        expectedFromSeq = range.seq + 1;
+      }
+      expect(expectedFromSeq - 1).toBe(replayHead);
+      expect(mirror.error).toBeUndefined();
+      expect(mirror.boards).toEqual(harness.store.getSnapshot().boards);
+    }
+
+    const beforeLiveDelta = harness.store.headSeq();
+    harness.appendBatch(2);
+    await waitForQualification(
+      () => {
+        const head = harness.store.headSeq();
+        return (
+          head > beforeLiveDelta &&
+          harness.mirrors.every(
+            (mirror) => !mirror.error && mirror.seq === head
+          )
+        );
+      },
+      10_000,
+      () => harness.diagnostics()
+    );
+    for (const mirror of recovering) {
+      expect(mirror.boards).toEqual(harness.store.getSnapshot().boards);
+    }
+  } finally {
+    await harness.close();
+  }
+}, 30_000);
+
+test("mirrors recover ordered replay after an abrupt TCP transport loss", async () => {
+  const harness = await startPhase6Harness({ tcpFaultProxyMirrors: 2 });
+  try {
+    const recovering = [harness.mirrors[0], harness.mirrors[1]];
+    if (!(recovering[0] && recovering[1])) {
+      throw new Error("qualification fixture did not create recovery mirrors");
+    }
+    await Promise.all([
+      harness.disconnectMirror(0),
+      harness.disconnectMirror(1),
+    ]);
+    const cursors = recovering.map((mirror) => mirror.seq);
     harness.appendBatch(4);
     await waitForQualification(
       () => {
