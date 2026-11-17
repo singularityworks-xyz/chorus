@@ -571,16 +571,16 @@ interface TaskCardProps {
   asHandle?: boolean;
   boardId: string;
   draggable?: boolean;
-  onApprove?: (
+  onApprove: (
     taskId: string,
     plan: string,
     answers: string[]
   ) => void | Promise<void>;
-  onPlanChange?: (taskId: string, plan: string) => void;
-  onQuestionsAnswered?: (taskId: string, answers: string[]) => void;
-  onReject?: (taskId: string) => void | Promise<void>;
-  onRetry?: (taskId: string) => void | Promise<void>;
-  onRun?: (taskId: string) => void | Promise<void>;
+  onPlanChange: (taskId: string, plan: string) => void;
+  onQuestionsAnswered: (taskId: string, answers: string[]) => void;
+  onReject: (taskId: string) => void | Promise<void>;
+  onRetry: (taskId: string) => void | Promise<void>;
+  onRun: (taskId: string) => void | Promise<void>;
   reviewMode?: "manual" | "auto";
   showApprovalControls?: boolean;
   showDone?: boolean;
@@ -728,12 +728,12 @@ function TaskCard({
     task.reviewApproved !== true;
 
   const handleApproveClick = () => {
-    if (isManualReview && onApprove) {
-      if (editedPlan !== task.plan && onPlanChange) {
+    if (isManualReview) {
+      if (editedPlan !== task.plan) {
         onPlanChange(task.id, editedPlan);
       }
       onApprove(task.id, editedPlan, questionAnswers);
-    } else if (onApprove) {
+    } else {
       onApprove(task.id, "", []);
     }
   };
@@ -742,9 +742,7 @@ function TaskCard({
     const newAnswers = [...questionAnswers];
     newAnswers[qIndex] = value;
     setQuestionAnswers(newAnswers);
-    if (onQuestionsAnswered) {
-      onQuestionsAnswered(task.id, newAnswers);
-    }
+    onQuestionsAnswered(task.id, newAnswers);
   };
 
   const content = (
@@ -910,7 +908,7 @@ function TaskCard({
               "active:scale-[0.97]"
             )}
             disabled={!!actionState?.pending || !task.promptInput}
-            onClick={() => onRun?.(task.id)}
+            onClick={() => onRun(task.id)}
             title={
               task.promptInput ? "Run task" : "The saved prompt is unavailable"
             }
@@ -972,7 +970,7 @@ function TaskCard({
               "active:scale-[0.97]"
             )}
             disabled={!!actionState?.pending || !!actionState?.awaitingEvent}
-            onClick={() => onReject?.(task.id)}
+            onClick={() => onReject(task.id)}
             title="Reject"
             type="button"
           >
@@ -1015,7 +1013,7 @@ function TaskCard({
               "active:scale-[0.97]"
             )}
             disabled={!!actionState?.pending || !task.promptInput}
-            onClick={() => onRetry?.(task.id)}
+            onClick={() => onRetry(task.id)}
             title={
               task.promptInput
                 ? "Retry task"
@@ -1336,16 +1334,16 @@ function TaskList({
   tasks: Task[];
   reviewMode: "manual" | "auto";
   actionStates?: Record<string, KanbanTaskActionState | undefined>;
-  onApprove?: (
+  onApprove: (
     taskId: string,
     plan: string,
     answers: string[]
   ) => void | Promise<void>;
-  onReject?: (taskId: string) => void | Promise<void>;
-  onRetry?: (taskId: string) => void | Promise<void>;
-  onRun?: (taskId: string) => void | Promise<void>;
-  onPlanChange?: (taskId: string, plan: string) => void;
-  onQuestionsAnswered?: (taskId: string, answers: string[]) => void;
+  onReject: (taskId: string) => void | Promise<void>;
+  onRetry: (taskId: string) => void | Promise<void>;
+  onRun: (taskId: string) => void | Promise<void>;
+  onPlanChange: (taskId: string, plan: string) => void;
+  onQuestionsAnswered: (taskId: string, answers: string[]) => void;
 }) {
   return tasks.map((task) => (
     <TaskCard
@@ -1395,17 +1393,17 @@ function KanbanColumnRenderer({
   reviewModePending: boolean;
   onReviewModeChange: (mode: "manual" | "auto") => void;
   actionStates?: Record<string, KanbanTaskActionState | undefined>;
-  onApprove?: (
+  onApprove: (
     taskId: string,
     plan: string,
     answers: string[]
   ) => void | Promise<void>;
-  onReject?: (taskId: string) => void | Promise<void>;
-  onRetry?: (taskId: string) => void | Promise<void>;
-  onRun?: (taskId: string) => void | Promise<void>;
-  onCreateTask?: () => void;
-  onPlanChange?: (taskId: string, plan: string) => void;
-  onQuestionsAnswered?: (taskId: string, answers: string[]) => void;
+  onReject: (taskId: string) => void | Promise<void>;
+  onRetry: (taskId: string) => void | Promise<void>;
+  onRun: (taskId: string) => void | Promise<void>;
+  onCreateTask: () => void;
+  onPlanChange: (taskId: string, plan: string) => void;
+  onQuestionsAnswered: (taskId: string, answers: string[]) => void;
 }) {
   return (
     <ResizablePanel
@@ -1467,17 +1465,17 @@ export function KanbanColumnBody({
   reviewModePending: boolean;
   onReviewModeChange: (mode: "manual" | "auto") => void;
   actionStates?: Record<string, KanbanTaskActionState | undefined>;
-  onApprove?: (
+  onApprove: (
     taskId: string,
     plan: string,
     answers: string[]
   ) => void | Promise<void>;
-  onReject?: (taskId: string) => void | Promise<void>;
-  onRetry?: (taskId: string) => void | Promise<void>;
-  onRun?: (taskId: string) => void | Promise<void>;
-  onCreateTask?: () => void;
-  onPlanChange?: (taskId: string, plan: string) => void;
-  onQuestionsAnswered?: (taskId: string, answers: string[]) => void;
+  onReject: (taskId: string) => void | Promise<void>;
+  onRetry: (taskId: string) => void | Promise<void>;
+  onRun: (taskId: string) => void | Promise<void>;
+  onCreateTask: () => void;
+  onPlanChange: (taskId: string, plan: string) => void;
+  onQuestionsAnswered: (taskId: string, answers: string[]) => void;
 }) {
   const col = COLUMNS[columnId];
   const isQueue = columnId === "queue";
@@ -1573,17 +1571,17 @@ export function KanbanCardContent({
   reviewModePending: boolean;
   onColumnsChange: (columns: Columns) => void;
   onReviewModeChange: (mode: "manual" | "auto") => void | Promise<void>;
-  onApprove?: (
+  onApprove: (
     taskId: string,
     plan: string,
     answers: string[]
   ) => void | Promise<void>;
-  onReject?: (taskId: string) => void | Promise<void>;
-  onRetry?: (taskId: string) => void | Promise<void>;
-  onRun?: (taskId: string) => void | Promise<void>;
-  onCreateTask?: () => void;
-  onPlanChange?: (taskId: string, plan: string) => void;
-  onQuestionsAnswered?: (taskId: string, answers: string[]) => void;
+  onReject: (taskId: string) => void | Promise<void>;
+  onRetry: (taskId: string) => void | Promise<void>;
+  onRun: (taskId: string) => void | Promise<void>;
+  onCreateTask: () => void;
+  onPlanChange: (taskId: string, plan: string) => void;
+  onQuestionsAnswered: (taskId: string, answers: string[]) => void;
 }) {
   const reviewMode = data.reviewMode ?? "auto";
 

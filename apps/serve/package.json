@@ -1,9 +1,10 @@
 {
   "name": "@chorus/serve",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "private": true,
   "scripts": {
     "dev": "bun run --watch src/index.ts",
+    "smoke:provider-execution": "bun scripts/chorus-provider-execution-smoke.ts",
     "check-types": "tsc --noEmit",
     "smoke:restart": "bun scripts/serve-restart-recovery-smoke.ts",
     "test": "bun test"
