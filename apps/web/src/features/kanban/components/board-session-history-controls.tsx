@@ -1,43 +1,33 @@
 "use client";
 
+import type { BoardSessionHistoryCommand } from "@chorus/contracts";
 import { LoaderCircleIcon, Redo2Icon, Undo2Icon } from "lucide-react";
 import { useCallback } from "react";
 import { useBoardSessionHistory } from "@/features/kanban/hooks/use-board-session-history";
 import { cn } from "@/lib/utils";
 
-export function BoardSessionHistoryControls({
-  boardBusy,
-  boardId,
-  sessionId,
-}: {
+interface BoardSessionHistoryActionsProps {
   boardBusy: boolean;
-  boardId: string;
-  sessionId?: string;
-}) {
-  const {
-    busy,
-    canRedo,
-    canUndo,
-    error,
-    isLoading,
-    pendingCommand,
-    refresh,
-    runCommand,
-  } = useBoardSessionHistory(boardId, sessionId, boardBusy);
+  canRedo: boolean;
+  canUndo: boolean;
+  error: string | null;
+  isLoading: boolean;
+  onRefresh: () => void | Promise<void>;
+  onRunCommand: (command: BoardSessionHistoryCommand) => void | Promise<void>;
+  pendingCommand: BoardSessionHistoryCommand | null;
+}
 
-  const handleUndo = useCallback(async () => {
-    await runCommand("undo");
-  }, [runCommand]);
-
-  const handleRedo = useCallback(async () => {
-    await runCommand("redo");
-  }, [runCommand]);
-
-  const handleRefresh = useCallback(async () => {
-    await refresh();
-  }, [refresh]);
-
-  const historyDisabled = isLoading || Boolean(pendingCommand);
+export function BoardSessionHistoryActions({
+  boardBusy,
+  canRedo,
+  canUndo,
+  error,
+  isLoading,
+  onRefresh,
+  onRunCommand,
+  pendingCommand,
+}: BoardSessionHistoryActionsProps) {
+  const historyDisabled = boardBusy || isLoading || Boolean(pendingCommand);
 
   return (
     <>
@@ -51,7 +41,7 @@ export function BoardSessionHistoryControls({
               : "cursor-not-allowed text-white/15"
           )}
           disabled={!canUndo || historyDisabled}
-          onClick={handleUndo}
+          onClick={() => onRunCommand("undo")}
           title={
             pendingCommand === "undo"
               ? "Undoing repository changes"
@@ -74,7 +64,7 @@ export function BoardSessionHistoryControls({
               : "cursor-not-allowed text-white/15"
           )}
           disabled={!canRedo || historyDisabled}
-          onClick={handleRedo}
+          onClick={() => onRunCommand("redo")}
           title={
             pendingCommand === "redo"
               ? "Redoing repository changes"
@@ -90,7 +80,7 @@ export function BoardSessionHistoryControls({
         </button>
       </div>
 
-      {(error || busy) && (
+      {(error || boardBusy) && (
         <div
           className={cn(
             "flex items-center justify-between gap-2 border-white/8 border-b px-3 py-1.5 text-[0.65rem]",
@@ -106,7 +96,7 @@ export function BoardSessionHistoryControls({
           </span>
           <button
             className="shrink-0 underline underline-offset-2"
-            onClick={handleRefresh}
+            onClick={onRefresh}
             type="button"
           >
             {error ? "Retry" : "Refresh"}
@@ -114,5 +104,43 @@ export function BoardSessionHistoryControls({
         </div>
       )}
     </>
+  );
+}
+
+export function BoardSessionHistoryControls({
+  boardBusy,
+  boardId,
+  sessionId,
+}: {
+  boardBusy: boolean;
+  boardId: string;
+  sessionId?: string;
+}) {
+  const {
+    busy,
+    canRedo,
+    canUndo,
+    error,
+    isLoading,
+    pendingCommand,
+    refresh,
+    runCommand,
+  } = useBoardSessionHistory(boardId, sessionId, boardBusy);
+
+  const handleRefresh = useCallback(async () => {
+    await refresh();
+  }, [refresh]);
+
+  return (
+    <BoardSessionHistoryActions
+      boardBusy={busy}
+      canRedo={canRedo}
+      canUndo={canUndo}
+      error={error}
+      isLoading={isLoading}
+      onRefresh={handleRefresh}
+      onRunCommand={runCommand}
+      pendingCommand={pendingCommand}
+    />
   );
 }
