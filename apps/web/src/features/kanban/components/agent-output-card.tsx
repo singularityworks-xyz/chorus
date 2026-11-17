@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { requireAcceptedCommand } from "../command-client";
+import { abortBoardTask } from "../task-abort-client";
 import { copyTextToClipboard } from "../utils/copy-text-to-clipboard";
 import { type GroupedStep, groupSteps } from "../utils/group-steps";
 import { StreamedContentPanel } from "./streamed-content-panel";
@@ -576,18 +576,6 @@ interface AgentOutputCardProps {
   taskTitle: string;
 }
 
-function stopCommandErrorMessage(error: unknown) {
-  if (error instanceof Error && error.name === "TimeoutError") {
-    return "The stop request timed out. The task may still be running; refresh the board before retrying.";
-  }
-  if (error instanceof TypeError) {
-    return "Could not reach Chorus. Check the connection and refresh the board before retrying.";
-  }
-  return error instanceof Error
-    ? error.message
-    : "Could not stop this task. Try again.";
-}
-
 export function AgentOutputCard({
   boardId,
   isActive,
@@ -605,6 +593,7 @@ export function AgentOutputCard({
   const [aborting, setAborting] = useState(false);
   const [stopAccepted, setStopAccepted] = useState(false);
   const [abortError, setAbortError] = useState<string | null>(null);
+  const abortInFlight = useRef(false);
 
   useEffect(() => {
     if (!isActive) {
@@ -613,28 +602,26 @@ export function AgentOutputCard({
   }, [isActive]);
 
   const handleAbort = useCallback(async () => {
-    if (aborting || stopAccepted) {
+    if (abortInFlight.current || stopAccepted) {
       return;
     }
+    abortInFlight.current = true;
     setAborting(true);
     setAbortError(null);
     try {
-      const response = await fetch(
-        `/api/boards/${encodeURIComponent(boardId)}/tasks/${encodeURIComponent(taskId)}/abort`,
-        { method: "POST", signal: AbortSignal.timeout(10_000) }
-      );
-      await requireAcceptedCommand(response, {
-        fallback: "Could not stop this task. Try again.",
-        rejectedMessage:
-          "The engine did not accept the stop request. The task is still running.",
-      });
+      await abortBoardTask(boardId, taskId);
       setStopAccepted(true);
     } catch (error) {
-      setAbortError(stopCommandErrorMessage(error));
+      setAbortError(
+        error instanceof Error
+          ? error.message
+          : "Could not stop this task. Refresh the board and try again."
+      );
     } finally {
+      abortInFlight.current = false;
       setAborting(false);
     }
-  }, [boardId, taskId, aborting, stopAccepted]);
+  }, [boardId, taskId, stopAccepted]);
 
   return (
     <div
