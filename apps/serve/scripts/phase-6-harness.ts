@@ -57,6 +57,8 @@ interface QualificationMirror {
   boards: WorkspaceBoard[];
   error?: string;
   initialized: boolean;
+  ready: boolean;
+  recentEventRanges: Array<{ fromSeq: number; seq: number }>;
   resyncing: boolean;
   seq: number;
   socket: WebSocket;
@@ -104,6 +106,9 @@ function receiveQualificationFrame(
         mirror.seq = frame.seq;
         mirror.initialized = true;
         mirror.resyncing = false;
+        return;
+      case "ready":
+        mirror.ready = true;
         return;
       case "event":
         applyQualificationEvent(mirror, frame, onEvent);
@@ -368,6 +373,44 @@ export async function startPhase6Harness({
       return data;
     }
 
+    function bindMirrorSocket(
+      mirror: QualificationMirror,
+      socket: WebSocket
+    ): void {
+      socket.addEventListener("open", () =>
+        socket.send(JSON.stringify({ type: "hello", since: mirror.seq }))
+      );
+      socket.addEventListener("message", (message) => {
+        if (mirror.socket !== socket) {
+          return;
+        }
+        receiveQualificationFrame(mirror, message.data, (frame) => {
+          latencies[latencyCursor++ % 20_000] = Math.max(
+            0,
+            Date.now() - frame.ts
+          );
+          frameCount += 1;
+          if (mirror.recentEventRanges.length === 64) {
+            mirror.recentEventRanges.shift();
+          }
+          mirror.recentEventRanges.push({
+            fromSeq: frame.fromSeq,
+            seq: frame.seq,
+          });
+        });
+      });
+      socket.addEventListener("close", (event) => {
+        if (mirror.socket === socket) {
+          mirror.error ??= `socket closed (${event.code}): ${event.reason}`;
+        }
+      });
+      socket.addEventListener("error", () => {
+        if (mirror.socket === socket) {
+          mirror.error ??= "socket transport error";
+        }
+      });
+    }
+
     // Task dispatch now requires the same installation-wide model selection
     // used by the UI. Seed a deterministic fixture model in this disposable
     // workspace so the lifecycle test exercises accepted runs and streaming.
@@ -424,28 +467,13 @@ export async function startPhase6Harness({
         boards: [] as WorkspaceBoard[],
         seq: 0,
         initialized: false,
+        ready: false,
+        recentEventRanges: [] as Array<{ fromSeq: number; seq: number }>,
         resyncing: false,
         error: undefined as string | undefined,
       };
       mirrors.push(mirror);
-      socket.addEventListener("open", () =>
-        socket.send(JSON.stringify({ type: "hello", since: 0 }))
-      );
-      socket.addEventListener("message", (message) =>
-        receiveQualificationFrame(mirror, message.data, (frame) => {
-          latencies[latencyCursor++ % 20_000] = Math.max(
-            0,
-            Date.now() - frame.ts
-          );
-          frameCount += 1;
-        })
-      );
-      socket.addEventListener("close", (event) => {
-        mirror.error ??= `socket closed (${event.code}): ${event.reason}`;
-      });
-      socket.addEventListener("error", () => {
-        mirror.error ??= "socket transport error";
-      });
+      bindMirrorSocket(mirror, socket);
     }
     await waitForQualification(() =>
       mirrors.every((mirror) => mirror.initialized)
@@ -637,6 +665,21 @@ export async function startPhase6Harness({
 
     return {
       close,
+      async disconnectMirror(index: number) {
+        const mirror = mirrors[index];
+        if (!mirror) {
+          throw new Error(`qualification mirror ${index} does not exist`);
+        }
+        const socket = mirror.socket;
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.close(1000, "qualification network flap");
+        }
+        await waitForQualification(
+          () => socket.readyState === WebSocket.CLOSED,
+          5000,
+          () => ({ index, readyState: socket.readyState })
+        );
+      },
       engine,
       runs,
       boardIds,
@@ -663,6 +706,34 @@ export async function startPhase6Harness({
           p95LatencyMs:
             sortedLatencies[Math.floor(sortedLatencies.length * 0.95)] ?? 0,
         };
+      },
+      async reconnectMirror(index: number) {
+        const mirror = mirrors[index];
+        if (!mirror) {
+          throw new Error(`qualification mirror ${index} does not exist`);
+        }
+        const { ticket } = webSocketTicketResponseSchema.parse(
+          await request("/auth/ws-ticket")
+        );
+        const socket = new WebSocket(
+          `${base.replace("http:", "ws:")}/ws?ticket=${encodeURIComponent(ticket)}`
+        );
+        mirror.socket = socket;
+        mirror.ready = false;
+        mirror.resyncing = false;
+        mirror.error = undefined;
+        mirror.recentEventRanges.length = 0;
+        bindMirrorSocket(mirror, socket);
+        await waitForQualification(
+          () => mirror.ready,
+          5000,
+          () => ({
+            error: mirror.error,
+            index,
+            readyState: socket.readyState,
+            seq: mirror.seq,
+          })
+        );
       },
       queueInteractiveTask,
       async finalizeReview(
