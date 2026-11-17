@@ -69,6 +69,35 @@ describe("groupSteps", () => {
     ]);
   });
 
+  test("preserves every fragment and the running state in a large thinking stream", () => {
+    const fragments = Array.from(
+      { length: 4096 },
+      (_, index) => `reasoning fragment ${index.toString().padStart(4, "0")}`
+    );
+    const steps = fragments.map((content, index) =>
+      makeStep(
+        `thought-${index}`,
+        "thinking",
+        content,
+        index === fragments.length - 1 ? "running" : "done"
+      )
+    );
+
+    const grouped = groupSteps(steps);
+    expect(grouped).toHaveLength(1);
+
+    const group = grouped[0];
+    expect(group?.kind).toBe("thinking");
+    if (group?.kind !== "thinking") {
+      return;
+    }
+
+    expect(group.id).toBe("thought-0");
+    expect(group.sourceSteps).toHaveLength(fragments.length);
+    expect(group.status).toBe("running");
+    expect(group.content).toBe(fragments.join("\n\n"));
+  });
+
   test("does not invent thinking content before an event arrives", () => {
     expect(groupSteps([])).toEqual([]);
   });

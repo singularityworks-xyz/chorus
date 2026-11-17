@@ -431,6 +431,10 @@ The qualification proxy can delay each relayed TCP chunk by a bounded interval a
 
 Commit `6aa21c8` extracts the Stop request into a focused client that URL-encodes board/task IDs, bounds the request, validates server acknowledgment, and gives server, timeout, and network failures actionable messages. The button uses a synchronous in-flight guard against duplicate requests. The focused Stop client/output suite passes (10 tests, 28 assertions); `bun run check`, all nine package type checks, and the production Webpack build pass. The full repository suite passes (1,138 passed, 17 environment-gated skips, 0 failed; 13,148 assertions). Interactive browser-control verification remains open; unit and integration results are not counted as browser acceptance.
 
+### High-volume thinking group integrity — 17 November 2026
+
+`group-steps.test.ts` now verifies that a 4,096-fragment thinking stream retains its exact order and content, stable initial group identity, complete source-step list, and final running state. The focused grouping suite passes (4 tests, 13 assertions), `bun run check` and all nine package type checks pass, and the full repository suite passes (1,139 passed, 17 environment-gated skips, 0 failed; 13,162 assertions). This strengthens stream integrity coverage; browser responsiveness while rendering and navigating a long live transcript remains an interactive acceptance gate.
+
 ## Documentation constraints and references
 
 Context7 was not exposed among the tools available during this planning session. Before implementation, use Context7 if available and verify each touched library against the installed version. No framework upgrades are required by this plan.
