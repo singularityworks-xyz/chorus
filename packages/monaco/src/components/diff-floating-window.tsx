@@ -1,7 +1,22 @@
-import { DiffEditor } from "@monaco-editor/react";
+import { DiffEditor, type DiffOnMount } from "@monaco-editor/react";
+import type { editor } from "monaco-editor";
+import { useEffect, useRef } from "react";
 import type { DiffFloatingWindowProps } from "../types";
 
-const DIFF_THEME = {
+type DiffEditorModels = NonNullable<
+  ReturnType<editor.IStandaloneDiffEditor["getModel"]>
+>;
+
+function disposeDiffModels(models: DiffEditorModels | null): void {
+  if (!models) {
+    return;
+  }
+
+  models.original.dispose();
+  models.modified.dispose();
+}
+
+const DIFF_THEME: editor.IStandaloneThemeData = {
   base: "vs-dark",
   inherit: true,
   rules: [],
@@ -28,24 +43,48 @@ export function DiffFloatingWindow({
   onClose,
   className,
 }: DiffFloatingWindowProps) {
+  const diffModelsRef = useRef<DiffEditorModels | null>(null);
+  const mountedRef = useRef(false);
+
+  useEffect(() => {
+    if (visible) {
+      return;
+    }
+
+    const models = diffModelsRef.current;
+    diffModelsRef.current = null;
+    disposeDiffModels(models);
+  }, [visible]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+
+    return () => {
+      mountedRef.current = false;
+      const models = diffModelsRef.current;
+      diffModelsRef.current = null;
+
+      // The wrapper disposes its editor during the child unmount. Dispose the
+      // retained models after that cleanup has reset the diff editor's model.
+      queueMicrotask(() => {
+        if (!mountedRef.current) {
+          disposeDiffModels(models);
+        }
+      });
+    };
+  }, []);
+
   if (!visible) {
     return null;
   }
 
-  const handleDiffMount = (
-    _editor: unknown,
-    monacoInstance: {
-      editor: {
-        defineTheme: (name: string, data: unknown) => void;
-        setTheme: (name: string) => void;
-      };
-    }
-  ) => {
+  const handleDiffMount: DiffOnMount = (diffEditor, monacoInstance) => {
     if (!diffThemeInitialized) {
       monacoInstance.editor.defineTheme("chorus-diff", DIFF_THEME);
       diffThemeInitialized = true;
     }
     monacoInstance.editor.setTheme("chorus-diff");
+    diffModelsRef.current = diffEditor.getModel();
   };
 
   return (
@@ -107,9 +146,11 @@ export function DiffFloatingWindow({
       <div style={{ flex: 1 }}>
         <DiffEditor
           height="100%"
+          keepCurrentModifiedModel
+          keepCurrentOriginalModel
           language={language}
           modified={modified}
-          onMount={handleDiffMount as never}
+          onMount={handleDiffMount}
           options={{
             minimap: { enabled: false },
             fontSize: 14,
