@@ -79,6 +79,20 @@ export class SessionWatchdog {
     });
   }
 
+  /**
+   * Records activity for a session that may have been recovered after Serve
+   * restarted. Unlike reset(), this also creates the missing timer on the
+   * first post-restart event.
+   */
+  observeActivity(sessionId: string, info: WatchdogSessionInfo): void {
+    if (this.#timers.has(sessionId)) {
+      this.reset(sessionId);
+      return;
+    }
+
+    this.start(sessionId, info);
+  }
+
   stop(sessionId: string): void {
     const removed = this.#clear(sessionId);
     if (removed) {

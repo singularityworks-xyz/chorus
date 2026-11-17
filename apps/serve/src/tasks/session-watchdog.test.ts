@@ -147,6 +147,50 @@ describe("SessionWatchdog", () => {
     rmSync(dir, { force: true, recursive: true });
   });
 
+  test("the first recovered activity re-arms a missing watchdog", async () => {
+    const bridge = makeBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-watchdog-recovered-"));
+    const store = new WorkspaceStore(dir);
+    await store.load();
+    const { boardId } = await seedBoardWithCard(store);
+
+    const watchdog = new SessionWatchdog(bridge as never, noopCallbacks, 10);
+    watchdog.observeActivity("sess-1", {
+      boardId,
+      directory: REPO.directory,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    expect(bridge.abortSession).toHaveBeenCalledWith("sess-1", REPO.directory);
+    expect(watchdog.getStatus().activeSessions).toBe(0);
+    watchdog.dispose();
+
+    await store.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
+  test("an idle session can be removed before its timeout", async () => {
+    const bridge = makeBridge();
+    const dir = mkdtempSync(join(tmpdir(), "chorus-watchdog-idle-"));
+    const store = new WorkspaceStore(dir);
+    await store.load();
+    const { boardId } = await seedBoardWithCard(store);
+
+    const watchdog = new SessionWatchdog(bridge as never, noopCallbacks, 30);
+    watchdog.start("sess-1", { boardId, directory: REPO.directory });
+    watchdog.stop("sess-1");
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(bridge.abortSession).not.toHaveBeenCalled();
+    expect(watchdog.getStatus().activeSessions).toBe(0);
+    watchdog.dispose();
+
+    await store.close();
+    rmSync(dir, { force: true, recursive: true });
+  });
+
   test("activity slides the deadline instead of cancelling it", async () => {
     const bridge = makeBridge();
     const dir = mkdtempSync(join(tmpdir(), "chorus-watchdog-reset-"));

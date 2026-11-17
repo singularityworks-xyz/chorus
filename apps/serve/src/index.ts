@@ -445,8 +445,18 @@ bridge.subscribe(async (event) => {
     return;
   }
 
-  if (event.activity === "error") {
+  if (event.activity === "error" || event.activity === "idle") {
     watchdog.stop(event.sessionID);
+  } else if (event.activity === "thinking" || event.activity === "writing") {
+    const board = workspaceStore.getBoardBySessionId(event.sessionID);
+    if (board?.session.currentTaskId) {
+      watchdog.observeActivity(event.sessionID, {
+        boardId: board.boardId,
+        directory: board.repo.worktree ?? board.repo.directory,
+      });
+    } else {
+      watchdog.reset(event.sessionID);
+    }
   } else {
     watchdog.reset(event.sessionID);
   }
