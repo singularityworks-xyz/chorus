@@ -451,6 +451,10 @@ Run and Retry now share the server's one-live-task rule in desktop and mobile bo
 
 The task-service regression changes the workspace's default model while a task is active, verifies the active attempt retains its recorded `anthropic/claude` model, completes it, then retries its saved prompt and verifies the retry uses the current global `openai/gpt-5` default despite the old saved model. The focused `BoardTaskService` suite passes (42 tests, 133 assertions). This pins active-run stability and current-default behavior for later attempts; external-provider and browser gates remain open.
 
+### Current-commit provider and engine recovery smokes — 17 November 2026
+
+On commit `9c548d5`, the provider-sharing smoke passed with two isolated pinned OpenCode 1.19.0 engines: each observed API-auth writes from the other, and both recovered the shared credentials after restart, without requesting provider generation. The board-route smoke passed through the real Chorus `/tasks` routes for two boards against a disposable OpenAI-compatible endpoint: server-selected global model overrides were honored, request model overrides were ignored, reasoning and replies reached only their matching completed task streams, and exactly two fixture requests were made. The real-engine Serve recovery smoke passed twice in one run: the first stream completed while Serve was stopped and its thinking, answer, and success outcome were recovered; a later OpenCode process crash produced a visible retryable failure, supervision restored the engine, and a linked retry completed. These local fixture smokes strengthen provider propagation, stream ownership, and restart/crash behavior; live-provider cost/authentication and interactive ChatGPT-browser acceptance remain open.
+
 ## Documentation constraints and references
 
 Context7 was not exposed among the tools available during this planning session. Before implementation, use Context7 if available and verify each touched library against the installed version. No framework upgrades are required by this plan.
