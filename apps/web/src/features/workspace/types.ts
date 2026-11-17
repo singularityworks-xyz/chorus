@@ -66,6 +66,7 @@ export interface WorkspaceContextValue {
    * "connected, and the workspace really is empty".
    */
   hydrated: boolean;
+  isLoadingRecentProjects: boolean;
   isOpeningFolder: boolean;
   isQueueingPrompt: boolean;
   /** Highest contiguously applied sequence, for diagnostics and e2e assertions. */
@@ -86,6 +87,8 @@ export interface WorkspaceContextValue {
     text: string;
   }) => Promise<PromptSubmissionResult | null>;
   recentProjects: WorkspaceProject[];
+  recentProjectsError: string | null;
+  recentProjectsLoaded: boolean;
   removeBoard: (boardId: string) => Promise<void>;
   restoredPrompt: string;
   restorePrompt: (text: string) => void;

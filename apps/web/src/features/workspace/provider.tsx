@@ -5,7 +5,6 @@ import {
   type BoardSessionHistoryCommand,
   boardSeedSchema,
   type ModelSelection,
-  projectListResponseSchema,
   queueBoardPromptResponseSchema,
   type SequencedEvent,
   type VersionedSnapshot,
@@ -17,6 +16,11 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { sendBoardSessionHistoryCommand } from "@/features/kanban/board-session-history-client";
 import { useChorusSync } from "@/features/sync/use-chorus-sync";
 import { ChorusApiError } from "@/lib/chorus-api-error";
+import { PROJECT_LIST_ERROR, requestRecentProjects } from "./projects-client";
+import {
+  INITIAL_RECENT_PROJECTS_STATE,
+  recentProjectsReducer,
+} from "./recent-projects-state";
 import {
   DRAG_TIMEOUT_MS,
   INITIAL_WORKSPACE_STATE,
@@ -96,9 +100,16 @@ export function ChorusWorkspaceProvider({
   const [workspaceActionError, setWorkspaceActionError] = useState<
     string | null
   >(null);
-  const [recentProjects, setRecentProjects] = useState<
-    WorkspaceContextValue["recentProjects"]
-  >([]);
+  const [recentProjectsState, dispatchRecentProjects] = useReducer(
+    recentProjectsReducer,
+    INITIAL_RECENT_PROJECTS_STATE
+  );
+  const {
+    error: recentProjectsError,
+    hasLoaded: recentProjectsLoaded,
+    isLoading: isLoadingRecentProjects,
+    projects: recentProjects,
+  } = recentProjectsState;
   const [restoredPrompt, setRestoredPrompt] = useState("");
   const [sessionHistoryChange, setSessionHistoryChange] = useState<{
     boardId: string;
@@ -108,6 +119,7 @@ export function ChorusWorkspaceProvider({
   const clientIdRef = useRef(crypto.randomUUID());
   const revisionRef = useRef(0);
   const sessionHistoryRevisionRef = useRef(0);
+  const projectsLoadControllerRef = useRef<AbortController | null>(null);
 
   const selectedBoard = boards.find(
     (board) => board.boardId === selectedBoardId
@@ -272,23 +284,54 @@ export function ChorusWorkspaceProvider({
   );
 
   const loadProjects = useCallback(async () => {
-    try {
-      const response = await fetch("/api/projects", { cache: "no-store" });
+    projectsLoadControllerRef.current?.abort();
+    const controller = new AbortController();
+    projectsLoadControllerRef.current = controller;
+    dispatchRecentProjects({ type: "request-started" });
 
-      if (!response.ok) {
+    try {
+      const projects = await requestRecentProjects({
+        onUnauthorized: reportUnauthorized,
+        signal: controller.signal,
+      });
+
+      if (controller.signal.aborted) {
         return;
       }
 
-      setRecentProjects(
-        projectListResponseSchema.parse(await response.json()).projects
-      );
+      if (projects === null) {
+        dispatchRecentProjects({ type: "request-unauthorized" });
+        return;
+      }
+
+      dispatchRecentProjects({ projects, type: "request-succeeded" });
     } catch (error) {
-      console.error("Failed to load projects:", error);
+      if (controller.signal.aborted) {
+        return;
+      }
+      dispatchRecentProjects({
+        message: error instanceof Error ? error.message : PROJECT_LIST_ERROR,
+        type: "request-failed",
+      });
+    } finally {
+      if (projectsLoadControllerRef.current === controller) {
+        projectsLoadControllerRef.current = null;
+      }
     }
-  }, []);
+  }, [reportUnauthorized]);
 
   useEffect(() => {
-    loadProjects();
+    loadProjects().catch((error: unknown) => {
+      dispatchRecentProjects({
+        message: error instanceof Error ? error.message : PROJECT_LIST_ERROR,
+        type: "request-failed",
+      });
+    });
+    return () => {
+      const controller = projectsLoadControllerRef.current;
+      projectsLoadControllerRef.current = null;
+      controller?.abort();
+    };
   }, [loadProjects]);
 
   // ── handlers ──────────────────────────────────────────────────────────────
@@ -749,6 +792,7 @@ export function ChorusWorkspaceProvider({
     createBoardFromProject: createBoardFromRecentProject,
     dismissComposerHint,
     focusBoardLocally,
+    isLoadingRecentProjects,
     isOpeningFolder,
     isQueueingPrompt,
     lastSeq,
@@ -759,6 +803,8 @@ export function ChorusWorkspaceProvider({
     previousWorkspaces,
     queuePrompt,
     recentProjects,
+    recentProjectsError,
+    recentProjectsLoaded,
     removeBoard,
     restoredPrompt,
     restorePrompt: setRestoredPrompt,

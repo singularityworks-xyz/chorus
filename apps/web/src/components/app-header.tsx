@@ -821,6 +821,10 @@ function MobileMenuDrawer({
   onOpenFolder,
   boardViewMode,
   isOpeningFolder,
+  isLoadingRecentProjects,
+  recentProjectsError,
+  recentProjectsLoaded,
+  loadProjects,
   previousWorkspaces,
   recentProjects,
   createBoardFromHistory,
@@ -832,6 +836,10 @@ function MobileMenuDrawer({
   onOpenFolder: () => void;
   boardViewMode: BoardViewMode;
   isOpeningFolder: boolean;
+  isLoadingRecentProjects: boolean;
+  recentProjectsError: string | null;
+  recentProjectsLoaded: boolean;
+  loadProjects: ReturnType<typeof useWorkspace>["loadProjects"];
   previousWorkspaces: ReturnType<typeof useWorkspace>["previousWorkspaces"];
   recentProjects: ReturnType<typeof useWorkspace>["recentProjects"];
   createBoardFromHistory: ReturnType<
@@ -952,33 +960,64 @@ function MobileMenuDrawer({
               </>
             )}
 
-            {recentProjects.length > 0 && (
-              <>
-                <p className="mt-3 mb-1 px-2 font-semibold text-[0.6rem] text-white/25 uppercase tracking-widest">
-                  Known Projects
-                </p>
-                {recentProjects.map((project) => (
-                  <button
-                    className="flex w-full flex-col rounded-xs px-3 py-2 transition-colors hover:bg-white/6"
-                    key={`${project.projectId ?? project.directory}`}
-                    onClick={() => {
-                      createBoardFromProject(project);
-                      onClose();
-                    }}
-                    type="button"
-                  >
-                    <span className="truncate font-medium text-sm text-white/85">
-                      {project.projectName ??
-                        project.directory.split("/").filter(Boolean).at(-1) ??
-                        project.directory}
-                    </span>
-                    <span className="truncate text-[0.67rem] text-white/35">
-                      {project.directory}
-                    </span>
-                  </button>
-                ))}
-              </>
+            <p className="mt-3 mb-1 px-2 font-semibold text-[0.6rem] text-white/25 uppercase tracking-widest">
+              Known Projects
+            </p>
+            {(isLoadingRecentProjects ||
+              !(recentProjectsLoaded || recentProjectsError)) && (
+              <p
+                className="px-3 py-2 text-[0.67rem] text-white/40"
+                role="status"
+              >
+                {recentProjects.length > 0
+                  ? "Refreshing known projects…"
+                  : "Loading known projects…"}
+              </p>
             )}
+            {recentProjectsError && (
+              <div
+                className="flex flex-col gap-2 rounded-xs border border-rose-500/15 bg-rose-500/[0.03] px-3 py-2 text-[0.67rem] text-rose-200/80"
+                role="alert"
+              >
+                <span>{recentProjectsError}</span>
+                <button
+                  className="self-start underline underline-offset-2 disabled:opacity-50"
+                  disabled={isLoadingRecentProjects}
+                  onClick={loadProjects}
+                  type="button"
+                >
+                  {isLoadingRecentProjects ? "Retrying…" : "Retry"}
+                </button>
+              </div>
+            )}
+            {recentProjects.length === 0 &&
+              recentProjectsLoaded &&
+              !isLoadingRecentProjects &&
+              !recentProjectsError && (
+                <p className="px-3 py-2 text-[0.67rem] text-white/40">
+                  No known projects yet
+                </p>
+              )}
+            {recentProjects.map((project) => (
+              <button
+                className="flex w-full flex-col rounded-xs px-3 py-2 transition-colors hover:bg-white/6"
+                key={`${project.projectId ?? project.directory}`}
+                onClick={() => {
+                  createBoardFromProject(project);
+                  onClose();
+                }}
+                type="button"
+              >
+                <span className="truncate font-medium text-sm text-white/85">
+                  {project.projectName ??
+                    project.directory.split("/").filter(Boolean).at(-1) ??
+                    project.directory}
+                </span>
+                <span className="truncate text-[0.67rem] text-white/35">
+                  {project.directory}
+                </span>
+              </button>
+            ))}
           </div>
 
           <div className="my-1 h-px bg-white/6" />
@@ -1281,11 +1320,15 @@ export function AppHeader() {
     boards,
     createBoardFromHistory,
     createBoardFromProject,
+    isLoadingRecentProjects,
     isOpeningFolder,
+    loadProjects,
     openFolder,
     preferences,
     previousWorkspaces,
     recentProjects,
+    recentProjectsError,
+    recentProjectsLoaded,
     setBoardViewMode,
   } = useWorkspace();
 
@@ -1312,7 +1355,9 @@ export function AppHeader() {
         boardViewMode={preferences.boardViewMode}
         createBoardFromHistory={createBoardFromHistory}
         createBoardFromProject={createBoardFromProject}
+        isLoadingRecentProjects={isLoadingRecentProjects}
         isOpeningFolder={isOpeningFolder}
+        loadProjects={loadProjects}
         onClose={() => setMobileMenuOpen(false)}
         onOpenFolder={() => {
           openFolder().catch((error) => {
@@ -1322,6 +1367,8 @@ export function AppHeader() {
         open={mobileMenuOpen}
         previousWorkspaces={previousWorkspaces}
         recentProjects={recentProjects}
+        recentProjectsError={recentProjectsError}
+        recentProjectsLoaded={recentProjectsLoaded}
         setBoardViewMode={setBoardViewMode}
       />
 
@@ -1441,39 +1488,71 @@ export function AppHeader() {
                       <DropdownMenuSubContent
                         className={headerSubmenuContentClass}
                       >
-                        {recentProjects.length === 0 ? (
+                        {recentProjectsError && (
                           <DropdownMenuGroup>
                             <DropdownMenuLabel
                               className={headerMenuEmptyStateLabelClass}
                             >
-                              No known projects yet
+                              {recentProjectsError}
                             </DropdownMenuLabel>
-                          </DropdownMenuGroup>
-                        ) : (
-                          recentProjects.map((project) => (
                             <DropdownMenuItem
                               className={headerMenuItemClass}
-                              key={`${project.projectId ?? project.directory}`}
-                              onClick={() => {
-                                createBoardFromProject(project);
-                              }}
+                              disabled={isLoadingRecentProjects}
+                              onClick={loadProjects}
                             >
-                              <div className="flex min-w-0 flex-col">
-                                <span className="truncate font-medium text-sm text-white/90">
-                                  {project.projectName ??
-                                    project.directory
-                                      .split("/")
-                                      .filter(Boolean)
-                                      .at(-1) ??
-                                    project.directory}
-                                </span>
-                                <span className="truncate text-white/40 text-xs">
-                                  {project.directory}
-                                </span>
-                              </div>
+                              {isLoadingRecentProjects
+                                ? "Retrying…"
+                                : "Retry loading projects"}
                             </DropdownMenuItem>
-                          ))
+                          </DropdownMenuGroup>
                         )}
+                        {isLoadingRecentProjects &&
+                          recentProjects.length > 0 && (
+                            <DropdownMenuGroup>
+                              <DropdownMenuLabel
+                                className={headerMenuEmptyStateLabelClass}
+                                role="status"
+                              >
+                                Refreshing known projects…
+                              </DropdownMenuLabel>
+                            </DropdownMenuGroup>
+                          )}
+                        {recentProjects.length === 0 &&
+                          !recentProjectsError && (
+                            <DropdownMenuGroup>
+                              <DropdownMenuLabel
+                                className={headerMenuEmptyStateLabelClass}
+                              >
+                                {isLoadingRecentProjects ||
+                                !recentProjectsLoaded
+                                  ? "Loading known projects…"
+                                  : "No known projects yet"}
+                              </DropdownMenuLabel>
+                            </DropdownMenuGroup>
+                          )}
+                        {recentProjects.map((project) => (
+                          <DropdownMenuItem
+                            className={headerMenuItemClass}
+                            key={`${project.projectId ?? project.directory}`}
+                            onClick={() => {
+                              createBoardFromProject(project);
+                            }}
+                          >
+                            <div className="flex min-w-0 flex-col">
+                              <span className="truncate font-medium text-sm text-white/90">
+                                {project.projectName ??
+                                  project.directory
+                                    .split("/")
+                                    .filter(Boolean)
+                                    .at(-1) ??
+                                  project.directory}
+                              </span>
+                              <span className="truncate text-white/40 text-xs">
+                                {project.directory}
+                              </span>
+                            </div>
+                          </DropdownMenuItem>
+                        ))}
                       </DropdownMenuSubContent>
                     </DropdownMenuSub>
                   </DropdownMenuContent>
