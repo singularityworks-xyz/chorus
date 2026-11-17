@@ -45,6 +45,11 @@ const packageManifestSchema = z.object({
 
 const require = createRequire(import.meta.url);
 
+type EngineSpawner = (
+  port: number,
+  hostname: string
+) => ReturnType<typeof Bun.spawn>;
+
 /** Resolve the binary shipped by the pinned local dependency, never PATH. */
 export function resolveOpenCodeBinary(): string {
   const manifestPath = require.resolve("opencode-ai/package.json");
@@ -120,6 +125,7 @@ export class OpenCodeProcessManager {
   #ready = false;
   readonly #expectedVersion: string | undefined;
   readonly #adoptExisting: boolean;
+  readonly #spawnEngine: EngineSpawner | undefined;
   /** True when we spawned it and are therefore responsible for stopping it. */
   #owned = false;
   #stopping = false;
@@ -149,6 +155,8 @@ export class OpenCodeProcessManager {
     maxRestarts?: number;
     expectedVersion?: string;
     adoptExisting?: boolean;
+    /** Replace only the child launcher in isolated process-supervisor tests. */
+    spawnEngine?: EngineSpawner;
   }) {
     this.#port = options.port ?? OPENCODE_PORT;
     this.#hostname = options.hostname ?? OPENCODE_HOSTNAME;
@@ -164,6 +172,7 @@ export class OpenCodeProcessManager {
     this.#adoptExisting = options.adoptExisting ?? true;
     this.#readinessTimeoutMs = options.readinessTimeoutMs ?? 30_000;
     this.#maxRestarts = options.maxRestarts ?? MAX_RESTARTS;
+    this.#spawnEngine = options.spawnEngine;
   }
 
   get port(): number {
@@ -476,30 +485,32 @@ export class OpenCodeProcessManager {
   }
 
   #spawn(): void {
-    const proc = Bun.spawn(
-      [
-        resolveOpenCodeBinary(),
-        "serve",
-        "--port",
-        String(this.#port),
-        "--hostname",
-        this.#hostname,
-      ],
-      {
-        cwd: this.#directory,
-        env: this.#databasePath
-          ? createOpenCodeEnvironment(this.#databasePath)
-          : { ...process.env },
-        // A terminal Ctrl+C is delivered to the whole foreground process group.
-        // Keep the child in its own group so Serve can stop it deliberately
-        // after flushing state instead of treating the shared signal as a crash
-        // and starting a replacement during shutdown.
-        detached: true,
-        stderr: "pipe",
-        stdout: "pipe",
-        windowsHide: true,
-      }
-    );
+    const proc =
+      this.#spawnEngine?.(this.#port, this.#hostname) ??
+      Bun.spawn(
+        [
+          resolveOpenCodeBinary(),
+          "serve",
+          "--port",
+          String(this.#port),
+          "--hostname",
+          this.#hostname,
+        ],
+        {
+          cwd: this.#directory,
+          env: this.#databasePath
+            ? createOpenCodeEnvironment(this.#databasePath)
+            : { ...process.env },
+          // A terminal Ctrl+C is delivered to the whole foreground process group.
+          // Keep the child in its own group so Serve can stop it deliberately
+          // after flushing state instead of treating the shared signal as a crash
+          // and starting a replacement during shutdown.
+          detached: true,
+          stderr: "pipe",
+          stdout: "pipe",
+          windowsHide: true,
+        }
+      );
 
     this.#proc = proc;
     this.#generation += 1;
