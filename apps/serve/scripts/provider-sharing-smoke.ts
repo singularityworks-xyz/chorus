@@ -198,8 +198,35 @@ try {
     );
   }
 
+  // Board engines are disposable and can be restarted independently from the
+  // shared OpenCode database. Verify persisted auth remains visible after both
+  // processes have exited, rather than relying on either process's memory.
+  await Promise.all([firstManager.stop(), secondManager.stop()]);
+  await Promise.all([firstManager.start(), secondManager.start()]);
+
+  const [afterRestartFirst, afterRestartSecond] = await Promise.all([
+    first.providers.listProviders(),
+    second.providers.listProviders(),
+  ]);
+  for (const [engine, providerList] of [
+    ["first", afterRestartFirst],
+    ["second", afterRestartSecond],
+  ] as const) {
+    for (const providerID of ["anthropic", "openai"] as const) {
+      if (
+        !providerList.providers.find(
+          (provider) => provider.id === providerID && provider.connected
+        )
+      ) {
+        throw new Error(
+          `The ${engine} engine did not recover shared ${providerID} credentials after restart.`
+        );
+      }
+    }
+  }
+
   process.stdout.write(
-    `PASS: OpenCode ${expectedVersion} processes sharing OPENCODE_DB observed provider auth writes in both directions; no provider generation was requested.\n`
+    `PASS: OpenCode ${expectedVersion} processes sharing OPENCODE_DB observed provider auth writes in both directions and recovered them after restart; no provider generation was requested.\n`
   );
 } catch (error) {
   hasFailure = true;
