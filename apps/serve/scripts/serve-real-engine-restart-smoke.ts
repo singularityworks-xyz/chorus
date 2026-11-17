@@ -1,15 +1,27 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import {
+  boardTaskCommandResponseSchema,
   queueBoardPromptResponseSchema,
   workspaceSnapshotSchema,
 } from "@chorus/contracts";
 import { OpenCodeAdapter } from "@chorus/oc-adapter";
 import { sdkVersion } from "../../../packages/opencode-adapter/src";
-import { OpenCodeProcessManager } from "../src/opencode/process-manager";
+import {
+  createOpenCodeEnvironment,
+  OpenCodeProcessManager,
+  resolveOpenCodeBinary,
+} from "../src/opencode/process-manager";
+import { DEFAULT_SESSION_TIMEOUT_MS } from "../src/tasks/session-watchdog";
 
 const ROOT_PREFIX = "chorus-real-engine-recovery-";
 const TOKEN = "serve-real-engine-recovery-fixture-token";
@@ -69,10 +81,11 @@ function userPrompt(payload: unknown): string | undefined {
 
 function chunk(
   delta: Record<string, unknown>,
-  finishReason: string | null
+  finishReason: string | null,
+  responseId: string
 ): Record<string, unknown> {
   return {
-    id: "chatcmpl-chorus-restart-fixture",
+    id: responseId,
     object: "chat.completion.chunk",
     created: 1_700_000_000,
     model: MODEL_ID,
@@ -86,7 +99,7 @@ function dataFrame(value: Record<string, unknown> | string): Uint8Array {
 }
 
 function startStagedProvider() {
-  const releaseResponse = deferred();
+  let releaseResponse = deferred();
   const requests: ProviderRequest[] = [];
   let responseError: string | undefined;
   let responseFinished = false;
@@ -94,6 +107,7 @@ function startStagedProvider() {
 
   const server = Bun.serve({
     hostname: "127.0.0.1",
+    idleTimeout: 120,
     port: 0,
     async fetch(request) {
       const url = new URL(request.url);
@@ -143,25 +157,41 @@ function startStagedProvider() {
         );
       }
       requests.push({ model: payload.model, prompt });
+      const responseId = `chatcmpl-chorus-restart-fixture-${String(requests.length)}`;
+      const responseGate = releaseResponse;
+      let responseCancelled = false;
 
       return new Response(
         new ReadableStream<Uint8Array>({
           start(controller) {
-            controller.enqueue(dataFrame(chunk({ role: "assistant" }, null)));
             controller.enqueue(
-              dataFrame(chunk({ reasoning_content: THINKING_BEFORE }, null))
+              dataFrame(chunk({ role: "assistant" }, null, responseId))
             );
-            return releaseResponse.promise.then(() => {
+            controller.enqueue(
+              dataFrame(
+                chunk({ reasoning_content: THINKING_BEFORE }, null, responseId)
+              )
+            );
+            return responseGate.promise.then(() => {
+              if (responseCancelled) {
+                return;
+              }
               try {
                 controller.enqueue(
                   dataFrame(
-                    chunk({ reasoning_content: ` ${THINKING_AFTER}` }, null)
+                    chunk(
+                      { reasoning_content: ` ${THINKING_AFTER}` },
+                      null,
+                      responseId
+                    )
                   )
                 );
                 controller.enqueue(
-                  dataFrame(chunk({ content: RESPONSE_MARKER }, null))
+                  dataFrame(
+                    chunk({ content: RESPONSE_MARKER }, null, responseId)
+                  )
                 );
-                controller.enqueue(dataFrame(chunk({}, "stop")));
+                controller.enqueue(dataFrame(chunk({}, "stop", responseId)));
                 controller.enqueue(dataFrame("[DONE]"));
                 controller.close();
                 responseFinished = true;
@@ -175,8 +205,10 @@ function startStagedProvider() {
             });
           },
           cancel() {
+            responseCancelled = true;
             cancelled = true;
             responseFinished = true;
+            responseGate.resolve();
           },
         }),
         {
@@ -192,6 +224,12 @@ function startStagedProvider() {
 
   return {
     cancelled: () => cancelled,
+    stageNext: () => {
+      releaseResponse = deferred();
+      responseFinished = false;
+      cancelled = false;
+      responseError = undefined;
+    },
     port: server.port,
     release: () => releaseResponse.resolve(),
     responseFinished: () => responseFinished,
@@ -449,6 +487,12 @@ function taskFor(
   return { board, task };
 }
 
+function providerRequestCount(
+  stagedProvider: ReturnType<typeof startStagedProvider> | undefined
+): number {
+  return stagedProvider?.requests.length ?? 0;
+}
+
 const root = mkdtempSync(join(tmpdir(), ROOT_PREFIX));
 const repository = join(root, "repository");
 const dataDirectory = join(root, "chorus-data");
@@ -463,6 +507,9 @@ const originalEnvironment = { ...process.env };
 const processes: ProcessCapture[] = [];
 let provider: ReturnType<typeof startStagedProvider> | undefined;
 let engine: OpenCodeProcessManager | undefined;
+let engineEventProbe: { stop: () => void } | undefined;
+const observedEngineEvents: string[] = [];
+const observedEngineStatuses: string[] = [];
 let failure: unknown;
 let hasFailure = false;
 
@@ -543,10 +590,11 @@ try {
 
   const enginePort = await allocateLoopbackPort();
   const engineUrl = `http://127.0.0.1:${String(enginePort)}`;
+  const databasePath = join(xdg.data, "opencode", "opencode.db");
   engine = new OpenCodeProcessManager({
     adoptExisting: false,
     baseUrl: engineUrl,
-    databasePath: join(xdg.data, "opencode", "opencode.db"),
+    databasePath,
     directory: repository,
     expectedVersion: sdkVersion(),
     hostname: "127.0.0.1",
@@ -746,6 +794,251 @@ try {
   process.stdout.write(
     `PASS: a real OpenCode ${sdkVersion()} process completed a provider stream while Chorus was stopped; the restarted Serve recovered pre-restart and post-restart reasoning, the answer, and the successful task outcome from history.\n`
   );
+
+  const restartedAdapter = OpenCodeAdapter.from({
+    baseUrl: engineUrl,
+    directory: realpathSync(repository),
+  });
+  engineEventProbe = await restartedAdapter.events.subscribe(
+    (event) => {
+      observedEngineEvents.push(`${event.type}:${event.id}`);
+      if (observedEngineEvents.length > 100) {
+        observedEngineEvents.splice(0, observedEngineEvents.length - 100);
+      }
+    },
+    {
+      directory: realpathSync(repository),
+      onStatus: (status) => observedEngineStatuses.push(status),
+    }
+  );
+
+  await engine.stop();
+  let supervisedEnginePid: number | undefined;
+  engine = new OpenCodeProcessManager({
+    adoptExisting: false,
+    baseUrl: engineUrl,
+    databasePath,
+    directory: repository,
+    expectedVersion: sdkVersion(),
+    hostname: "127.0.0.1",
+    maxRestarts: 2,
+    port: enginePort,
+    readinessTimeoutMs: 45_000,
+    spawnEngine: (port, hostname) => {
+      const child = Bun.spawn(
+        [
+          resolveOpenCodeBinary(),
+          "serve",
+          "--port",
+          String(port),
+          "--hostname",
+          hostname,
+        ],
+        {
+          cwd: repository,
+          detached: true,
+          env: createOpenCodeEnvironment(databasePath),
+          stderr: "pipe",
+          stdout: "pipe",
+          windowsHide: true,
+        }
+      );
+      supervisedEnginePid = child.pid;
+      return child;
+    },
+  });
+  await engine.start();
+  await waitFor(
+    "Serve event stream reconnection after engine replacement",
+    async () => {
+      const status = await request(baseUrl, cookie, "/bridge/status");
+      return (
+        typeof status === "object" &&
+        status !== null &&
+        "connected" in status &&
+        status.connected === true
+      );
+    },
+    async () => ({
+      bridge: await request(baseUrl, cookie, "/bridge/status"),
+      engineReady: engine?.ready,
+      serveLogs: second.logs.slice(-30),
+    })
+  );
+  provider?.stageNext();
+  const interrupted = queueBoardPromptResponseSchema.parse(
+    await request(baseUrl, cookie, "/tasks", {
+      boardId: board.boardId,
+      directory: repository,
+      reviewMode: "auto",
+      text: `Verify recovery after an OpenCode process crash. Marker: ${PROMPT_MARKER}`,
+    })
+  );
+  await waitFor(
+    "second provider request to start before the process crash",
+    async () => providerRequestCount(provider) === 2,
+    async () => ({
+      observedEngineEvents,
+      observedEngineStatuses,
+      engineStatuses: await restartedAdapter.sessions.status(
+        realpathSync(repository)
+      ),
+      providerRequests: provider?.requests,
+      sessionHistory: await restartedAdapter.sessions.messages(
+        interrupted.sessionId,
+        {
+          directory: realpathSync(repository),
+          limit: 200,
+        }
+      ),
+      serveLogs: second.logs.slice(-20),
+      task: taskFor(
+        workspaceSnapshotSchema.parse(
+          await request(baseUrl, cookie, "/workspace")
+        ),
+        board.boardId,
+        interrupted.taskId
+      ),
+    })
+  );
+  if (supervisedEnginePid === undefined) {
+    throw new Error("The supervised real OpenCode process has no PID.");
+  }
+  const crashedPid = supervisedEnginePid;
+  process.kill(crashedPid, "SIGKILL");
+  await waitFor(
+    "supervised real OpenCode process replacement",
+    async () =>
+      engine?.ready === true &&
+      supervisedEnginePid !== undefined &&
+      supervisedEnginePid !== crashedPid,
+    async () => ({
+      engineReady: engine?.ready,
+      engineVersion: engine?.observedVersion,
+      crashedPid,
+      replacementPid: supervisedEnginePid,
+    })
+  );
+  await waitFor(
+    "provider cancellation after the OpenCode crash",
+    async () => provider?.cancelled() === true,
+    async () => ({
+      providerError: provider?.responseError(),
+      providerFinished: provider?.responseFinished(),
+      providerRequests: provider?.requests,
+    })
+  );
+  await waitFor(
+    "interrupted task to reach an explicit failed or timed-out outcome",
+    async () => {
+      const snapshot = workspaceSnapshotSchema.parse(
+        await request(baseUrl, cookie, "/workspace")
+      );
+      const { task } = taskFor(snapshot, board.boardId, interrupted.taskId);
+      return task?.outcome === "failed" || task?.outcome === "timed_out";
+    },
+    async () => ({
+      bridge: await request(baseUrl, cookie, "/bridge/status"),
+      providerCancelled: provider?.cancelled(),
+      serveLogs: second.logs.slice(-30),
+      task: taskFor(
+        workspaceSnapshotSchema.parse(
+          await request(baseUrl, cookie, "/workspace")
+        ),
+        board.boardId,
+        interrupted.taskId
+      ),
+    }),
+    DEFAULT_SESSION_TIMEOUT_MS + 30_000
+  );
+  const failedSnapshot = workspaceSnapshotSchema.parse(
+    await request(baseUrl, cookie, "/workspace")
+  );
+  const { task: failedTask } = taskFor(
+    failedSnapshot,
+    board.boardId,
+    interrupted.taskId
+  );
+  if (
+    !failedTask?.errorMessage?.trim() ||
+    (failedTask.outcome !== "failed" && failedTask.outcome !== "timed_out")
+  ) {
+    throw new Error(
+      "The interrupted OpenCode task did not retain a visible failure message."
+    );
+  }
+
+  provider?.stageNext();
+  const retry = boardTaskCommandResponseSchema.parse(
+    await request(
+      baseUrl,
+      cookie,
+      `/boards/${encodeURIComponent(board.boardId)}/tasks/${encodeURIComponent(interrupted.taskId)}/retry`,
+      {}
+    )
+  );
+  if (retry.retryOf !== interrupted.taskId) {
+    throw new Error("Retry did not link back to the interrupted task.");
+  }
+  await waitFor(
+    "retry provider request after the engine crash",
+    async () => provider?.requests.length === 3,
+    async () => ({
+      providerRequests: provider?.requests,
+      task: taskFor(
+        workspaceSnapshotSchema.parse(
+          await request(baseUrl, cookie, "/workspace")
+        ),
+        board.boardId,
+        retry.taskId
+      ),
+    })
+  );
+  provider?.release();
+  await waitFor(
+    "retried task to complete successfully",
+    async () => {
+      const snapshot = workspaceSnapshotSchema.parse(
+        await request(baseUrl, cookie, "/workspace")
+      );
+      const { board: restoredBoard, task } = taskFor(
+        snapshot,
+        board.boardId,
+        retry.taskId
+      );
+      return Boolean(
+        restoredBoard?.columns.done.some(
+          (candidate) => candidate.id === retry.taskId
+        ) &&
+          task?.outcome === "succeeded" &&
+          task.retryOf === interrupted.taskId
+      );
+    },
+    async () => ({
+      bridge: await request(baseUrl, cookie, "/bridge/status"),
+      providerError: provider?.responseError(),
+      task: taskFor(
+        workspaceSnapshotSchema.parse(
+          await request(baseUrl, cookie, "/workspace")
+        ),
+        board.boardId,
+        retry.taskId
+      ),
+    })
+  );
+  await engine.assertReady(sdkVersion());
+  if (
+    providerRequestCount(provider) !== 3 ||
+    provider.requests.some((entry) => entry.model !== MODEL_ID) ||
+    !provider.requests[2]?.prompt.includes(PROMPT_MARKER)
+  ) {
+    throw new Error(
+      "The crash recovery retry did not use the configured shared model and prompt."
+    );
+  }
+  process.stdout.write(
+    `PASS: a real OpenCode ${sdkVersion()} process crash produced a visible retryable task failure, the supervisor restored the engine, and a linked retry completed successfully.\n`
+  );
 } catch (error) {
   hasFailure = true;
   failure = error;
@@ -755,6 +1048,7 @@ provider?.release();
 const stopResults = await Promise.allSettled([
   ...processes.map((processCapture) => stopServe(processCapture)),
   ...(engine ? [engine.stop()] : []),
+  ...(engineEventProbe ? [Promise.resolve(engineEventProbe.stop())] : []),
   ...(provider ? [provider.stop()] : []),
 ]);
 process.env = originalEnvironment;
