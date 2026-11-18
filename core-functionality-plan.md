@@ -604,3 +604,7 @@ On mobile, Settings showed one provider/model for every board. Switching Run 7 �
 ### Mobile permission approval — 18 November 2026
 
 The interactive browser fixture now accepts `CHORUS_BROWSER_FIXTURE_PENDING_PERMISSION=1` to leave its seeded permission request pending instead of approving it before the UI loads. This makes the actual permission control available for manual acceptance. On the standalone production build at 390 × 844, ChatGPT's in-app browser showed the pending request on Run 7. After scrolling the Approve button into view, its center hit the button; clicking it cleared the request and moved the task into In Progress with thinking and response output. The browser console remained empty. `bun run check` and all nine package type checks pass; the focused phase-6 harness passes (9 tests, 85 assertions); the full suite passes (1,189 passed, 17 environment-gated skips, 0 failures; 13,283 assertions). The fixture change is test-only and makes no live-provider request.
+
+### Board view-mode controls — 18 November 2026
+
+From the mobile Open menu, selecting Stacked closed the menu and persisted the view preference. On desktop, the eight board cards appeared as an overlapping stack. View → Relaxed laid out all eight cards in a three-column grid with zero pairwise overlaps. Reload retained the grid; Fit view brought all eight cards back into view, still without overlaps. No browser console entries appeared. This closes the stacked/relaxed layout controls in the board action matrix.
