@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ComposerHint } from "./composer-hint";
 
 describe("ComposerHint", () => {
-  test("lets board controls receive clicks through the hint", () => {
+  test("lets pointer events pass through the hint while keeping dismiss active", () => {
     const markup = renderToStaticMarkup(
       <ComposerHint
         onDismiss={() => undefined}

@@ -106,7 +106,7 @@ export function CommandPalette({
 
   return (
     <div
-      className="fixed z-50 max-h-64 w-full overflow-hidden rounded-xl border border-white/10 bg-[#1a1a1a] shadow-2xl backdrop-blur-xl"
+      className="pointer-events-auto fixed z-50 max-h-64 w-full overflow-hidden rounded-xl border border-white/10 bg-[#1a1a1a] shadow-2xl backdrop-blur-xl"
       style={{
         top,
         left,
