@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -395,11 +396,100 @@ function traceFixtureAuth(
   }
 }
 
+function createQualificationRoot(rootDirectory?: string) {
+  if (rootDirectory === undefined) {
+    return {
+      ownsRoot: true,
+      root: mkdtempSync(join(tmpdir(), "chorus-qualification-")),
+    };
+  }
+
+  const root = resolve(rootDirectory);
+  const insideTemp = relative(resolve(tmpdir()), root);
+  if (
+    insideTemp.startsWith("..") ||
+    !insideTemp.startsWith("chorus-qualification-")
+  ) {
+    throw new Error(
+      "persistent qualification data must use a chorus-qualification-* directory inside the system temp directory"
+    );
+  }
+  mkdirSync(root, { recursive: true });
+  return { ownsRoot: false, root };
+}
+
+function removeOwnedQualificationRoot(root: string, ownsRoot: boolean) {
+  if (!ownsRoot) {
+    return;
+  }
+  const insideTemp = relative(resolve(tmpdir()), resolve(root));
+  if (
+    insideTemp.startsWith("..") ||
+    !insideTemp.startsWith("chorus-qualification-")
+  ) {
+    throw new Error("refusing to remove an unexpected qualification directory");
+  }
+  rmSync(root, { recursive: true, force: true });
+}
+
+async function loadOrSeedQualificationBoards(
+  request: QualificationRequest,
+  workspace: WorkspaceStore,
+  repositories: readonly string[]
+): Promise<string[]> {
+  const existingBoardIds = workspace
+    .getSnapshot()
+    .boards.map((board) => board.boardId);
+  if (existingBoardIds.length > 0) {
+    return existingBoardIds;
+  }
+
+  // Task dispatch now requires the same installation-wide model selection
+  // used by the UI. Seed a deterministic fixture model in this disposable
+  // workspace so the lifecycle test exercises accepted runs and streaming.
+  await request("/workspace/mutations", {
+    baseRevision: null,
+    clientId: "qualification",
+    mutationId: "select-scripted-model",
+    type: "preference.default_model.set",
+    payload: { model: { modelID: "scripted", providerID: "fixture" } },
+  });
+
+  const boardIds: string[] = [];
+  for (let index = 0; index < 8; index += 1) {
+    const directory = repositories[index % 3];
+    if (!directory) {
+      throw new Error("qualification repository is missing");
+    }
+    const state = workspaceSnapshotSchema.parse(
+      await request("/workspace/mutations", {
+        type: "board.create",
+        clientId: "qualification",
+        mutationId: `create-${index}`,
+        baseRevision: null,
+        payload: {
+          seed: {
+            title: `Run ${index}`,
+            repo: { directory, worktree: directory, sandboxes: [] },
+          },
+        },
+      })
+    );
+    const board = state.boards.at(-1);
+    if (!board) {
+      throw new Error("qualification board creation failed");
+    }
+    boardIds.push(board.boardId);
+  }
+  return boardIds;
+}
+
 /** Real repositories, SDK, HTTP commands, SQLite writer and authenticated WS mirrors. */
 export async function startPhase6Harness({
   interactive = false,
   localEntryWebPort,
   questionReplyDelayMs,
+  rootDirectory,
   servePort = 0,
   tcpFaultProxyMirrors = 0,
   tcpFaultProxyLatencyMs = 0,
@@ -407,13 +497,15 @@ export async function startPhase6Harness({
   interactive?: boolean;
   localEntryWebPort?: number;
   questionReplyDelayMs?: number;
+  /** Keep fixture data at this disposable path so a second process can reopen it. */
+  rootDirectory?: string;
   servePort?: number;
   tcpFaultProxyMirrors?: number;
   tcpFaultProxyLatencyMs?: number;
 } = {}) {
   validateTcpFaultProxyCount(tcpFaultProxyMirrors);
   validateTcpFaultProxyLatency(tcpFaultProxyLatencyMs);
-  const root = mkdtempSync(join(tmpdir(), "chorus-qualification-"));
+  const { root, ownsRoot } = createQualificationRoot(rootDirectory);
   const repositories: string[] = [];
   let store: WorkspaceStore | undefined;
   let hub: WorkspaceHub | undefined;
@@ -449,16 +541,7 @@ export async function startPhase6Harness({
     await stopHttp?.();
     await store?.close();
     await stopEngine?.();
-    const insideTemp = relative(resolve(tmpdir()), resolve(root));
-    if (
-      insideTemp.startsWith("..") ||
-      !insideTemp.startsWith("chorus-qualification-")
-    ) {
-      throw new Error(
-        "refusing to remove an unexpected qualification directory"
-      );
-    }
-    rmSync(root, { recursive: true, force: true });
+    removeOwnedQualificationRoot(root, ownsRoot);
   }
 
   try {
@@ -467,13 +550,15 @@ export async function startPhase6Harness({
 
     for (let index = 0; index < 3; index += 1) {
       const directory = join(root, `repo-${index}`);
-      mkdirSync(directory);
-      git(directory, ["init", "--quiet"]);
-      git(directory, ["config", "user.email", "fixture@example.com"]);
-      git(directory, ["config", "user.name", "Chorus fixture"]);
-      writeFileSync(join(directory, "README.md"), "# Scripted fixture\n");
-      git(directory, ["add", "README.md"]);
-      git(directory, ["commit", "--quiet", "-m", "fixture"]);
+      if (!existsSync(directory)) {
+        mkdirSync(directory);
+        git(directory, ["init", "--quiet"]);
+        git(directory, ["config", "user.email", "fixture@example.com"]);
+        git(directory, ["config", "user.name", "Chorus fixture"]);
+        writeFileSync(join(directory, "README.md"), "# Scripted fixture\n");
+        git(directory, ["add", "README.md"]);
+        git(directory, ["commit", "--quiet", "-m", "fixture"]);
+      }
       repositories.push(directory);
     }
     const registry = await RepositoryRegistry.fromEnvironment(
@@ -683,40 +768,11 @@ export async function startPhase6Harness({
       });
     }
 
-    // Task dispatch now requires the same installation-wide model selection
-    // used by the UI. Seed a deterministic fixture model in this disposable
-    // workspace so the lifecycle test exercises accepted runs and streaming.
-    await request("/workspace/mutations", {
-      baseRevision: null,
-      clientId: "qualification",
-      mutationId: "select-scripted-model",
-      type: "preference.default_model.set",
-      payload: { model: { modelID: "scripted", providerID: "fixture" } },
-    });
-
-    const boardIds: string[] = [];
-    for (let index = 0; index < 8; index += 1) {
-      const directory = repositories[index % 3];
-      const state = workspaceSnapshotSchema.parse(
-        await request("/workspace/mutations", {
-          type: "board.create",
-          clientId: "qualification",
-          mutationId: `create-${index}`,
-          baseRevision: null,
-          payload: {
-            seed: {
-              title: `Run ${index}`,
-              repo: { directory, worktree: directory, sandboxes: [] },
-            },
-          },
-        })
-      );
-      const board = state.boards.at(-1);
-      if (!board) {
-        throw new Error("qualification board creation failed");
-      }
-      boardIds.push(board.boardId);
-    }
+    const boardIds = await loadOrSeedQualificationBoards(
+      request,
+      workspace,
+      repositories
+    );
     const snapshotHashes = new Map<string, string>();
     for (const boardId of boardIds) {
       const board = workspace.getBoard(boardId);

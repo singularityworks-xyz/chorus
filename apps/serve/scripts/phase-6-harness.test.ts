@@ -1,8 +1,40 @@
 import { expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenCodeAdapter } from "@chorus/oc-adapter";
 import { startPhase6Harness, waitForQualification } from "./phase-6-harness";
+
+test("browser fixture reopens the same persisted workspace after a Serve restart", async () => {
+  const root = mkdtempSync(join(tmpdir(), "chorus-qualification-restart-"));
+  let first: Awaited<ReturnType<typeof startPhase6Harness>> | undefined;
+  let restarted: Awaited<ReturnType<typeof startPhase6Harness>> | undefined;
+  try {
+    first = await startPhase6Harness({
+      interactive: true,
+      rootDirectory: root,
+    });
+    const workspaceId = first.store.workspaceId;
+    const boardIds = [...first.boardIds];
+    const savedBoards = first.store.getSnapshot().boards;
+
+    await first.close();
+    first = undefined;
+
+    restarted = await startPhase6Harness({
+      interactive: true,
+      rootDirectory: root,
+    });
+    expect(restarted.store.workspaceId).toBe(workspaceId);
+    expect(restarted.boardIds).toEqual(boardIds);
+    expect(restarted.store.getSnapshot().boards).toEqual(savedBoards);
+    expect(existsSync(root)).toBe(true);
+  } finally {
+    await first?.close();
+    await restarted?.close();
+    rmSync(root, { force: true, recursive: true });
+  }
+}, 30_000);
 
 test("eight scripted agent runs finish in isolated checkouts with ten converged WS mirrors", async () => {
   const harness = await startPhase6Harness();

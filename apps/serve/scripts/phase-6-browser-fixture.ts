@@ -69,6 +69,7 @@ const harness = await startPhase6Harness({
   interactive: true,
   localEntryWebPort: fixtureWebPort,
   servePort: fixtureServePort,
+  rootDirectory: process.env.CHORUS_BROWSER_FIXTURE_ROOT,
   questionReplyDelayMs,
 });
 if (seedQuestionMode) {
