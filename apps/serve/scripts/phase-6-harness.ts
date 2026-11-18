@@ -13,6 +13,7 @@ import { Transform } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import {
   applyEventToBoard,
+  LOCAL_ENTRY_PORT,
   queueBoardPromptResponseSchema,
   serverMessageSchema,
   sessionFileDiffsSchema,
@@ -24,8 +25,10 @@ import { OpenCodeAdapter } from "@chorus/oc-adapter";
 import { cors } from "@elysiajs/cors";
 import { Elysia } from "elysia";
 import { authGuardHandler } from "../src/auth/guard";
+import { createLocalEntry } from "../src/auth/local-entry";
 import { DevicePairingTokenStore } from "../src/auth/pairing";
 import { createAuthRoutes } from "../src/auth/routes";
+import { SessionRegistry } from "../src/auth/session-registry";
 import { OpenCodeBridge } from "../src/bridge/opencode/bridge";
 import { RepositoryRegistry } from "../src/projects/repository-registry";
 import { ProjectService } from "../src/projects/service";
@@ -351,15 +354,60 @@ function queueQualificationRuns(
   );
 }
 
+function startOptionalLocalEntry(options: {
+  token: string;
+  registry: SessionRegistry;
+  webPort: number | undefined;
+}): (() => Promise<void>) | undefined {
+  if (options.webPort === undefined) {
+    return undefined;
+  }
+  const server = createLocalEntry({
+    token: options.token,
+    registry: options.registry,
+    webPort: options.webPort,
+  })
+    .onAfterHandle(({ request, set }) => {
+      traceFixtureAuth(request, set.status);
+    })
+    .listen({ hostname: "127.0.0.1", port: LOCAL_ENTRY_PORT });
+  return async () => {
+    await server.stop(true);
+  };
+}
+
+function traceFixtureAuth(
+  request: Request,
+  status: number | string | undefined
+) {
+  if (process.env.CHORUS_BROWSER_FIXTURE_TRACE_AUTH !== "1") {
+    return;
+  }
+  const pathname = new URL(request.url).pathname;
+  if (
+    ["/auth/device", "/auth/local-session", "/projects", "/workspace"].includes(
+      pathname
+    )
+  ) {
+    process.stdout.write(
+      `${JSON.stringify({ method: request.method, pathname, status: status ?? 200 })}\n`
+    );
+  }
+}
+
 /** Real repositories, SDK, HTTP commands, SQLite writer and authenticated WS mirrors. */
 export async function startPhase6Harness({
   interactive = false,
+  localEntryWebPort,
   questionReplyDelayMs,
+  servePort = 0,
   tcpFaultProxyMirrors = 0,
   tcpFaultProxyLatencyMs = 0,
 }: {
   interactive?: boolean;
+  localEntryWebPort?: number;
   questionReplyDelayMs?: number;
+  servePort?: number;
   tcpFaultProxyMirrors?: number;
   tcpFaultProxyLatencyMs?: number;
 } = {}) {
@@ -370,6 +418,7 @@ export async function startPhase6Harness({
   let store: WorkspaceStore | undefined;
   let hub: WorkspaceHub | undefined;
   let bridge: OpenCodeBridge | undefined;
+  let stopLocalEntry: (() => Promise<void>) | undefined;
   let stopHttp: (() => Promise<void>) | undefined;
   let stopEngine: (() => Promise<void>) | undefined;
   const mirrors: QualificationMirror[] = [];
@@ -387,6 +436,8 @@ export async function startPhase6Harness({
   }
 
   async function close() {
+    await stopLocalEntry?.();
+    stopLocalEntry = undefined;
     for (const mirror of mirrors) {
       mirror.socket.close();
     }
@@ -498,7 +549,11 @@ export async function startPhase6Harness({
     );
     const token = crypto.randomUUID();
     const ticketOptions = { store: workspace.meta, now: Date.now };
+    const sessionRegistry = new SessionRegistry(workspace.meta, token);
     const app = new Elysia()
+      .onAfterHandle(({ request, set }) => {
+        traceFixtureAuth(request, set.status);
+      })
       .use(
         cors({
           origin: BROWSER_FIXTURE_ORIGINS,
@@ -507,11 +562,15 @@ export async function startPhase6Harness({
           methods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
         })
       )
-      .resolve({ as: "global" }, authGuardHandler({ token, ticketOptions }))
+      .resolve(
+        { as: "global" },
+        authGuardHandler({ sessionRegistry, token, ticketOptions })
+      )
       .use(
         createAuthRoutes({
           token,
           ticketStore: workspace.meta,
+          sessionRegistry,
           isProduction: false,
           localOrigins: BROWSER_FIXTURE_ORIGINS,
           pairingTokenStore: new DevicePairingTokenStore(),
@@ -522,6 +581,7 @@ export async function startPhase6Harness({
       .use(createProjectRoutes(projectService))
       .use(
         createWsHandler({
+          sessionRegistry,
           boardTasks,
           bridge: engineBridge,
           hub: workspaceHub,
@@ -530,10 +590,15 @@ export async function startPhase6Harness({
           ticketOptions,
         })
       )
-      .listen({ hostname: "127.0.0.1", port: 0 });
+      .listen({ hostname: "127.0.0.1", port: servePort });
     stopHttp = async () => {
       await app.stop(true);
     };
+    stopLocalEntry = startOptionalLocalEntry({
+      token,
+      registry: sessionRegistry,
+      webPort: localEntryWebPort,
+    });
     const base = `http://127.0.0.1:${app.server?.port}`;
     const login = await fetch(`${base}/auth/login`, {
       method: "POST",

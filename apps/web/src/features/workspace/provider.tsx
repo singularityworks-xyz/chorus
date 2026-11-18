@@ -321,6 +321,13 @@ export function ChorusWorkspaceProvider({
   }, [reportUnauthorized]);
 
   useEffect(() => {
+    // Credential bootstrap and the first socket handshake own initial auth.
+    // Reading protected routes in parallel can receive a 401 before the fresh
+    // local session cookie lands, which would cancel the successful handshake.
+    if (status !== "live" || recentProjectsLoaded) {
+      return;
+    }
+
     loadProjects().catch((error: unknown) => {
       dispatchRecentProjects({
         message: error instanceof Error ? error.message : PROJECT_LIST_ERROR,
@@ -332,7 +339,7 @@ export function ChorusWorkspaceProvider({
       projectsLoadControllerRef.current = null;
       controller?.abort();
     };
-  }, [loadProjects]);
+  }, [loadProjects, recentProjectsLoaded, status]);
 
   // ── handlers ──────────────────────────────────────────────────────────────
 

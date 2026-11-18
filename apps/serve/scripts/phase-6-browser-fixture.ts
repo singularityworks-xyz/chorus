@@ -35,6 +35,30 @@ if (
     "CHORUS_BROWSER_FIXTURE_REASONING_BYTES must be an integer from 0 to 67108864"
   );
 }
+const fixtureWebPort = Number(
+  process.env.CHORUS_BROWSER_FIXTURE_WEB_PORT ?? 3000
+);
+if (
+  !Number.isSafeInteger(fixtureWebPort) ||
+  fixtureWebPort < 1 ||
+  fixtureWebPort > 65_535
+) {
+  throw new RangeError(
+    "CHORUS_BROWSER_FIXTURE_WEB_PORT must be an integer from 1 to 65535"
+  );
+}
+const fixtureServePort = Number(
+  process.env.CHORUS_BROWSER_FIXTURE_SERVE_PORT ?? 0
+);
+if (
+  !Number.isSafeInteger(fixtureServePort) ||
+  fixtureServePort < 0 ||
+  fixtureServePort > 65_535
+) {
+  throw new RangeError(
+    "CHORUS_BROWSER_FIXTURE_SERVE_PORT must be an integer from 0 to 65535"
+  );
+}
 
 function createReasoningChunk(size: number, index: number): string {
   const paragraph = `Reasoning segment ${String(index).padStart(6, "0")}: tracing board state, provider choice, and task history.\n\n`;
@@ -43,6 +67,8 @@ function createReasoningChunk(size: number, index: number): string {
 
 const harness = await startPhase6Harness({
   interactive: true,
+  localEntryWebPort: fixtureWebPort,
+  servePort: fixtureServePort,
   questionReplyDelayMs,
 });
 if (seedQuestionMode) {
