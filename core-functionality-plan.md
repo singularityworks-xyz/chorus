@@ -2,6 +2,18 @@
 
 Started: 8 November 2026; updated: 18 November 2026. Status: implementation in progress. The roadmap below was created before code changes began; this progress record distinguishes landed slices from production gates that still need work.
 
+## Definition of done
+
+The implementation goal is complete when each of these finite acceptance gates passes and the evidence is recorded below:
+
+1. **One shared provider configuration:** Settings owns the provider and default model for every board. Existing and newly created boards use the same selection; legacy board settings migrate safely; provider/catalog failures are visible and recoverable.
+2. **Board action matrix:** On desktop and at a 390 × 844 mobile viewport, verify board creation, selection, removal, task submission and draft preservation, plan edit/finalize, approve/reject, question answers, thinking/response streaming, Stop/Retry, diff open/close, repository Undo/Redo, review mode, composer/model selection, and the relevant keyboard and zoom controls. Every action must affect the intended board/task and give an acknowledged result.
+3. **Failure and recovery matrix:** Inject initial-session/auth failure, provider/catalog failure, rejected or timed-out board commands, browser network loss, Serve restart, and reload during an active task. Errors must be actionable; drafts and answers must remain available; tasks must not duplicate or become silently stuck; retry/reconnect must restore a usable board without unexpected browser errors.
+4. **Thinking stream behavior:** Verify incremental thinking and response updates, a long stream beyond 100,000 characters, bounded/paged display and navigation, and Stop/reload/reconnect behavior during active output.
+5. **Automated and production-build checks:** `bun run check`, `bun run check-types`, the full test suite, focused migrations/backup-restore tests, and a standalone production build all pass after the final code change. In-app Browser acceptance uses that production build and a disposable fixture. Each code change is committed atomically and the final worktree is clean.
+
+Live authentication against a user's external provider and a migration/rollback rehearsal on an actual production clone are **release gates**, not implementation-completion gates: they require credentials and infrastructure outside this repository. The local pinned-engine/provider-compatible endpoint and representative isolated migration/restore rehearsals provide implementation-level coverage; the external release gates must be completed before a production rollout.
+
 ## Execution progress
 
 | Slice | State | Evidence / remaining gate |
