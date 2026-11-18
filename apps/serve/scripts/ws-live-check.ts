@@ -20,6 +20,7 @@ interface Frame {
   head?: number;
   seq?: number;
   type: string;
+  workspaceId?: string;
 }
 
 interface TestClient {
@@ -120,6 +121,10 @@ await clientB.waitFor(() => clientB.frames.some((f) => f.type === "snapshot"));
 // ── 1. handshake ────────────────────────────────────────────────────────────
 const readyFrame = clientA.frames.find((f) => f.type === "ready");
 const snapshotFrame = clientA.frames.find((f) => f.type === "snapshot");
+const workspaceId = readyFrame?.workspaceId;
+if (!workspaceId) {
+  throw new Error("serve did not provide a workspace identity");
+}
 
 record(
   "hello yields ready then a versioned snapshot",
@@ -169,7 +174,7 @@ await Bun.sleep(200);
 
 // ── 4. a caught-up reconnect gets ready and nothing redundant ───────────────
 const clientC = await openSocket();
-clientC.send({ since: lastSeen, type: "hello" });
+clientC.send({ since: lastSeen, type: "hello", workspaceId });
 await clientC.waitFor(() => clientC.frames.some((f) => f.type === "ready"));
 await Bun.sleep(500);
 
@@ -186,7 +191,7 @@ await Bun.sleep(200);
 
 // ── 5. a small gap replays instead of snapshotting ──────────────────────────
 const clientD = await openSocket();
-clientD.send({ since: 1, type: "hello" });
+clientD.send({ since: 1, type: "hello", workspaceId });
 await clientD.waitFor(() => clientD.frames.some((f) => f.type === "event"));
 await Bun.sleep(400);
 
@@ -202,7 +207,7 @@ clientD.close();
 // ── 6. resync on demand ─────────────────────────────────────────────────────
 await Bun.sleep(150);
 const clientE = await openSocket();
-clientE.send({ since: lastSeen, type: "hello" });
+clientE.send({ since: lastSeen, type: "hello", workspaceId });
 await clientE.waitFor(() => clientE.frames.some((f) => f.type === "ready"));
 clientE.frames.length = 0;
 clientE.send({ type: "resync" });
@@ -219,10 +224,10 @@ clientE.close();
 // ── 7. viewport relay reaches the other client and is never sequenced ───────
 await Bun.sleep(150);
 const sender = await openSocket();
-sender.send({ since: lastSeen, type: "hello" });
+sender.send({ since: lastSeen, type: "hello", workspaceId });
 await sender.waitFor(() => sender.frames.some((f) => f.type === "ready"));
 const relay = await openSocket();
-relay.send({ since: lastSeen, type: "hello" });
+relay.send({ since: lastSeen, type: "hello", workspaceId });
 await relay.waitFor(() => relay.frames.some((f) => f.type === "ready"));
 await Bun.sleep(200);
 

@@ -25,6 +25,7 @@ import { basename, dirname, join, resolve } from "node:path";
 export const CHORUS_DB_FILENAME = "chorus.db";
 
 export const HEAD_SEQ_KEY = "head_seq";
+export const WORKSPACE_ID_KEY = "workspace_id";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS events (
@@ -210,6 +211,17 @@ export class ChorusDatabase {
       )
       .get(key);
     return row?.value ?? null;
+  }
+
+  getOrCreateMeta(key: string, initialValue: string): string {
+    this.#db
+      .query("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)")
+      .run(key, initialValue);
+    const value = this.getMeta(key);
+    if (value === null) {
+      throw new Error(`failed to initialize database metadata: ${key}`);
+    }
+    return value;
   }
 
   hasAgentReceipt(receiptId: string): boolean {

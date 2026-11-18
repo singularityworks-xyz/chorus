@@ -223,15 +223,25 @@ export type ResumeDecision =
   | { kind: "replay"; fromSeq: number }
   | {
       kind: "snapshot";
-      reason: "client-ahead" | "gap-too-large" | "initial" | "pruned";
+      reason:
+        | "client-ahead"
+        | "gap-too-large"
+        | "initial"
+        | "pruned"
+        | "workspace-changed";
     }
   | { kind: "up-to-date" };
 
 export function decideResume(
   since: number,
   head: number,
-  replayFloor: number
+  replayFloor: number,
+  workspaceMatches = true
 ): ResumeDecision {
+  if (!workspaceMatches) {
+    return { kind: "snapshot", reason: "workspace-changed" };
+  }
+
   if (since > head) {
     // The client is ahead of the server: a restored database, or a different
     // one entirely. Replaying nothing would leave it permanently ahead.
@@ -343,6 +353,10 @@ export class WorkspaceHub {
     this.#pingIntervalMs = options.pingIntervalMs ?? PING_INTERVAL_MS;
     this.#pongTimeoutMs = options.pongTimeoutMs ?? PONG_TIMEOUT_MS;
     this.#startHeartbeat();
+  }
+
+  get workspaceId(): string {
+    return this.#store.workspaceId;
   }
 
   // ── registry ──────────────────────────────────────────────────────────────
@@ -522,7 +536,7 @@ export class WorkspaceHub {
           this.#sendError(socket, "already initialised");
           return;
         }
-        this.#handleHello(client, hello.data.since);
+        this.#handleHello(client, hello.data.since, hello.data.workspaceId);
         return;
       }
 
@@ -580,9 +594,20 @@ export class WorkspaceHub {
    * Sends `ready` with the current head, then either the exact gap, nothing at
    * all, or a fresh snapshot — decided by `decideResume`.
    */
-  #handleHello(client: Client, since: number): void {
+  #handleHello(
+    client: Client,
+    since: number,
+    clientWorkspaceId?: string
+  ): void {
     const head = this.#store.headSeq();
-    this.#send(client, serverReadySchema.parse({ head, type: "ready" }));
+    this.#send(
+      client,
+      serverReadySchema.parse({
+        head,
+        type: "ready",
+        workspaceId: this.#store.workspaceId,
+      })
+    );
 
     // A reconnect is a brand-new socket with no memory of the previous one, so
     // the decision has to come from `since` alone — nothing per-connection can
@@ -591,7 +616,12 @@ export class WorkspaceHub {
     const decision =
       since === 0
         ? ({ kind: "snapshot", reason: "initial" } as const)
-        : decideResume(since, head, this.#store.replayFloorSeq());
+        : decideResume(
+            since,
+            head,
+            this.#store.replayFloorSeq(),
+            clientWorkspaceId === this.#store.workspaceId
+          );
 
     switch (decision.kind) {
       case "up-to-date":

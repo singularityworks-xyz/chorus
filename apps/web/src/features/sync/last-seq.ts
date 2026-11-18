@@ -1,3 +1,5 @@
+import { workspaceIdSchema } from "@chorus/contracts";
+
 /**
  * Persisted resume cursor and snapshot (plan P5 task 1).
  *
@@ -7,7 +9,7 @@
  * client rendering an empty workspace forever. The cursor is only useful if the
  * state it refers to survives too, so both are persisted here and the snapshot is
  * bounded — spec §8 keeps a workspace under 1 MB, and `localStorage` is roughly
- * 5 MB, so there is room for one snapshot plus the cursor.
+ * 5 MB, so there is room for one snapshot plus its cursor and database identity.
  *
  * Every read is defensive. `localStorage` throws outright in Safari private mode
  * and when a page is blocked from storage, a value can be truncated by another
@@ -96,7 +98,7 @@ export function readLastSeq(storage: SequenceStorage | null): number | null {
 /** Reads the persisted snapshot, or `null` when absent, corrupt, or too large. */
 export function readPersistedSnapshot(
   storage: SequenceStorage | null
-): { seq: number; snapshot: unknown } | null {
+): { seq: number; snapshot: unknown; workspaceId: string | null } | null {
   if (!storage) {
     return null;
   }
@@ -113,7 +115,11 @@ export function readPersistedSnapshot(
   }
 
   try {
-    const parsed = JSON.parse(raw) as { seq?: unknown; snapshot?: unknown };
+    const parsed = JSON.parse(raw) as {
+      seq?: unknown;
+      snapshot?: unknown;
+      workspaceId?: unknown;
+    };
 
     if (!Number.isSafeInteger(parsed.seq) || (parsed.seq as number) < 0) {
       return null;
@@ -122,7 +128,12 @@ export function readPersistedSnapshot(
       return null;
     }
 
-    return { seq: parsed.seq as number, snapshot: parsed.snapshot };
+    const workspaceId = workspaceIdSchema.safeParse(parsed.workspaceId);
+    return {
+      seq: parsed.seq as number,
+      snapshot: parsed.snapshot,
+      workspaceId: workspaceId.success ? workspaceId.data : null,
+    };
   } catch {
     // Truncated by another tab mid-write, or written by an older build.
     return null;
@@ -149,7 +160,8 @@ export function readPersistedSnapshot(
 export function writePersistedSnapshot(
   storage: SequenceStorage | null,
   snapshot: unknown,
-  seq: number
+  seq: number,
+  workspaceId?: string | null
 ): void {
   if (!(storage && Number.isSafeInteger(seq)) || seq < 0) {
     return;
@@ -157,7 +169,14 @@ export function writePersistedSnapshot(
 
   let serialised: string;
   try {
-    serialised = JSON.stringify({ seq, snapshot });
+    const parsedWorkspaceId = workspaceIdSchema.safeParse(workspaceId);
+    serialised = JSON.stringify({
+      seq,
+      snapshot,
+      ...(parsedWorkspaceId.success
+        ? { workspaceId: parsedWorkspaceId.data }
+        : {}),
+    });
   } catch {
     // Circular or otherwise unserialisable. Treat as "cannot persist".
     return;

@@ -207,7 +207,7 @@ export function createWsHandler(options: WsHandlerOptions) {
   };
   return new Elysia().ws("/ws", {
     // Transport shape only: "an object with a string type, and optionally a
-    // payload or a resume cursor".
+    // payload, resume cursor, or workspace identity".
     //
     // Elysia's `t.Object` rejects unknown keys, so this has to enumerate the
     // fields the state-channel protocol actually uses — a schema of just
@@ -220,6 +220,7 @@ export function createWsHandler(options: WsHandlerOptions) {
       type: t.String(),
       payload: t.Optional(t.Any()),
       since: t.Optional(t.Number()),
+      workspaceId: t.Optional(t.String()),
     }),
 
     async open(ws) {

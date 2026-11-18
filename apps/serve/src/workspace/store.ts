@@ -26,6 +26,7 @@ import {
   type PushSubscriptionRow,
   type StoredEvent,
   type StoredPushSubscription,
+  WORKSPACE_ID_KEY,
 } from "./db";
 import { attachSessionToBoard, toWorkspaceEvents } from "./projector";
 import {
@@ -242,6 +243,8 @@ interface ProducedMutation {
 }
 
 export class WorkspaceStore {
+  readonly workspaceId: string;
+
   readonly #db: ChorusDatabase;
   readonly #options: Required<RetentionOptions>;
   readonly #queue: { promise: Promise<void> } = { promise: Promise.resolve() };
@@ -291,6 +294,20 @@ export class WorkspaceStore {
     this.#restorePersistedRepositoryRoots =
       options.restorePersistedRepositoryRoots !== false;
     this.#db = new ChorusDatabase(dataDir);
+    const persistedWorkspaceId = this.#db.getOrCreateMeta(
+      WORKSPACE_ID_KEY,
+      crypto.randomUUID()
+    );
+    const parsedWorkspaceId = z.uuid().safeParse(persistedWorkspaceId);
+    if (parsedWorkspaceId.success) {
+      this.workspaceId = parsedWorkspaceId.data;
+    } else {
+      this.workspaceId = crypto.randomUUID();
+      this.#db.setMeta(WORKSPACE_ID_KEY, this.workspaceId);
+      logger.warn("workspace-sync-identity-reset", {
+        reason: "invalid-persisted-value",
+      });
+    }
     this.#options = {
       dbSizeCapMb: options.dbSizeCapMb ?? 512,
       retentionDays: options.retentionDays ?? DEFAULT_RETENTION_DAYS,

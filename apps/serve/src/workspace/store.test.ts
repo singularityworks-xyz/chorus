@@ -11,10 +11,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type WorkspaceMutation,
+  workspaceIdSchema,
   workspaceSnapshotSchema,
 } from "@chorus/contracts";
 import type { NormalizedAgentEvent } from "@chorus/oc-adapter";
-import { restoreDatabaseFile } from "./db";
+import { restoreDatabaseFile, WORKSPACE_ID_KEY } from "./db";
 import { WorkspaceStore } from "./store";
 
 const dirs: string[] = [];
@@ -140,6 +141,43 @@ function agentEvent(
 }
 
 describe("WorkspaceStore persistence", () => {
+  test("keeps a stable sync identity for this database and assigns a new one to another", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chorus-store-identity-"));
+    dirs.push(dir);
+
+    const first = createStoreAt(dir);
+    await first.load();
+    const firstId = first.workspaceId;
+    await first.close();
+
+    const reopened = createStoreAt(dir);
+    await reopened.load();
+    expect(reopened.workspaceId).toBe(firstId);
+
+    const separate = createStore();
+    await separate.load();
+    expect(separate.workspaceId).not.toBe(firstId);
+  });
+
+  test("repairs a malformed persisted sync identity", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chorus-store-identity-"));
+    dirs.push(dir);
+
+    const first = createStoreAt(dir);
+    await first.load();
+    const originalId = first.workspaceId;
+    first.meta.setMeta(WORKSPACE_ID_KEY, "not-a-uuid");
+    await first.close();
+
+    const reopened = createStoreAt(dir);
+    await reopened.load();
+
+    expect(reopened.workspaceId).not.toBe(originalId);
+    expect(workspaceIdSchema.safeParse(reopened.workspaceId).success).toBe(
+      true
+    );
+  });
+
   test("appends board.create as a single sequenced event", async () => {
     const store = createStore();
     await store.load();

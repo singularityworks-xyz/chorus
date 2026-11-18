@@ -62,6 +62,8 @@ export interface ChorusSyncState {
   /** Boards and preferences from the last snapshot, plus applied events. */
   snapshot: VersionedSnapshot | null;
   status: "connecting" | "live" | "offline" | "auth-expired";
+  /** Database identity paired with the persisted snapshot and resume cursor. */
+  workspaceId: string | null;
 }
 
 export type SyncListener = (state: ChorusSyncState) => void;
@@ -146,6 +148,7 @@ export class ChorusSync {
   #handshakeInFlight = false;
   #socketUrlPreparationInFlight = false;
   #connectionGeneration = 0;
+  #connectionWorkspaceId: string | null = null;
 
   /**
    * Latches a resync so a burst of gapped frames sends one `resync`, not one per
@@ -164,6 +167,7 @@ export class ChorusSync {
     lastSeq: 0,
     snapshot: null,
     status: "offline",
+    workspaceId: null,
   };
 
   constructor(deps: ChorusSyncDeps, options: ChorusSyncOptions = {}) {
@@ -238,6 +242,7 @@ export class ChorusSync {
       lastSeq: restored.seq,
       snapshot: parsed.data,
       status: "connecting",
+      workspaceId: restored.workspaceId,
     });
     this.#options.onRestoredSnapshot?.(parsed.data, restored.seq);
   }
@@ -338,6 +343,7 @@ export class ChorusSync {
       return;
     }
 
+    this.#connectionWorkspaceId = null;
     this.#setState({ status: "connecting" });
 
     const prepareSocketUrl = this.#deps.prepareSocketUrl;
@@ -453,13 +459,23 @@ export class ChorusSync {
     // it with a full snapshot. After a restore `#state.lastSeq` already equals
     // the persisted cursor, so this is correct in both cases.
     //
-    // Only honoured when the snapshot it refers to is also in memory: resuming
-    // from a cursor with nothing on screen would leave the client permanently
-    // blank, which is worse than paying for a snapshot.
-    const since = this.#state.snapshot === null ? 0 : this.#state.lastSeq;
+    // Only honour the cursor when the matching snapshot and its database
+    // identity are both in memory. Older snapshots have no identity, so they
+    // request one authoritative snapshot before they can be resumed safely.
+    const workspaceId = this.#state.workspaceId;
+    const since =
+      this.#state.snapshot === null || workspaceId === null
+        ? 0
+        : this.#state.lastSeq;
 
     try {
-      socket.send(JSON.stringify({ since, type: "hello" }));
+      socket.send(
+        JSON.stringify({
+          ...(workspaceId === null ? {} : { workspaceId }),
+          since,
+          type: "hello",
+        })
+      );
     } catch {
       // Treat an undeliverable handshake as a dropped connection rather than
       // assuming the close handler will notice. Leaving `status` at
@@ -491,12 +507,19 @@ export class ChorusSync {
         // The handshake completed. Anything the server is about to send is the
         // replay or the snapshot, and both are legitimate first traffic.
         this.#handshakeInFlight = false;
+        this.#connectionWorkspaceId = frame.workspaceId ?? null;
         // The only success that justifies resetting backoff: auth passed and the
         // server accepted our `since`. Resetting on `open` instead would let a
         // server that accepts-then-closes reconnect at full speed forever.
         this.#backoff.reset();
         this.#setState({ lastError: null, status: "live" });
         this.#options.onStatus?.("live");
+        // Older Serve versions do not announce a database identity. Recover
+        // safely by requesting a full snapshot instead of trusting an opaque
+        // cursor from local storage.
+        if (this.#connectionWorkspaceId === null) {
+          this.requestResync();
+        }
         return;
       }
 
@@ -562,8 +585,9 @@ export class ChorusSync {
       lastSeq: seq,
       snapshot,
       status: "live",
+      workspaceId: this.#connectionWorkspaceId,
     });
-    writePersistedSnapshot(storage, snapshot, seq);
+    writePersistedSnapshot(storage, snapshot, seq, this.#connectionWorkspaceId);
     this.#options.onSnapshot?.(snapshot, seq);
   }
 
@@ -622,7 +646,7 @@ export class ChorusSync {
     // has never seen.
     clearPersistedState(storage);
 
-    this.#setState({ lastSeq: 0, status: "auth-expired" });
+    this.#setState({ lastSeq: 0, status: "auth-expired", workspaceId: null });
     this.#options.onStatus?.("auth-expired");
 
     if (!this.#authExpiredEmitted) {

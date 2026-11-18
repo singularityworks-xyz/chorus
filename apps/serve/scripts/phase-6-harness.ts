@@ -579,7 +579,13 @@ export async function startPhase6Harness({
       socket: WebSocket
     ): void {
       socket.addEventListener("open", () =>
-        socket.send(JSON.stringify({ type: "hello", since: mirror.seq }))
+        socket.send(
+          JSON.stringify({
+            type: "hello",
+            since: mirror.seq,
+            workspaceId: workspace.workspaceId,
+          })
+        )
       );
       socket.addEventListener("message", (message) => {
         if (mirror.socket !== socket) {

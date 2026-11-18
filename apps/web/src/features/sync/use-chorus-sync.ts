@@ -71,6 +71,7 @@ export function useChorusSync(
     lastSeq: 0,
     snapshot: null,
     status: "offline",
+    workspaceId: null,
   }));
 
   // Refs, not state: these are called from socket callbacks and from event
