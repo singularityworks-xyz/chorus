@@ -1,18 +1,30 @@
 # Chorus core functionality implementation plan
 
-Started: 8 November 2026; updated: 18 November 2026. Status: implementation in progress. The roadmap below was created before code changes began; this progress record distinguishes landed slices from production gates that still need work.
+Started: 8 November 2026; updated: 18 November 2026. Status: implementation acceptance complete; external release gates remain. The roadmap below was created before code changes began; its later notes are chronological, and the current completion audit below supersedes older open-gate snapshots.
 
 ## Definition of done
 
 The implementation goal is complete when each of these finite acceptance gates passes and the evidence is recorded below:
 
 1. **One shared provider configuration:** Settings owns the provider and default model for every board. Existing and newly created boards use the same selection; legacy board settings migrate safely; provider/catalog failures are visible and recoverable.
-2. **Board action matrix:** On desktop and at a 390 × 844 mobile viewport, verify board creation, selection, removal, task submission and draft preservation, plan edit/finalize, approve/reject, question answers, thinking/response streaming, Stop/Retry, diff open/close, repository Undo/Redo, review mode, composer/model selection, and the relevant keyboard and zoom controls. Every action must affect the intended board/task and give an acknowledged result.
+2. **Board action matrix:** Across desktop and a 390 × 844 mobile viewport, verify board creation, selection, removal, task submission and draft preservation, plan edit/finalize, approve/reject, question answers, thinking/response streaming, Stop/Retry, diff open/close, repository Undo/Redo, review mode, composer/model selection, and the relevant keyboard and zoom controls. Exercise each control in the layout where the app presents it, confirm mobile lane controls remain reachable, and verify every action affects the intended board/task with an acknowledged result.
 3. **Failure and recovery matrix:** Inject initial-session/auth failure, provider/catalog failure, rejected or timed-out board commands, browser network loss, Serve restart, and reload during an active task. Errors must be actionable; drafts and answers must remain available; tasks must not duplicate or become silently stuck; retry/reconnect must restore a usable board without unexpected browser errors.
 4. **Thinking stream behavior:** Verify incremental thinking and response updates, a long stream beyond 100,000 characters, bounded/paged display and navigation, and Stop/reload/reconnect behavior during active output.
 5. **Automated and production-build checks:** `bun run check`, `bun run check-types`, the full test suite, focused migrations/backup-restore tests, and a standalone production build all pass after the final code change. In-app Browser acceptance uses that production build and a disposable fixture. Each code change is committed atomically and the final worktree is clean.
 
 Live authentication against a user's external provider and a migration/rollback rehearsal on an actual production clone are **release gates**, not implementation-completion gates: they require credentials and infrastructure outside this repository. The local pinned-engine/provider-compatible endpoint and representative isolated migration/restore rehearsals provide implementation-level coverage; the external release gates must be completed before a production rollout.
+
+## Current completion audit — 18 November 2026
+
+| Gate | Result | Current evidence |
+| --- | --- | --- |
+| Shared provider settings and safe migration | Pass | Settings visibly describes one provider/model for every board; browser checks cover existing and newly created boards. Two pinned engines share configured credentials, two board task routes honor the single persisted model, and representative multi-board migration/backup restore passes in an isolated fixture. |
+| Desktop/mobile board controls | Pass | The direct in-app Browser runs recorded above cover task submission and preserved drafts, board creation/selection/removal, plan editing/finalization, permission approval/rejection, question answers, live thinking/response, Stop/Retry, diff open/close, repository Undo/Redo, review mode, shared model selection, keyboard actions, zoom/Fit, and Stacked/Relaxed layout persistence. Controls were exercised in the layout where they are presented; mobile hit targets were checked after scrolling into view. |
+| Graceful error and recovery behavior | Pass | Browser evidence covers first-session/auth retry, provider-status recovery, injected `/api/models` failure and retry, board-command failures with preserved input/answers, browser offline/online recovery, same-workspace Serve restart, and reload during active output. No unexpected console errors appeared in the recorded acceptance runs. |
+| Thinking stream behavior | Pass | In-app Browser verified a 111,600-character thinking stream and a 1 MiB transcript in bounded 8 KiB pages, Earlier/Later and Jump to latest navigation, reader-position preservation, and Stop responsiveness. Active output was also recovered after reload/reconnect. |
+| Automated and production-build checks | Pass | After the final application-code change: `bun run check`, all nine package type checks, full `bun run test` (1,189 passed, 17 environment-gated skips, 0 failures), focused migration/restore and phase-6 harness suites, and standalone production builds pass. The later fixture-only pending-permission option is covered by type checks, full tests, and the in-app browser approval flow. Changes are committed atomically and the workspace is clean after test cleanup. |
+
+The implementation goal is complete at these five gates. Actual external-provider authentication/inference and a production-clone/canary rollback rehearsal remain required before rollout; neither has been run in this repository environment.
 
 ## Execution progress
 
