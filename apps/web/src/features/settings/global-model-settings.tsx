@@ -10,6 +10,7 @@ import {
   fetchGlobalModelCatalog,
   modelSettingsLoadErrorMessage,
 } from "@/features/settings/settings-client";
+import { isWorkspaceSessionLive } from "@/features/workspace/session-status";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 
 function getSelectionWarning(
@@ -32,8 +33,12 @@ function getSelectionWarning(
 }
 
 export function GlobalModelSettings() {
-  const { addRecentModel, preferences, setDefaultModelSelection } =
-    useWorkspace();
+  const {
+    addRecentModel,
+    preferences,
+    sessionStatus,
+    setDefaultModelSelection,
+  } = useWorkspace();
   const [availableModels, setAvailableModels] = useState<
     ReturnType<typeof opencodeModelCatalogSchema.parse>["models"]
   >([]);
@@ -46,6 +51,10 @@ export function GlobalModelSettings() {
   const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
+    if (!isWorkspaceSessionLive(sessionStatus)) {
+      return;
+    }
+
     const controller = new AbortController();
     setLoading(true);
     setError(null);
@@ -69,7 +78,7 @@ export function GlobalModelSettings() {
       });
 
     return () => controller.abort();
-  }, [refreshKey]);
+  }, [refreshKey, sessionStatus]);
 
   const selectedKey = useMemo(() => {
     const selection = preferences.defaultModelSelection;

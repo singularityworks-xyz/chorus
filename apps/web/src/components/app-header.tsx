@@ -59,6 +59,7 @@ import {
   postOpenCodeAction,
   providerSettingsLoadErrorMessage,
 } from "@/features/settings/settings-client";
+import { isWorkspaceSessionLive } from "@/features/workspace/session-status";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 import { useVoiceConfig } from "@/hooks/use-voice-config";
 import { cn } from "@/lib/utils";
@@ -358,7 +359,7 @@ function SettingsActionItem({
   );
 }
 
-function useProviderSettings() {
+function useProviderSettings(isSessionLive: boolean) {
   const [providerStatus, setProviderStatus] = useState<
     OpencodeProviderStatus[]
   >([]);
@@ -374,6 +375,10 @@ function useProviderSettings() {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
+    if (!isSessionLive) {
+      return;
+    }
+
     let isCancelled = false;
     const controller = new AbortController();
     const refreshToken = providerStatusRefreshTick.toString(36);
@@ -420,7 +425,7 @@ function useProviderSettings() {
       isCancelled = true;
       controller.abort();
     };
-  }, [providerStatusRefreshTick]);
+  }, [isSessionLive, providerStatusRefreshTick]);
 
   return {
     authLoginNotice,
@@ -1107,7 +1112,7 @@ function SettingsMenu() {
     "devices" | "providers" | "voice"
   >("providers");
 
-  const { preferences, setSpeechVoiceId } = useWorkspace();
+  const { preferences, sessionStatus, setSpeechVoiceId } = useWorkspace();
   const {
     defaultModelId,
     defaultVoiceId,
@@ -1128,7 +1133,7 @@ function SettingsMenu() {
     refreshProviderStatus,
     settingsError,
     storedCredentials,
-  } = useProviderSettings();
+  } = useProviderSettings(isWorkspaceSessionLive(sessionStatus));
   const selectedSpeechVoiceId =
     preferences.speechVoiceId ?? defaultVoiceId ?? null;
   const resolvedSpeechVoiceValue =

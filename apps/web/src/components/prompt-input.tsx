@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { providerCatalogInvalidator } from "@/features/settings/provider-catalog-invalidator";
+import { isWorkspaceSessionLive } from "@/features/workspace/session-status";
 import type { WorkspaceBoard } from "@/features/workspace/types";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 import {
@@ -111,7 +112,7 @@ export function PromptInput() {
     null
   );
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [isLoadingModels, setIsLoadingModels] = useState(false);
+  const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [availableModels, setAvailableModels] = useState<
     OpencodeModelSummary[]
   >([]);
@@ -136,6 +137,7 @@ export function PromptInput() {
     restorePrompt,
     selectBoard,
     sessionCommand,
+    sessionStatus,
     selectedBoard,
     setDefaultModelSelection,
     addRecentModel,
@@ -192,6 +194,10 @@ export function PromptInput() {
     : "Start voice input";
 
   useEffect(() => {
+    if (!isWorkspaceSessionLive(sessionStatus)) {
+      return;
+    }
+
     let isCancelled = false;
     let activeController: AbortController | undefined;
 
@@ -254,7 +260,7 @@ export function PromptInput() {
       activeController?.abort();
       unsubscribe();
     };
-  }, []);
+  }, [sessionStatus]);
 
   useEffect(() => {
     const defaultSelection = preferences.defaultModelSelection;

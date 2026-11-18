@@ -11,6 +11,7 @@ import type {
 } from "@chorus/contracts";
 import type { Columns, Task } from "@/features/kanban/components/kanban";
 import type { PendingDrag } from "./reducer";
+import type { WorkspaceSessionStatus } from "./session-status";
 
 export type WorkspaceProject = ProjectListResponse["projects"][number];
 export type WorkspaceBoardSeed = BoardSeed;
@@ -101,7 +102,7 @@ export interface WorkspaceContextValue {
   ) => Promise<SessionHistoryCommandResult>;
   sessionHistoryChange: { boardId: string; revision: number } | null;
   /** Socket status, so the UI can show a reconnecting strip. */
-  sessionStatus: "connecting" | "live" | "offline" | "auth-expired";
+  sessionStatus: WorkspaceSessionStatus;
   setBoardModel: (boardId: string, model: ModelSelection | null) => void;
   setBoardViewMode: (mode: WorkspacePreferences["boardViewMode"]) => void;
   setDefaultModelSelection: (model: ModelSelection | null) => Promise<void>;
