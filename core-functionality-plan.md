@@ -608,3 +608,7 @@ The interactive browser fixture now accepts `CHORUS_BROWSER_FIXTURE_PENDING_PERM
 ### Board view-mode controls — 18 November 2026
 
 From the mobile Open menu, selecting Stacked closed the menu and persisted the view preference. On desktop, the eight board cards appeared as an overlapping stack. View → Relaxed laid out all eight cards in a three-column grid with zero pairwise overlaps. Reload retained the grid; Fit view brought all eight cards back into view, still without overlaps. No browser console entries appeared. This closes the stacked/relaxed layout controls in the board action matrix.
+
+### Model-catalog failure and retry — 18 November 2026
+
+In ChatGPT's in-app browser, the `/api/models` request was temporarily blocked while opening Settings. Global model settings showed “Could not load available models. Check the engine connection and retry.” with an enabled Retry button; the shared provider status remained available. After unblocking the request, Retry cleared the error and restored the Scripted Model selection. The browser console remained empty. This verifies the catalog failure path independently from provider-status loading and recovery.
