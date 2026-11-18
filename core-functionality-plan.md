@@ -574,3 +574,7 @@ In ChatGPT's in-app browser against the rebuilt standalone app and disposable sc
 ### Mobile question-answer network failure and retry — 18 November 2026
 
 At 390×844 in ChatGPT's in-app browser on the standalone production build, the first of two pending question requests had an answer selected. Stopping the temporary web server made the Answer request fail; the board showed “Your answers are preserved,” retained both questions and the selected option, and emitted no browser console messages. Restarting the same web server on the same fixture workspace restored the connection. Retrying cleared only the first request and showed “Answer sent”; answering the second request separately moved the task to Done and removed both Answer buttons. No external provider was used.
+
+### Mobile draft preservation and cross-board submission — 18 November 2026
+
+At 390×844 on the standalone production build, Create Task focused the selected board's composer. A draft typed on Run 0 remained in the composer after switching to Run 1. Submitting it cleared the composer after acceptance, created exactly one task in Run 1's Review lane, and left Run 0 empty. Reject moved the disposable task to Done. On first load, provider status returned 401 and Settings showed an actionable Retry; retry loaded the shared Scripted Model and cleared the visible error. The browser recorded only that initial failed request, with no additional console entries after recovery. No external provider was used.
