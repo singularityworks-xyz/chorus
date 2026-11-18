@@ -25,7 +25,11 @@ export default function Home() {
       >
         <BackgroundCanvas />
       </div>
-      <div className="h-full w-full md:hidden" data-testid="mobile-lane-list">
+      {/* Reserve the fixed mobile header so board chips stay unobstructed. */}
+      <div
+        className="h-full w-full pt-16 md:hidden"
+        data-testid="mobile-lane-list"
+      >
         <MobileLaneList />
       </div>
     </main>
