@@ -1,6 +1,8 @@
 import { startPhase6Harness } from "./phase-6-harness";
 
 const questionMode = process.env.CHORUS_BROWSER_FIXTURE_QUESTION;
+const pendingPermissionMode =
+  process.env.CHORUS_BROWSER_FIXTURE_PENDING_PERMISSION === "1";
 let questionCount = 0;
 switch (questionMode) {
   case "1":
@@ -12,7 +14,7 @@ switch (questionMode) {
   default:
     break;
 }
-const seedQuestionMode = questionCount > 0;
+const seedTaskMode = questionCount > 0 || pendingPermissionMode;
 const questionReplyDelayMs = Number(
   process.env.CHORUS_BROWSER_FIXTURE_QUESTION_REPLY_DELAY_MS ?? 0
 );
@@ -72,17 +74,22 @@ const harness = await startPhase6Harness({
   rootDirectory: process.env.CHORUS_BROWSER_FIXTURE_ROOT,
   questionReplyDelayMs,
 });
-if (seedQuestionMode) {
+if (seedTaskMode) {
   const boardId = harness.boardIds.at(-1);
   if (!boardId) {
-    throw new Error("Question browser fixture has no board");
+    throw new Error("Interactive browser fixture has no board");
   }
   const run = await harness.queueInteractiveTask(
     boardId,
     "Choose how the scripted fixture should handle this task",
     "auto"
   );
-  await harness.approvePermission(run.sessionId, `permission-${run.sessionId}`);
+  if (!pendingPermissionMode) {
+    await harness.approvePermission(
+      run.sessionId,
+      `permission-${run.sessionId}`
+    );
+  }
   for (let index = 0; index < questionCount; index += 1) {
     harness.engine.askQuestion(run.sessionId);
   }
@@ -129,7 +136,7 @@ streamTimer = setInterval(
       }
     }
   },
-  seedQuestionMode ? 200 : 30
+  seedTaskMode ? 200 : 30
 );
 
 process.stdout.write(
