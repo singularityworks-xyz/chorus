@@ -26,6 +26,7 @@ import {
   INITIAL_WORKSPACE_STATE,
   workspaceReducer,
 } from "./reducer";
+import { isCurrentBoardSelection } from "./state";
 import type { WorkspaceContextValue } from "./types";
 import {
   OPEN_FOLDER_ERROR,
@@ -458,6 +459,9 @@ export function ChorusWorkspaceProvider({
     (boardId: string) => {
       setLocalBoardFocus(null);
       dispatch({ boardId, type: "optimistic/drag-settle" });
+      if (isCurrentBoardSelection(persistedSelectedBoardId, boardId)) {
+        return;
+      }
       mutateWorkspace(
         createWorkspaceMutation(
           clientIdRef.current,
@@ -471,7 +475,7 @@ export function ChorusWorkspaceProvider({
         console.error("Failed to select board:", error);
       });
     },
-    [mutateWorkspace]
+    [mutateWorkspace, persistedSelectedBoardId]
   );
 
   const focusBoardLocally = useCallback((boardId: string) => {

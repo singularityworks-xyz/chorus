@@ -165,3 +165,10 @@ export function updateBoardReviewMode(
     reviewMode,
   };
 }
+
+export function isCurrentBoardSelection(
+  selectedBoardId: string | null,
+  requestedBoardId: string
+): boolean {
+  return selectedBoardId === requestedBoardId;
+}
