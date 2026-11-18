@@ -32,6 +32,7 @@ import {
   computeBoardLayout,
   getAutoLayoutBoardIds,
 } from "@/features/canvas/lib/board-layout";
+import { focusBoardOnCanvas } from "@/features/canvas/lib/board-navigation";
 import { hasCanvasViewport } from "@/features/canvas/lib/canvas-viewport";
 import type { Columns } from "@/features/kanban/components/kanban";
 import {
@@ -443,6 +444,9 @@ export function BackgroundCanvas() {
     canvasSize.width,
     canvasSize.height
   );
+  const selectedBoardNodeReady = nodes.some(
+    (node) => node.id === selectedBoardId
+  );
 
   useEffect(() => {
     setIsMounted(true);
@@ -742,27 +746,28 @@ export function BackgroundCanvas() {
     };
   }, [boardViewMode, fitViewToken, nodes.length]);
 
-  // Navigate to board when selected from dropdown (not from canvas click)
+  // Navigate to board when selected from dropdown (not from canvas click).
+  // `nodes.length` also retries focus after the workspace snapshot has loaded;
+  // on a page reload the persisted selection can arrive before React Flow's
+  // instance or board nodes are ready.
   useEffect(() => {
-    if (!(selectedBoardId && rfInstanceRef.current) || isNodeClickRef.current) {
+    if (isNodeClickRef.current) {
       isNodeClickRef.current = false;
       return;
     }
 
-    const node = rfInstanceRef.current.getNode(selectedBoardId);
-    if (!node) {
+    const instance = rfInstanceRef.current;
+    if (!(instance && selectedBoardId && selectedBoardNodeReady)) {
       return;
     }
 
-    const nodeWidth = 1280; // KANBAN_CARD_WIDTH from kanban-card-node.tsx
-    const nodeHeight = 720; // KANBAN_CARD_HEIGHT from kanban-card-node.tsx
+    let frameId = 0;
+    frameId = window.requestAnimationFrame(() => {
+      focusBoardOnCanvas(instance, selectedBoardId);
+    });
 
-    rfInstanceRef.current.setCenter(
-      node.position.x + nodeWidth / 2,
-      node.position.y + nodeHeight / 2,
-      { zoom: 1, duration: 300 }
-    );
-  }, [selectedBoardId]);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [selectedBoardId, selectedBoardNodeReady]);
 
   return (
     <div className="h-full w-full" ref={containerRef}>
@@ -788,6 +793,11 @@ export function BackgroundCanvas() {
           onConnect={onConnect}
           onInit={(instance) => {
             rfInstanceRef.current = instance;
+            if (selectedBoardId) {
+              window.requestAnimationFrame(() => {
+                focusBoardOnCanvas(instance, selectedBoardId);
+              });
+            }
           }}
           onlyRenderVisibleElements
           onNodeClick={(_, node) => {
