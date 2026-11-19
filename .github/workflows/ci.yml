@@ -31,6 +31,8 @@ jobs:
         run: bunx ultracite check
       - name: Log Gate
         run: bun run check:log
+      - name: Import Boundaries
+        run: bun run check:boundaries
 
   typecheck:
     name: Typecheck
