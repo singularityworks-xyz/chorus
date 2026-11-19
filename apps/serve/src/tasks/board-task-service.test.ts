@@ -4,12 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkspaceBoard } from "@chorus/contracts";
 import { WorkspaceStore } from "../workspace/store";
+import { BoardTaskService } from "./board-task-service";
 import {
   BoardTaskCommandError,
-  BoardTaskService,
   GlobalModelNotConfiguredError,
   SessionOwnershipError,
-} from "./board-task-service";
+} from "./errors";
 
 function makeMockBridge() {
   const session = {

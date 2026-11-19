@@ -4,7 +4,7 @@ import { Elysia } from "elysia";
 import {
   BoardTaskCommandError,
   GlobalModelNotConfiguredError,
-} from "../tasks/board-task-service";
+} from "../tasks/errors";
 import { createHttpRoutes } from "./index";
 
 function makeMockBridge() {

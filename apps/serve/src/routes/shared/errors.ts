@@ -7,7 +7,7 @@ import {
   BoardTaskCommandError,
   GlobalModelNotConfiguredError,
   SessionOwnershipError,
-} from "../../tasks/board-task-service";
+} from "../../tasks/errors";
 import { UnknownSessionError } from "../../tasks/session-directory";
 import { pendingApprovalConflictMessage } from "../../workspace/store";
 

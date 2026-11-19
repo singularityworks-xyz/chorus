@@ -3,7 +3,7 @@ import { Elysia, t } from "elysia";
 import { RepositoryRegistryError } from "../projects/repository-registry";
 import { WorktreeNotCleanError } from "../projects/worktree-manager";
 import type { BoardTaskService } from "../tasks/board-task-service";
-import { BoardLifecycleError } from "../tasks/board-task-service";
+import { BoardLifecycleError } from "../tasks/errors";
 import type { WorkspaceStore } from "../workspace/store";
 
 export function createWorkspaceRoutes(

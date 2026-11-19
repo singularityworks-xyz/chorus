@@ -3,7 +3,7 @@ import {
   boardAutocompleteResponseSchema,
 } from "@chorus/contracts";
 import { Elysia, t } from "elysia";
-import { BoardTaskCommandError } from "../../tasks/board-task-service";
+import { BoardTaskCommandError } from "../../tasks/errors";
 import type { HttpRouteDependencies } from "../shared/dependencies";
 import { normalizeAutocompletePath } from "./normalize";
 export function createBoardAutocompleteRoutes({
