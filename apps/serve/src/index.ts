@@ -7,22 +7,19 @@ import { pruneExpiredTickets, type TicketStore } from "./auth/ticket";
 import { MissingTokenError, resolveToken } from "./auth/token";
 import { loadConfig } from "./config";
 import { HostRemoteAccess } from "./hosting/remote-access";
-import { ProjectEngineContext } from "./projects/engine-context";
-import { NativeFolderPicker } from "./projects/folder-picker";
-import { ProviderService } from "./projects/providers/service";
 import { RepositoryRegistry } from "./projects/repository-registry";
-import { ProjectService } from "./projects/service";
 import { resolvePushConfiguration } from "./push/config";
 import { PushDispatcher } from "./push/dispatcher";
+import { subscribeToAgentEvents } from "./server/bootstrap/agent-events";
 import { createEngineRuntime } from "./server/bootstrap/engine-runtime";
 import { createHttpApplication } from "./server/bootstrap/http-application";
+import { recoverBoardSessions } from "./server/bootstrap/recover-sessions";
+import { createTaskRuntime } from "./server/bootstrap/task-runtime";
 import {
   createWorkspaceRuntime,
   pruneOrphanWorktrees,
 } from "./server/bootstrap/workspace-runtime";
 import { registerGracefulShutdown } from "./server/shutdown";
-import { BoardTaskService } from "./tasks/board-task-service";
-import { SessionWatchdog } from "./tasks/session-watchdog";
 import { WorkspaceHub } from "./ws/hub";
 
 const config = loadConfig();
@@ -120,123 +117,17 @@ workspaceStore.onCommit((commit) => {
   hub.publish(commit);
 });
 
-const watchdog = new SessionWatchdog(bridge, {
-  onTimeout: (sessionId, info, message) => {
-    logger.warn("watchdog-timeout", {
-      sessionId,
-      boardId: info.boardId,
-      message,
-    });
-
-    workspaceStore
-      .applyAgentEvent({
-        type: "session.timeout",
-        sessionID: sessionId,
-        activity: "error",
-        error: message,
-        timestamp: Date.now(),
-      })
-      .then((commit) => {
-        if (!commit) {
-          return;
-        }
-        logger.info("workspace-commit-after-timeout", {
-          sessionID: sessionId,
-          boardId: commit.boardId,
-          seq: commit.lastSeq,
-        });
-      })
-      .catch((error) => {
-        logger.error(
-          "workspace-projection-failed-timeout",
-          error instanceof Error ? error : undefined,
-          { sessionID: sessionId }
-        );
-      });
-  },
-});
-
-const boardTasks = new BoardTaskService(
+const taskRuntime = createTaskRuntime({
   bridge,
-  workspaceStore,
-  undefined,
-  watchdog,
-  repositoryRegistry
-);
-const projectEngineContext = new ProjectEngineContext({
-  auth: engineAuth,
-  baseUrl: config.opencodeBaseUrl,
-  engineAdapterForDirectory: engineRegistry
-    ? (directory) => engineRegistry.adapterForDirectory(directory)
-    : undefined,
-  prepareEngineDirectory: (directory) => bridge.subscribeDirectory(directory),
+  config,
+  engineAuth,
+  engineRegistry,
+  logger,
   repositoryRegistry,
+  workspaceStore,
 });
-const projectService = new ProjectService({
-  defaultDirectory: config.opencodeDirectory,
-  engine: projectEngineContext,
-  folderPicker: new NativeFolderPicker(),
-  registerPickedRepository: (directory) =>
-    workspaceStore.registerPickedRepository(directory),
-});
-const providerService = new ProviderService({
-  defaultDirectory: config.opencodeDirectory,
-  engine: projectEngineContext,
-});
-
-let lastLoggedWorkspaceCommitSeq = 0;
-bridge.subscribe(async (event) => {
-  // Only sequenced Chorus events reach connected clients.
-  if (event.type === "server.heartbeat") {
-    return;
-  }
-
-  logger.debug("bridge-event", {
-    type: event.type,
-    ...(event.sessionID && { sessionID: event.sessionID }),
-    ...(event.activity && { activity: event.activity }),
-  });
-
-  // Stream deltas have no activity field, so accept either activity or delta.
-  if (!(event.sessionID && (event.activity || event.delta))) {
-    return;
-  }
-
-  if (event.activity === "error" || event.activity === "idle") {
-    watchdog.stop(event.sessionID);
-  } else if (event.activity === "thinking" || event.activity === "writing") {
-    const board = workspaceStore.getBoardBySessionId(event.sessionID);
-    if (board?.session.currentTaskId) {
-      watchdog.observeActivity(event.sessionID, {
-        boardId: board.boardId,
-        directory: board.repo.worktree ?? board.repo.directory,
-      });
-    } else {
-      watchdog.reset(event.sessionID);
-    }
-  } else {
-    watchdog.reset(event.sessionID);
-  }
-
-  const commit = await workspaceStore.applyAgentEvent(event);
-  if (!commit) {
-    return;
-  }
-
-  if (commit.lastSeq <= lastLoggedWorkspaceCommitSeq) {
-    return;
-  }
-  lastLoggedWorkspaceCommitSeq = commit.lastSeq;
-
-  logger.info("workspace-commit", {
-    boardId: commit.boardId,
-    seq: commit.lastSeq,
-    events: commit.events.map((entry) => entry.type),
-    ...(commit.boardId && event.sessionID
-      ? { sessionID: event.sessionID }
-      : {}),
-  });
-});
+const { boardTasks, projectService, providerService, watchdog } = taskRuntime;
+subscribeToAgentEvents({ bridge, logger, watchdog, workspaceStore });
 
 const app = createHttpApplication({
   boardTasks,
@@ -267,33 +158,7 @@ try {
   });
 }
 
-for (const board of workspaceStore.getSnapshot().boards) {
-  const hasPendingApprovals = Object.values(board.columns)
-    .flat()
-    .some(
-      (task) =>
-        (task.pendingApprovals?.length ?? 0) > 0 ||
-        task.pendingApproval !== undefined
-    );
-  if (
-    !(
-      board.session.sessionId &&
-      (board.session.state === "active" || hasPendingApprovals)
-    )
-  ) {
-    continue;
-  }
-  try {
-    await bridge.subscribeDirectory(
-      board.repo.worktree ?? board.repo.directory
-    );
-  } catch (error) {
-    logger.warn("worktree-engine-restore-subscription-failed", {
-      boardId: board.boardId,
-      errorName: error instanceof Error ? error.name : "unknown",
-    });
-  }
-}
+await recoverBoardSessions({ bridge, logger, workspaceStore });
 
 let localEntry: ReturnType<typeof startLocalEntry> | null = null;
 try {
