@@ -4,9 +4,9 @@ import { copyFileSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveDbPath } from "./database/connection";
-import { restoreDatabaseFile } from "./database/restore";
 import { ChorusDatabase } from "./db";
 import { WorkspaceStore } from "./store";
+import { restoreDatabaseFile } from "./testing/restore-database-file";
 
 const dirs: string[] = [];
 

@@ -4,8 +4,8 @@ import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HEAD_SEQ_KEY, resolveDbPath } from "./database/connection";
-import { restoreDatabaseFile } from "./database/restore";
 import { ChorusDatabase } from "./db";
+import { restoreDatabaseFile } from "./testing/restore-database-file";
 
 const dirs: string[] = [];
 const databases: ChorusDatabase[] = [];

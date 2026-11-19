@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { chmodSync, copyFileSync, mkdirSync, rmSync } from "node:fs";
-import { resolveDbPath } from "./connection";
+import { resolveDbPath } from "../database/connection";
 
 export function restoreDatabaseFile(
   dataDir: string,
