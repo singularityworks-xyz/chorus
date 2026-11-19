@@ -20,10 +20,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { DeviceAccessPanel } from "@/features/auth/device-access-panel";
-import {
-  ProviderSettingsPanel,
-  useProviderSettings,
-} from "@/features/settings/provider-settings-panel";
+import { ProviderSettingsPanel } from "@/features/settings/provider-settings/provider-settings-panel";
+import { useProviderSettings } from "@/features/settings/provider-settings/use-provider-settings";
 import { isWorkspaceSessionLive } from "@/features/workspace/session-status";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 import { useVoiceConfig } from "@/hooks/use-voice-config";
