@@ -4,7 +4,6 @@ import { constants as fsConstants } from "node:fs";
 import { access, copyFile, readFile, rename, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
-  type BoardSeed,
   type ModelSelection,
   type WorkspaceBoard,
   type WorkspaceEvent,
@@ -40,8 +39,11 @@ import {
   WorkspaceAgentEventProcessor,
 } from "./store/agent-events";
 import {
+  WorkspaceMutationProcessor,
+  worktreeCleanupKey,
+} from "./store/mutations";
+import {
   boardIdOf,
-  createBoardFromSeed,
   diffSessionEvent,
   EMPTY_PREFERENCES,
   projectWorkspaceEvent,
@@ -105,23 +107,6 @@ export interface WorktreeProvisioner {
   removeWorktree?(repoDirectory: string, boardId: string): Promise<void>;
 }
 
-const WORKTREE_CLEANUP_PREFIX = "worktree-cleanup:v1:";
-const WORKTREE_PROVISION_PREFIX = "worktree-provision:v1:";
-const worktreeCleanupSchema = z.object({
-  boardId: z.string().min(1),
-  createdAt: z.number().int().nonnegative(),
-  repoDirectory: z.string().min(1),
-});
-
-type WorktreeCleanup = z.infer<typeof worktreeCleanupSchema>;
-
-interface ProducedMutation {
-  boardId: string | null;
-  cleanup?: WorktreeCleanup;
-  events: WorkspaceEvent[];
-  metaChanges?: MetaChange[];
-}
-
 /** Owns workspace state, durable event writes, replay, and commit ordering. */
 export class WorkspaceStore {
   readonly workspaceId: string;
@@ -130,7 +115,7 @@ export class WorkspaceStore {
   readonly #options: Required<RetentionOptions>;
   readonly #queue: { promise: Promise<void> } = { promise: Promise.resolve() };
   readonly #agentEvents: WorkspaceAgentEventProcessor<StoreCommit>;
-  readonly #worktreeProvisioner: WorktreeProvisioner | undefined;
+  readonly #mutations: WorkspaceMutationProcessor;
   readonly #repositoryRegistry: RepositoryRegistry | undefined;
   readonly #restorePersistedRepositoryRoots: boolean;
 
@@ -157,11 +142,16 @@ export class WorkspaceStore {
       restorePersistedRepositoryRoots?: boolean;
     } = {}
   ) {
-    this.#worktreeProvisioner = options.worktreeProvisioner;
     this.#repositoryRegistry = options.repositoryRegistry;
     this.#restorePersistedRepositoryRoots =
       options.restorePersistedRepositoryRoots !== false;
     this.#db = new ChorusDatabase(dataDir);
+    this.#mutations = new WorkspaceMutationProcessor({
+      database: this.#db,
+      getSnapshot: () => this.#snapshot,
+      repositoryRegistry: this.#repositoryRegistry,
+      worktreeProvisioner: options.worktreeProvisioner,
+    });
     this.#agentEvents = new WorkspaceAgentEventProcessor<StoreCommit>({
       commit: (events, boardId, receipts) =>
         this.#commit(events, boardId, null, [], receipts),
@@ -235,7 +225,7 @@ export class WorkspaceStore {
         replayed: tail.length,
         headSeq: this.#db.headSeq(),
       });
-      await this.#reconcileWorktreeIntents();
+      await this.#mutations.reconcileWorktreeIntents();
       await this.#migrateLegacyGlobalModelSelection();
       return;
     }
@@ -255,7 +245,7 @@ export class WorkspaceStore {
     if (imported && legacySnapshotPath) {
       await this.#parkLegacySnapshot(legacySnapshotPath);
     }
-    await this.#reconcileWorktreeIntents();
+    await this.#mutations.reconcileWorktreeIntents();
     await this.#migrateLegacyGlobalModelSelection();
   }
 
@@ -634,7 +624,7 @@ export class WorkspaceStore {
     }
 
     const now = Date.now();
-    const produced = await this.#mutationToEvents(mutation, now);
+    const produced = await this.#mutations.produce(mutation, now);
     if (!produced) {
       return null;
     }
@@ -647,7 +637,7 @@ export class WorkspaceStore {
     const metaChanges = [...(produced.metaChanges ?? [])];
     if (produced.cleanup) {
       metaChanges.push({
-        key: `${WORKTREE_CLEANUP_PREFIX}${produced.cleanup.boardId}`,
+        key: worktreeCleanupKey(produced.cleanup.boardId),
         value: JSON.stringify(produced.cleanup),
       });
     }
@@ -661,32 +651,14 @@ export class WorkspaceStore {
         metaChanges
       );
     } catch (error) {
-      await this.#compensateProvisionedWorktree(produced.events);
+      await this.#mutations.compensateProvisionedBoard(produced.events);
       throw error;
     }
 
     if (produced.cleanup) {
-      await this.#finishWorktreeCleanup(
-        produced.cleanup,
-        `${WORKTREE_CLEANUP_PREFIX}${produced.cleanup.boardId}`
-      );
+      await this.#mutations.finishCommittedCleanup(produced.cleanup);
     }
     return commit;
-  }
-
-  async #compensateProvisionedWorktree(
-    events: WorkspaceEvent[]
-  ): Promise<void> {
-    const created = events.find((event) => event.type === "board.created");
-    if (created?.type !== "board.created") {
-      return;
-    }
-    const key = `${WORKTREE_PROVISION_PREFIX}${created.board.boardId}`;
-    const rawIntent = this.#db.getMeta(key);
-    const intent = rawIntent ? this.#parseWorktreeIntent(rawIntent) : null;
-    if (intent) {
-      await this.#finishWorktreeCleanup(intent, key);
-    }
   }
 
   /** Applies one normalized provider event to the shared workspace log. */
@@ -878,372 +850,6 @@ export class WorkspaceStore {
     };
   }
 
-  #boardExists(boardId: string): boolean {
-    return this.#snapshot.boards.some((board) => board.boardId === boardId);
-  }
-
-  /**
-   * Translates one client mutation into exactly one event (plan Phase 1, task
-   * 5). The table is `MUTATION_EVENT_MAP` in `@chorus/contracts`; this is the
-   * store's half of that contract.
-   *
-   * `board.create` is the only case needing server-side generation — the board
-   * id and layout position — so the event carries the whole constructed board
-   * and replay stays a pure projection rather than re-running a generator.
-   */
-  /**
-   * Gives a new board its own worktree when the repo is already spoken for.
-   *
-   * Runs inside the serial queue so the create is serialized against every other
-   * mutation, and inside the board-create path so a failure aborts the whole
-   * mutation rather than producing a second event and tripping the
-   * 1-mutation-to-1-event assertion in `applyMutation`.
-   */
-  /**
-   * Removes a board's worktree, if it had one of its own.
-   *
-   * A board on the repo's primary checkout has `worktree === directory`, and
-   * removing that would delete the user's actual repository.
-   */
-  async #finishWorktreeCleanup(
-    intent: WorktreeCleanup,
-    intentKey: string
-  ): Promise<void> {
-    const provisioner = this.#worktreeProvisioner;
-    if (!provisioner?.removeWorktree) {
-      logger.warn("worktree-cleanup-unavailable", {
-        boardId: intent.boardId,
-      });
-      return;
-    }
-
-    try {
-      await provisioner.removeWorktree(intent.repoDirectory, intent.boardId);
-      this.#db.deleteMeta(intentKey);
-      logger.info("worktree-cleanup-complete", {
-        boardId: intent.boardId,
-      });
-    } catch (error) {
-      logger.warn("worktree-cleanup-pending", {
-        boardId: intent.boardId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  #parseWorktreeIntent(raw: string): WorktreeCleanup | null {
-    const parsed = worktreeCleanupSchema.safeParse(JSON.parse(raw));
-    return parsed.success ? parsed.data : null;
-  }
-
-  async #reconcileWorktreeIntents(): Promise<void> {
-    const snapshotBoardIds = new Set(
-      this.#snapshot.boards.map((board) => board.boardId)
-    );
-    const records = [
-      ...this.#db.entriesWithPrefix(WORKTREE_CLEANUP_PREFIX),
-      ...this.#db.entriesWithPrefix(WORKTREE_PROVISION_PREFIX),
-    ];
-
-    for (const [key, raw] of records) {
-      let intent: WorktreeCleanup | null;
-      try {
-        intent = this.#parseWorktreeIntent(raw);
-      } catch {
-        intent = null;
-      }
-      if (!intent) {
-        logger.error("worktree-intent-invalid", undefined, { key });
-        continue;
-      }
-      if (snapshotBoardIds.has(intent.boardId)) {
-        this.#db.deleteMeta(key);
-        continue;
-      }
-      await this.#finishWorktreeCleanup(intent, key);
-    }
-  }
-
-  async #createBoard(
-    seed: BoardSeed
-  ): Promise<{ board: WorkspaceBoard; metaChanges?: MetaChange[] }> {
-    const registry = this.#repositoryRegistry;
-    const directory = registry
-      ? await registry.validateCandidate(seed.repo.directory)
-      : seed.repo.directory;
-    const trustedSeed = registry
-      ? {
-          ...seed,
-          repo: {
-            branch: seed.repo.branch,
-            directory,
-            projectId: seed.repo.projectId,
-            projectName: seed.repo.projectName,
-            sandboxes: [],
-            worktree: directory,
-          },
-        }
-      : seed;
-    const board = createBoardFromSeed(
-      trustedSeed,
-      this.#snapshot.boards.length
-    );
-    const provisioner = this.#worktreeProvisioner;
-    if (
-      !provisioner?.needsWorktree(this.#snapshot.boards, board.repo.directory)
-    ) {
-      return { board };
-    }
-
-    const intent: WorktreeCleanup = {
-      boardId: board.boardId,
-      createdAt: Date.now(),
-      repoDirectory: board.repo.directory,
-    };
-    const intentKey = `${WORKTREE_PROVISION_PREFIX}${board.boardId}`;
-    this.#db.setMeta(intentKey, JSON.stringify(intent));
-    try {
-      const worktree = await provisioner.ensureWorktree(
-        board.repo.directory,
-        board.boardId
-      );
-      return {
-        board: { ...board, repo: { ...board.repo, worktree } },
-        metaChanges: [{ key: intentKey, value: null }],
-      };
-    } catch (error) {
-      await this.#finishWorktreeCleanup(intent, intentKey);
-      throw error;
-    }
-  }
-
-  #existingBoardMutation(
-    boardId: string,
-    event: WorkspaceEvent
-  ): ProducedMutation | null {
-    if (!this.#boardExists(boardId)) {
-      return null;
-    }
-    return { boardId, events: [event] };
-  }
-
-  async #mutationToEvents(
-    mutation: WorkspaceMutation,
-    now: number
-  ): Promise<ProducedMutation | null> {
-    switch (mutation.type) {
-      case "board.create": {
-        const result = await this.#createBoard(mutation.payload.seed);
-        const created = result.board;
-
-        return {
-          boardId: created.boardId,
-          metaChanges: result.metaChanges,
-          events: [
-            {
-              type: "board.created",
-              boardId: created.boardId,
-              board: created,
-              ts: now,
-            },
-          ],
-        };
-      }
-
-      case "board.remove": {
-        const removed = this.getBoard(mutation.payload.boardId);
-        if (!removed) {
-          return null;
-        }
-
-        const provisioner = this.#worktreeProvisioner;
-        const hasOwnedWorktree =
-          removed.repo.worktree !== removed.repo.directory &&
-          Boolean(provisioner?.removeWorktree);
-        if (hasOwnedWorktree) {
-          if (this.#repositoryRegistry) {
-            await this.#repositoryRegistry.validateCandidate(
-              removed.repo.directory
-            );
-            await this.#repositoryRegistry.validateAuthorizedCheckout(
-              removed.repo.worktree ?? removed.repo.directory
-            );
-          }
-          await provisioner?.assertRemovable?.(
-            removed.repo.directory,
-            removed.boardId
-          );
-        }
-
-        return {
-          boardId: mutation.payload.boardId,
-          ...(hasOwnedWorktree
-            ? {
-                cleanup: {
-                  boardId: removed.boardId,
-                  createdAt: now,
-                  repoDirectory: removed.repo.directory,
-                },
-              }
-            : {}),
-          events: [
-            {
-              type: "board.removed",
-              boardId: mutation.payload.boardId,
-              ts: now,
-            },
-          ],
-        };
-      }
-
-      case "board.select":
-        return {
-          boardId: mutation.payload.boardId,
-          events: [
-            {
-              type: "board.selected",
-              boardId: mutation.payload.boardId,
-              ts: now,
-            },
-          ],
-        };
-
-      case "board.move":
-        return this.#existingBoardMutation(mutation.payload.boardId, {
-          type: "board.moved",
-          boardId: mutation.payload.boardId,
-          ts: now,
-          position: mutation.payload.position,
-        });
-
-      case "board.task.reorder":
-        return this.#existingBoardMutation(mutation.payload.boardId, {
-          type: "card.reordered",
-          boardId: mutation.payload.boardId,
-          ts: now,
-          taskId: mutation.payload.taskId,
-          column: mutation.payload.column,
-          beforeTaskId: mutation.payload.beforeTaskId,
-        });
-
-      case "board.session.patch":
-        return this.#existingBoardMutation(mutation.payload.boardId, {
-          type: "board.session_patched",
-          boardId: mutation.payload.boardId,
-          ts: now,
-          session: mutation.payload.session,
-        });
-
-      case "board.model.set":
-        return this.#existingBoardMutation(mutation.payload.boardId, {
-          type: "board.model_set",
-          boardId: mutation.payload.boardId,
-          ts: now,
-          model: mutation.payload.model,
-        });
-
-      case "board.review_mode.set":
-        return this.#existingBoardMutation(mutation.payload.boardId, {
-          type: "board.review_mode_set",
-          boardId: mutation.payload.boardId,
-          ts: now,
-          reviewMode: mutation.payload.reviewMode,
-        });
-
-      case "board.task.plan.update":
-        return this.#existingBoardMutation(mutation.payload.boardId, {
-          type: "board.task_plan_updated",
-          boardId: mutation.payload.boardId,
-          ts: now,
-          taskId: mutation.payload.taskId,
-          plan: mutation.payload.plan,
-          questions: mutation.payload.questions,
-        });
-
-      case "preference.recently_used_models.add":
-        return {
-          boardId: null,
-          events: [
-            {
-              type: "preference.recent_model_added",
-              ts: now,
-              model: mutation.payload.model,
-            },
-          ],
-        };
-
-      case "preference.default_model.set":
-        return {
-          boardId: null,
-          events: [
-            {
-              type: "preference.default_model_set",
-              ts: now,
-              model: mutation.payload.model,
-            },
-          ],
-        };
-
-      case "preference.dismiss_composer_hint":
-        return {
-          boardId: null,
-          events: [{ type: "preference.composer_hint_dismissed", ts: now }],
-        };
-
-      // Two mutations intentionally converge on one event: `set_voice` and
-      // `speech_voice.set` are the same intent, and the pre-Phase-2 switch only
-      // handled the latter — sending the former threw "Unsupported workspace
-      // mutation type".
-      case "preference.speech_voice.set":
-        return {
-          boardId: null,
-          events: [
-            {
-              type: "preference.speech_voice_set",
-              ts: now,
-              voiceId: mutation.payload.voiceId,
-            },
-          ],
-        };
-
-      case "preference.set_voice":
-        return {
-          boardId: null,
-          events: [
-            {
-              type: "preference.speech_voice_set",
-              ts: now,
-              voiceId: mutation.payload.voice,
-            },
-          ],
-        };
-
-      case "preference.board_view_mode.set":
-        return {
-          boardId: null,
-          events: [
-            {
-              type: "preference.board_view_mode_set",
-              ts: now,
-              mode: mutation.payload.mode,
-            },
-          ],
-        };
-
-      default:
-        throw new Error(
-          `unhandled workspace mutation type: ${String(
-            (mutation as { type: string }).type
-          )}`
-        );
-    }
-  }
-
-  /**
-   * The single serialization point. `this.#queue` is replaced with a promise
-   * that never rejects, so one failed write cannot poison every later task —
-   * each caller still observes its own rejection through the returned promise.
-   */
   #enqueue<T>(work: () => Promise<T>): Promise<T> {
     if (this.#closing) {
       return Promise.reject(new Error("workspace store is closing or closed"));
