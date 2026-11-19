@@ -667,10 +667,7 @@ export async function startPhase6Harness({
       .use(
         createWsHandler({
           sessionRegistry,
-          boardTasks,
-          bridge: engineBridge,
           hub: workspaceHub,
-          workspaceStore: workspace,
           token,
           ticketOptions,
         })

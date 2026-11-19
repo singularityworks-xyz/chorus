@@ -579,10 +579,7 @@ const securedApp = new Elysia()
   .use(
     createWsHandler({
       sessionRegistry,
-      bridge,
-      boardTasks,
       hub,
-      workspaceStore,
       ticketOptions,
       token,
     })

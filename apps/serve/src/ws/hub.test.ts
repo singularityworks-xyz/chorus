@@ -12,6 +12,7 @@ import {
   MAX_CONSECUTIVE_DROPS,
   PONG_TIMEOUT_MS,
   WorkspaceHub,
+  WS_CONTROL_LIMIT_PER_MINUTE,
 } from "./hub";
 
 const dirs: string[] = [];
@@ -565,6 +566,25 @@ describe("malformed input", () => {
     hub.close();
   });
 
+  test("task commands are not accepted on the event socket", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store);
+    const socket = makeSocket();
+    await connect(hub, socket);
+    socket.messages.length = 0;
+
+    await hub.handleRawMessage(
+      socket,
+      JSON.stringify({ payload: {}, type: "task.queue" })
+    );
+
+    expect(socket.messages).toEqual([
+      { message: "unsupported message type: task.queue", type: "error" },
+    ]);
+    hub.close();
+  });
+
   test("messages from an unregistered socket are ignored", async () => {
     const store = makeStore();
     await store.load();
@@ -581,7 +601,7 @@ describe("malformed input", () => {
   });
 });
 
-describe("command rate limit", () => {
+describe("control rate limit", () => {
   test("exceeding the per-minute cap closes the socket with 4429", async () => {
     const store = makeStore();
     await store.load();
@@ -589,7 +609,7 @@ describe("command rate limit", () => {
     const socket = makeSocket();
     hub.register(socket);
 
-    for (let index = 0; index < 61; index += 1) {
+    for (let index = 0; index <= WS_CONTROL_LIMIT_PER_MINUTE; index += 1) {
       await hub.handleRawMessage(
         socket,
         JSON.stringify({ since: 0, type: "hello" })
@@ -598,7 +618,7 @@ describe("command rate limit", () => {
 
     expect(socket.closeCalls.at(-1)?.code).toBe(4429);
     expect(hub.clientCount()).toBe(0);
-    expect(hub.stats().dropReasons["command-rate-limit"]).toBe(1);
+    expect(hub.stats().dropReasons["control-rate-limit"]).toBe(1);
 
     hub.close();
   });
@@ -1408,10 +1428,10 @@ describe("coalescing correctness", () => {
   });
 });
 
-describe("telemetry and liveness are not commands", () => {
+describe("telemetry and liveness rate limits", () => {
   test("a burst of viewport frames does not close the socket", async () => {
     // A one-second canvas drag produces well over 60 frames. Charging those
-    // against the command budget hard-closed a perfectly healthy connection
+    // against the control budget hard-closed a healthy connection
     // with 4429.
     const store = makeStore();
     await store.load();
@@ -1442,7 +1462,7 @@ describe("telemetry and liveness are not commands", () => {
     hub.close();
   });
 
-  test("pong is never charged against the command budget", async () => {
+  test("pong is never charged against the control budget", async () => {
     // A client pinging every second for a minute was previously disconnected at
     // 60 s, which is exactly how long a healthy idle session lasts.
     const store = makeStore();

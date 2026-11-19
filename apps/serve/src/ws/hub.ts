@@ -59,8 +59,8 @@ export const HIGH_WATER_MARK = 262_144;
 /** Coalescing bucket for workspace-scoped (non-board) events. */
 const WORKSPACE_SCOPE_KEY = "__workspace__";
 
-/** Commands per client per minute before the socket is dropped. */
-export const WS_COMMAND_LIMIT_PER_MINUTE = 60;
+/** Control frames per client per minute before the socket is dropped. */
+export const WS_CONTROL_LIMIT_PER_MINUTE = 60;
 
 /**
  * Positive sends needed to clear critical-only on transports with no buffer
@@ -87,10 +87,10 @@ export const MAX_COALESCE_BUFFER = 2000;
  */
 export const MAX_CONSECUTIVE_DROPS = 5;
 
-/** Viewport frames allowed per minute, exempt from the command budget. */
+/** Viewport frames allowed per minute. */
 export const MAX_TELEMETRY_PER_MINUTE = 600;
 
-/** Inbound frames that are liveness or telemetry, not commands. */
+/** Frames exempt from the control-frame budget. */
 const BUDGET_EXEMPT_TYPES = new Set(["pong", "viewport.sync"]);
 
 export const PING_INTERVAL_MS = 30_000;
@@ -275,9 +275,9 @@ interface Client {
   boards: Set<string> | null;
   /** Consecutive positive sends; recovery needs this to build up. */
   cleanSends: number;
-  commandsThisMinute: number;
-  commandWindowStart: number;
   consecutiveDrops: number;
+  controlMessagesThisMinute: number;
+  controlWindowStart: number;
   criticalOnly: boolean;
   /** Signed device identity verified before the socket was registered. */
   deviceId?: string;
@@ -375,11 +375,11 @@ export class WorkspaceHub {
       backpressuredFrames: 0,
       boards: null,
       cleanSends: 0,
-      commandsThisMinute: 0,
+      controlMessagesThisMinute: 0,
       consecutiveDrops: 0,
       droppedFrames: 0,
       ...(deviceId ? { deviceId } : {}),
-      commandWindowStart: this.#now(),
+      controlWindowStart: this.#now(),
       telemetryThisMinute: 0,
       telemetryWindowStart: this.#now(),
       criticalOnly: false,
@@ -491,19 +491,15 @@ export class WorkspaceHub {
       return;
     }
 
-    // Telemetry and liveness are not commands. Charging them meant one
-    // second-long canvas drag (60+ viewport.sync frames) hard-closed the socket
-    // with 4429, and a client pinging on a 1 s timer was dropped at 60 s.
+    // High-frequency viewport updates and heartbeat replies have separate limits.
     if (
       !(
         BUDGET_EXEMPT_TYPES.has(message.type) ||
-        this.#consumeCommandBudget(client)
+        this.#consumeControlBudget(client)
       )
     ) {
-      // Spec §6: cap per-client command rate. Dropping the socket is the point;
-      // a silent throttle would just let a flood continue.
-      client.socket.close?.(WS_CLOSE_RATE_LIMITED, "command rate exceeded");
-      this.#drop(client, "command-rate-limit");
+      client.socket.close?.(WS_CLOSE_RATE_LIMITED, "control rate exceeded");
+      this.#drop(client, "control-rate-limit");
       return;
     }
 
@@ -582,8 +578,7 @@ export class WorkspaceHub {
       }
 
       default:
-        // Command types (task.queue, task.approve, ...) are handled by the
-        // legacy command handler; the hub only relays state.
+        this.#sendError(socket, `unsupported message type: ${type}`);
         return;
     }
   }
@@ -775,25 +770,6 @@ export class WorkspaceHub {
     }, this.#coalesceMs);
     // Never hold the process open for a coalescing window.
     this.#flushTimer.unref?.();
-  }
-
-  /**
-   * Sends a command reply to one client through the accounted path.
-   *
-   * The hub is supposed to be the only thing that writes to a client socket. A
-   * reply written directly would never mark a congested client, never count
-   * toward backpressure, and would keep flowing to a peer too slow to drain it.
-   *
-   * Returns false when the client is gone, so callers do not pretend a reply was
-   * delivered.
-   */
-  reply(socket: HubSocket, message: unknown): boolean {
-    const client = this.#find(socket);
-    if (!client) {
-      return false;
-    }
-    this.#send(client, message);
-    return true;
   }
 
   /** Flushes every buffered board. Exposed so tests need not wait on timers. */
@@ -1070,14 +1046,14 @@ export class WorkspaceHub {
     return client.telemetryThisMinute <= MAX_TELEMETRY_PER_MINUTE;
   }
 
-  #consumeCommandBudget(client: Client): boolean {
+  #consumeControlBudget(client: Client): boolean {
     const now = this.#now();
-    if (now - client.commandWindowStart >= 60_000) {
-      client.commandWindowStart = now;
-      client.commandsThisMinute = 0;
+    if (now - client.controlWindowStart >= 60_000) {
+      client.controlWindowStart = now;
+      client.controlMessagesThisMinute = 0;
     }
-    client.commandsThisMinute += 1;
-    return client.commandsThisMinute <= WS_COMMAND_LIMIT_PER_MINUTE;
+    client.controlMessagesThisMinute += 1;
+    return client.controlMessagesThisMinute <= WS_CONTROL_LIMIT_PER_MINUTE;
   }
 
   /**
