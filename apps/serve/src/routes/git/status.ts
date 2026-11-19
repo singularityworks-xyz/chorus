@@ -1,5 +1,5 @@
 import { Elysia, t } from "elysia";
-import { getGitStatus } from "../../snapshot";
+import { getGitStatus } from "../../snapshot/status";
 import {
   type HttpRouteDependencies,
   resolveBoardDirectory,

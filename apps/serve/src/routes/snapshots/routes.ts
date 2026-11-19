@@ -1,5 +1,5 @@
 import { Elysia, t } from "elysia";
-import { getDiff, restore, track } from "../../snapshot";
+import { getDiff, restore, track } from "../../snapshot/operations";
 import {
   type HttpRouteDependencies,
   resolveBoardDirectory,

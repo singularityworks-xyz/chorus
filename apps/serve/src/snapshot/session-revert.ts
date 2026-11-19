@@ -1,5 +1,5 @@
 import { createLogger } from "@chorus/logger";
-import { getDiff, restore, track } from "./index";
+import { getDiff, restore, track } from "./operations";
 
 const logger = createLogger(
   { env: process.env.NODE_ENV === "production" ? "production" : "development" },
