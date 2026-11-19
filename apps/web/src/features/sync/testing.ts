@@ -3,15 +3,8 @@ import type {
   VersionedSnapshot,
   WorkspaceEvent,
 } from "@chorus/contracts";
-import type { ChorusSyncSocket } from "./chorus-sync";
-
-/**
- * Test doubles for the sync layer.
- *
- * The point of keeping `ChorusSync` framework-free is that its whole lifecycle —
- * handshake, replay, gap detection, single-use reconnect, auth expiry — can be
- * driven here without a DOM, a real socket, or a real timer.
- */
+import type { SequenceStorage } from "./snapshot-storage";
+import type { ChorusSyncSocket } from "./types";
 
 export class FakeSocket implements ChorusSyncSocket {
   static instances: FakeSocket[] = [];
@@ -19,7 +12,7 @@ export class FakeSocket implements ChorusSyncSocket {
   readonly url: string;
   closed = false;
   onclose: ((event: { code: number; reason?: string }) => void) | null = null;
-  onerror: ((event: unknown) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onopen: (() => void) | null = null;
   sent: string[] = [];
@@ -53,7 +46,6 @@ export class FakeSocket implements ChorusSyncSocket {
     return this.sent.map((raw) => (JSON.parse(raw) as { type: string }).type);
   }
 
-  /** Delivers a frame as the server would. */
   emit(payload: unknown): void {
     this.onmessage?.({
       data: JSON.stringify(payload),
@@ -69,8 +61,7 @@ export class FakeSocket implements ChorusSyncSocket {
   }
 }
 
-/** In-memory `Storage`. */
-export class FakeStorage {
+export class FakeStorage implements SequenceStorage {
   readonly map = new Map<string, string>();
 
   getItem(key: string): string | null {
@@ -86,8 +77,7 @@ export class FakeStorage {
   }
 }
 
-/** Storage that throws on every operation, like Safari private mode. */
-export class HostileStorage {
+export class HostileStorage implements SequenceStorage {
   getItem(): string | null {
     throw new DOMException("denied", "SecurityError");
   }
@@ -101,7 +91,6 @@ export class HostileStorage {
   }
 }
 
-/** Captures scheduled callbacks so reconnect timing is deterministic. */
 export class FakeScheduler {
   readonly pending: { delay: number; fn: () => void; id: number }[] = [];
   #nextId = 1;
@@ -114,7 +103,10 @@ export class FakeScheduler {
   };
 
   cancel = (handle: unknown): void => {
-    const id = handle as number;
+    if (typeof handle !== "number") {
+      return;
+    }
+    const id = handle;
     const index = this.pending.findIndex((entry) => entry.id === id);
     if (index >= 0) {
       this.pending.splice(index, 1);
@@ -125,7 +117,6 @@ export class FakeScheduler {
     return this.pending.map((entry) => entry.delay);
   }
 
-  /** Runs the oldest pending callback, as a timer would. */
   flushOne(): void {
     const entry = this.pending.shift();
     entry?.fn();
@@ -156,13 +147,6 @@ export function snapshotFixture(
   };
 }
 
-/**
- * A generic workspace-scoped frame.
- *
- * `preference.composer_hint_dismissed` is workspace-scoped, so its `boardId` is
- * legitimately `null` and the envelope's `boardIdOfEvent` superRefine is
- * satisfied. A board-scoped event would need a real board id.
- */
 export function eventFrame(
   fromSeq: number,
   seq: number,

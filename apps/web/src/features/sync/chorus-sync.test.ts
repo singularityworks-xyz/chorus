@@ -1,15 +1,12 @@
 import { beforeEach, describe, expect, test } from "bun:test";
+import { WS_CLOSE_UNAUTHORIZED } from "@chorus/contracts";
+import { ChorusSync } from "./chorus-sync";
 import {
-  ChorusSync,
-  type ChorusSyncOptions,
-  WS_CLOSE_UNAUTHORIZED,
-} from "./chorus-sync";
-import {
-  LAST_SEQ_KEY,
+  LEGACY_LAST_SEQ_KEY,
   readPersistedSnapshot,
   SNAPSHOT_KEY,
   writePersistedSnapshot,
-} from "./last-seq";
+} from "./snapshot-storage";
 import { SocketAuthenticationExpiredError } from "./socket-credentials";
 import {
   approvalEvent,
@@ -20,6 +17,7 @@ import {
   HostileStorage,
   snapshotFixture,
 } from "./testing";
+import type { ChorusSyncOptions } from "./types";
 
 interface Harness {
   authExpiredCalls: () => number;
@@ -38,25 +36,18 @@ function makeSync(
   overrides?: Partial<ChorusSyncOptions>
 ): Harness {
   const scheduler = new FakeScheduler();
-  const harness: Harness = {
-    authExpiredCalls: () => 0,
-    events: [],
-    scheduler,
-    snapshots: [],
-    storage: storage === undefined ? new FakeStorage() : storage,
-    sync: null as unknown as ChorusSync,
-  };
-
+  const resolvedStorage = storage === undefined ? new FakeStorage() : storage;
+  const events: unknown[] = [];
+  const snapshots: { seq: number; snapshot: unknown }[] = [];
   let authExpired = 0;
 
-  harness.sync = new ChorusSync(
+  const sync = new ChorusSync(
     {
       cancel: scheduler.cancel,
       createSocket: (url) => new FakeSocket(url),
-      now: () => 1_700_000_000_000,
       random: () => 1,
       schedule: scheduler.schedule,
-      storage: harness.storage as never,
+      storage: resolvedStorage,
       url: "ws://localhost:2000/ws",
     },
     {
@@ -64,27 +55,25 @@ function makeSync(
         authExpired += 1;
       },
       onEvent: (frame) => {
-        harness.events.push(frame);
+        events.push(frame);
       },
       onSnapshot: (snapshot, seq) => {
-        harness.snapshots.push({ seq, snapshot });
+        snapshots.push({ seq, snapshot });
       },
-      // Spread last: an override has to win over the recording defaults above,
-      // otherwise a custom `onEvent` is silently discarded.
       ...overrides,
     }
   );
 
-  harness.authExpiredCalls = () => authExpired;
-  return harness;
+  return {
+    authExpiredCalls: () => authExpired,
+    events,
+    scheduler,
+    snapshots,
+    storage: resolvedStorage,
+    sync,
+  };
 }
 
-/**
- * Starts a sync and returns its socket, opened but not yet handshaken.
- *
- * `hello` is sent from `onopen`, not at construction — a socket cannot be
- * written to before it is open — so handshake assertions open first.
- */
 function openSocket(sync: ChorusSync): FakeSocket {
   sync.start();
   const socket = FakeSocket.last;
@@ -92,7 +81,6 @@ function openSocket(sync: ChorusSync): FakeSocket {
   return socket;
 }
 
-/** Boots a sync and walks it to a live state at sequence zero. */
 function liveSocket(sync: ChorusSync): FakeSocket {
   const socket = openSocket(sync);
   socket.emit({
@@ -114,7 +102,7 @@ beforeEach(() => {
   FakeSocket.reset();
 });
 
-describe("handshake and resume (plan P5 task 1)", () => {
+describe("handshake and resume", () => {
   test("start connects and sends hello with since 0 when there is no history", () => {
     const { sync } = makeSync();
     const socket = openSocket(sync);
@@ -142,7 +130,7 @@ describe("handshake and resume (plan P5 task 1)", () => {
         cancel: scheduler.cancel,
         createSocket: (url) => new FakeSocket(url),
         schedule: scheduler.schedule,
-        storage: storage as never,
+        storage,
         url: "ws://localhost:2000/ws",
       },
       {
@@ -153,14 +141,9 @@ describe("handshake and resume (plan P5 task 1)", () => {
     );
 
     const socket = openSocket(sync);
-
-    // The state comes back before any traffic, so a reload does not paint an
-    // empty workspace.
     expect(restored).toHaveLength(1);
     expect(restored[0]?.seq).toBe(412);
     expect(sync.state.snapshot).not.toBeNull();
-
-    // And the reconnect asks only for what it is missing.
     expect(JSON.parse(socket.sent[0] as string)).toEqual({
       since: 412,
       type: "hello",
@@ -220,11 +203,8 @@ describe("handshake and resume (plan P5 task 1)", () => {
   });
 
   test("a cursor without its snapshot forces a snapshot instead of a gap", () => {
-    // The flaw this guards: a reload throws away in-memory state, so resuming
-    // from a cursor with nothing on screen would leave the client permanently
-    // blank. With no restorable snapshot the client must ask for everything.
     const storage = new FakeStorage();
-    storage.setItem(LAST_SEQ_KEY, "412");
+    storage.setItem(LEGACY_LAST_SEQ_KEY, "412");
     const { sync } = makeSync(storage);
 
     const socket = openSocket(sync);
@@ -237,7 +217,7 @@ describe("handshake and resume (plan P5 task 1)", () => {
       FakeSocket.reset();
       const storage = new FakeStorage();
       storage.setItem(SNAPSHOT_KEY, raw);
-      storage.setItem(LAST_SEQ_KEY, "7");
+      storage.setItem(LEGACY_LAST_SEQ_KEY, "7");
       const { sync } = makeSync(storage);
 
       const socket = openSocket(sync);
@@ -248,7 +228,6 @@ describe("handshake and resume (plan P5 task 1)", () => {
   });
 
   test("a persisted snapshot that fails the schema is rejected", () => {
-    // Unvalidated shapes must never reach app state, even from localStorage.
     const storage = new FakeStorage();
     writePersistedSnapshot(storage, { boards: "not-an-array" }, 5);
     const { sync } = makeSync(storage);
@@ -260,8 +239,6 @@ describe("handshake and resume (plan P5 task 1)", () => {
   });
 
   test("start is idempotent, which is what makes Strict Mode safe", () => {
-    // React Strict Mode mounts effects twice in development. A lifecycle wired
-    // straight into useEffect would open, close, and reopen on every mount.
     const { sync } = makeSync();
 
     sync.start();
@@ -316,8 +293,6 @@ describe("handshake and resume (plan P5 task 1)", () => {
   });
 
   test("only one handshake is in flight at a time", () => {
-    // `visibilitychange` and `online` can fire together when a phone wakes. Two
-    // in-flight hellos would replay the same gap twice.
     const { sync } = makeSync();
     const socket = openSocket(sync);
 
@@ -333,14 +308,10 @@ describe("handshake and resume (plan P5 task 1)", () => {
   });
 
   test("an unexplained close on an implicit URL names the missing env var", () => {
-    // Same-origin `/ws` is only valid when serve fronts the built app. When Next
-    // is served directly the handshake 404s, which the browser reports as 1006
-    // with no reason -- and without this the client looks merely "connecting".
     const scheduler = new FakeScheduler();
     const sync = new ChorusSync({
       cancel: scheduler.cancel,
       createSocket: (url) => new FakeSocket(url),
-      now: () => 1_700_000_000_000,
       random: () => 1,
       schedule: scheduler.schedule,
       url: "ws://localhost:3000/ws",
@@ -354,15 +325,11 @@ describe("handshake and resume (plan P5 task 1)", () => {
 
   test("a completed handshake resets the backoff so a later blip starts fast", () => {
     const { scheduler, sync } = makeSync();
-
-    // Five failed attempts back the delay up.
     for (let attempt = 0; attempt < 5; attempt += 1) {
       openSocket(sync);
       FakeSocket.last.remoteClose(1006);
       scheduler.flushOne();
     }
-
-    // One healthy session: open, then `ready`.
     openSocket(sync);
     FakeSocket.last.emit({
       head: 0,
@@ -377,10 +344,6 @@ describe("handshake and resume (plan P5 task 1)", () => {
 
   test("a server that accepts then closes does not reset the backoff", () => {
     const { scheduler, sync } = makeSync();
-
-    // The upgrade succeeds every time, but `ready` never arrives. Resetting on
-    // `open` would draw from [0, 250) forever -- roughly eight connect/close
-    // cycles a second, against a server that is clearly unhealthy.
     const delays: number[] = [];
     for (let attempt = 0; attempt < 6; attempt += 1) {
       openSocket(sync);
@@ -405,9 +368,6 @@ describe("handshake and resume (plan P5 task 1)", () => {
     socket.emit({ data: snapshotFixture(), seq: 0, type: "snapshot" });
 
     socket.sent.length = 0;
-    // A coalesce flush can carry many gapped frames. `resync` draws from the
-    // hub's command budget, so one per frame would trip the rate limit and get
-    // the socket closed with 4429.
     for (const seq of [6, 8, 10, 12]) {
       socket.emit(eventFrame(seq - 1, seq));
     }
@@ -415,8 +375,6 @@ describe("handshake and resume (plan P5 task 1)", () => {
     expect(socket.sentTypes.filter((type) => type === "resync")).toHaveLength(
       1
     );
-
-    // The snapshot clears the latch, so a later gap can ask again.
     socket.sent.length = 0;
     socket.emit({ data: snapshotFixture(), seq: 20, type: "snapshot" });
     socket.emit(eventFrame(22, 22));
@@ -431,7 +389,6 @@ describe("handshake and resume (plan P5 task 1)", () => {
     const sync = new ChorusSync({
       cancel: scheduler.cancel,
       createSocket: (url) => new FakeSocket(url),
-      now: () => 1_700_000_000_000,
       random: () => 1,
       schedule: scheduler.schedule,
       storage,
@@ -444,18 +401,10 @@ describe("handshake and resume (plan P5 task 1)", () => {
       workspaceId: TEST_WORKSPACE_ID,
     });
     socket.emit({ data: snapshotFixture(), seq: 0, type: "snapshot" });
-
-    // Live events advance the applied cursor but not the persisted one, which is
-    // pinned to the last snapshot.
     socket.emit(eventFrame(1, 1));
     socket.emit(eventFrame(2, 2));
     expect(sync.state.lastSeq).toBe(2);
-    expect(storage.getItem(LAST_SEQ_KEY)).toBe("0");
-
-    // A blip. Re-sending `since: 0` would make the hub coalesce the whole gap
-    // into one frame, and a frame like fromSeq=1/seq=2 against an applied cursor
-    // of 2 is contiguous -- but against anything longer it is a gap, so every
-    // ordinary blip would answer itself with a full snapshot.
+    expect(readPersistedSnapshot(storage)?.seq).toBe(0);
     socket.remoteClose(1006);
     scheduler.flushOne();
     FakeSocket.last.open();
@@ -482,9 +431,6 @@ describe("handshake and resume (plan P5 task 1)", () => {
 
     socket.sent.length = 0;
     socket.emit(eventFrame(1, 1));
-
-    // The cursor must not claim to have passed a frame that was never applied,
-    // or gap detection could never report the miss.
     expect(sync.state.lastSeq).toBe(0);
     expect(socket.sentTypes.filter((type) => type === "resync")).toHaveLength(
       1
@@ -508,7 +454,7 @@ describe("applying state", () => {
     expect(sync.state.lastSeq).toBe(7);
     expect(sync.state.status).toBe("live");
     expect(snapshots).toHaveLength(1);
-    expect(storage.getItem(LAST_SEQ_KEY)).toBe("7");
+    expect(readPersistedSnapshot(storage)?.seq).toBe(7);
   });
 
   test("contiguous events advance the cursor and are handed on", () => {
@@ -525,9 +471,6 @@ describe("applying state", () => {
   test("a coalesced frame advances the cursor to the end of its run", () => {
     const { events, sync } = makeSync();
     const socket = liveSocket(sync);
-
-    // The hub folds log rows 1..500 into one frame. Landing on 1 would make the
-    // next reconnect replay 2..500 on top of a transcript that already has them.
     socket.emit(eventFrame(1, 500));
 
     expect(sync.state.lastSeq).toBe(500);
@@ -539,11 +482,9 @@ describe("applying state", () => {
     const socket = liveSocket(sync);
 
     socket.emit(eventFrame(1, 1));
-    // Sequence 2 never arrives and 3 shows up.
     socket.emit(eventFrame(3, 3));
 
     expect(socket.sentTypes).toEqual(["hello", "resync"]);
-    // The frame is not applied: the client cannot know what fell in the hole.
     expect(events).toHaveLength(1);
     expect(sync.state.lastSeq).toBe(1);
     expect(sync.state.lastError).toContain("gap");
@@ -554,7 +495,6 @@ describe("applying state", () => {
     const socket = liveSocket(sync);
 
     socket.emit(eventFrame(1, 1));
-    // A replay overlapping a snapshot must not append the transcript twice.
     socket.emit(eventFrame(1, 1));
 
     expect(events).toHaveLength(1);
@@ -597,8 +537,6 @@ describe("applying state", () => {
 
     expect(sync.state.lastSeq).toBe(0);
     expect(events).toHaveLength(0);
-    // The hub drops a client that misses two pongs; the browser cannot answer
-    // them, so the client answers the server's ping for itself.
     expect(socket.sentTypes).toContain("pong");
   });
 
@@ -617,23 +555,7 @@ describe("storage resilience", () => {
   test("a throwing storage degrades to a snapshot rather than a guess", () => {
     const { sync } = makeSync(new HostileStorage());
     const socket = openSocket(sync);
-
-    // Safari private mode throws on access; the client must not resume from a
-    // guessed sequence.
     expect(JSON.parse(socket.sent[0] as string).since).toBe(0);
-  });
-
-  test("a corrupt persisted value is ignored", () => {
-    for (const raw of ["", "  ", "abc", "NaN", "-1", "1.5", "1e999"]) {
-      FakeSocket.reset();
-      const storage = new FakeStorage();
-      storage.setItem(LAST_SEQ_KEY, raw);
-      const { sync } = makeSync(storage);
-
-      const socket = openSocket(sync);
-
-      expect(JSON.parse(socket.sent[0] as string).since).toBe(0);
-    }
   });
 
   test("applying an event with hostile storage still advances the cursor", () => {
@@ -641,8 +563,6 @@ describe("storage resilience", () => {
     const socket = liveSocket(sync);
 
     socket.emit(eventFrame(1, 1));
-
-    // Failing to persist costs a snapshot on the next refresh, not correctness.
     expect(sync.state.lastSeq).toBe(1);
     expect(sync.state.status).toBe("live");
   });
@@ -657,25 +577,22 @@ describe("storage resilience", () => {
   });
 });
 
-describe("401 / 4401 loop guard (plan P5 task 3)", () => {
+describe("authentication expiry", () => {
   test("close 4401 stops reconnecting and emits AUTH_EXPIRED once", () => {
     const storage = new FakeStorage();
     const { authExpiredCalls, scheduler, sync } = makeSync(storage);
     sync.start();
 
-    storage.setItem(LAST_SEQ_KEY, "99");
+    storage.setItem(LEGACY_LAST_SEQ_KEY, "99");
     FakeSocket.last.remoteClose(WS_CLOSE_UNAUTHORIZED);
 
     expect(authExpiredCalls()).toBe(1);
     expect(sync.state.status).toBe("auth-expired");
-    // The cursor belonged to the session that just died.
-    expect(storage.getItem(LAST_SEQ_KEY)).toBeNull();
+    expect(storage.getItem(LEGACY_LAST_SEQ_KEY)).toBeNull();
     expect(scheduler.pending).toHaveLength(0);
   });
 
   test("a dropped session never schedules a reconnect", () => {
-    // Retrying a dead cookie forever is an infinite loop against the login
-    // endpoint; the plan is explicit that 401 does not resolve without a human.
     const { scheduler, sync } = makeSync();
     sync.start();
     FakeSocket.last.remoteClose(WS_CLOSE_UNAUTHORIZED);
@@ -692,7 +609,6 @@ describe("401 / 4401 loop guard (plan P5 task 3)", () => {
     const { authExpiredCalls, sync } = makeSync();
     sync.start();
     FakeSocket.last.remoteClose(WS_CLOSE_UNAUTHORIZED);
-    // A second failure must not re-notify the UI.
     sync.reportUnauthorized();
     sync.reportUnauthorized();
 
@@ -715,11 +631,11 @@ describe("401 / 4401 loop guard (plan P5 task 3)", () => {
     const storage = new FakeStorage();
     const { sync } = makeSync(storage);
     sync.start();
-    storage.setItem(LAST_SEQ_KEY, "5");
+    storage.setItem(LEGACY_LAST_SEQ_KEY, "5");
 
     sync.reportUnauthorized();
 
-    expect(storage.getItem(LAST_SEQ_KEY)).toBeNull();
+    expect(storage.getItem(LEGACY_LAST_SEQ_KEY)).toBeNull();
     expect(sync.state.status).toBe("auth-expired");
   });
 
@@ -762,9 +678,6 @@ describe("reconnect scheduling", () => {
     expect(scheduler.pending).toHaveLength(1);
 
     sync.stop();
-
-    // Without this, `stop()` would leave a timer that reconnects a socket the
-    // component believes it has torn down.
     expect(scheduler.pending).toHaveLength(0);
   });
 
@@ -783,9 +696,6 @@ describe("reconnect scheduling", () => {
     const socket = FakeSocket.last;
 
     sync.stop();
-
-    // A transport that fires `onclose` synchronously during close must not
-    // schedule a reconnect from inside teardown.
     expect(socket.onclose).toBeNull();
     expect(scheduler.pending).toHaveLength(0);
   });

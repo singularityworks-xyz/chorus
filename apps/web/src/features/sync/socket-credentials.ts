@@ -16,22 +16,12 @@ export type SocketCredentialFetcher = (
 ) => Promise<Response>;
 
 export interface SocketCredentialOptions {
-  /** Enable bootstrap only when both browser and socket point to loopback. */
   allowLocalBootstrap?: boolean;
   fetcher?: SocketCredentialFetcher;
-  /** Installed production hosts use a separate private entry listener. */
   localEntryPort?: number;
-  /** Browser origin, injectable so URL/auth behavior can be tested without DOM. */
   pageOrigin: string;
 }
 
-/**
- * Registers this browser as a device and prepares one socket URL.
- *
- * Same-origin sockets use the HttpOnly cookies directly. Cross-origin sockets
- * receive a fresh, single-use ticket through the authenticated same-origin API
- * proxy, because browsers do not attach these cookies to cross-origin upgrades.
- */
 export async function prepareAuthenticatedSocketUrl(
   baseUrl: string,
   options: SocketCredentialOptions
@@ -86,6 +76,7 @@ async function bootstrapLocalSession(
   socketUrl: URL,
   options: SocketCredentialOptions
 ): Promise<boolean> {
+  // Local session bootstrap is allowed only when both endpoints are loopback.
   if (
     !(
       options.allowLocalBootstrap &&
@@ -115,8 +106,6 @@ async function bootstrapLocalSession(
     }
     throw error;
   });
-  // Existing authenticated sessions still work on unmanaged production hosts
-  // where the optional private listener is absent. Remote browsers never try it.
   if (!response || [403, 404].includes(response.status)) {
     return false;
   }
