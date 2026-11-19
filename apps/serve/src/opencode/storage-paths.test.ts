@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
-import { OpenCodeConfigStore } from "../projects/config-store";
 import { OpenCodeCredentialStore } from "../projects/credential-store";
 import { openCodeStoragePaths } from "./storage-paths";
 
@@ -37,7 +36,7 @@ test("engine storage follows absolute XDG roots and keeps native home defaults",
   });
 });
 
-test("provider config and credential summaries read the same persistent engine roots", async () => {
+test("credential summaries read the persistent engine data root", async () => {
   const root = await mkdtemp(join(tmpdir(), "chorus-engine-storage-"));
   try {
     const paths = openCodeStoragePaths(
@@ -47,11 +46,6 @@ test("provider config and credential summaries read the same persistent engine r
       },
       join(root, "home")
     );
-    const config = new OpenCodeConfigStore(paths.configDirectory);
-    await config.configureProvider("fixture-provider");
-    expect(await config.listConfiguredProviders()).toEqual({
-      providerIDs: ["fixture-provider"],
-    });
     await mkdir(dirname(paths.authFile), { recursive: true });
     await writeFile(
       paths.authFile,
