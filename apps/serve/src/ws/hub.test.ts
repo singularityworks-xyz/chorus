@@ -6,14 +6,14 @@ import type { WorkspaceEvent } from "@chorus/contracts";
 import { MAX_REPLAY_GAP } from "@chorus/contracts";
 import { WorkspaceStore } from "../workspace/store";
 import {
-  decideResume,
   HIGH_WATER_MARK,
-  type HubSocket,
   MAX_CONSECUTIVE_DROPS,
   PONG_TIMEOUT_MS,
   WorkspaceHub,
   WS_CONTROL_LIMIT_PER_MINUTE,
 } from "./hub";
+import { decideResume } from "./hub/resume";
+import type { HubSocket } from "./hub/types";
 
 const dirs: string[] = [];
 const stores: WorkspaceStore[] = [];
@@ -544,6 +544,23 @@ describe("malformed input", () => {
       message: "missing message type",
       type: "error",
     });
+    hub.close();
+  });
+
+  test("non-object JSON messages are rejected without throwing", async () => {
+    const store = makeStore();
+    await store.load();
+    const hub = new WorkspaceHub(store);
+    const socket = makeSocket();
+    hub.register(socket);
+
+    await hub.handleRawMessage(socket, "null");
+    await hub.handleRawMessage(socket, "[]");
+
+    expect(socket.messages).toEqual([
+      { message: "missing message type", type: "error" },
+      { message: "missing message type", type: "error" },
+    ]);
     hub.close();
   });
 

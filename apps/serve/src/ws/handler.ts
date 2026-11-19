@@ -3,7 +3,8 @@ import { Elysia, t } from "elysia";
 import { verifyRequestCredential } from "../auth/guard";
 import type { SessionRegistry } from "../auth/session-registry";
 import type { TicketOptions } from "../auth/ticket";
-import type { HubSocket, WorkspaceHub } from "./hub";
+import type { WorkspaceHub } from "./hub";
+import type { HubSocket } from "./hub/types";
 
 export interface WsHandlerOptions {
   hub: WorkspaceHub;

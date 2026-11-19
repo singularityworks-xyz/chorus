@@ -1,17 +1,14 @@
-// biome-ignore-all lint/suspicious/useAwait: handleRawMessage is async without an await — it is the public inbound contract callers await, kept async so a future store-backed read needs no signature change.
 import {
   boardIdOfEvent,
   clientHelloSchema,
   clientPongSchema,
   isCoalescibleEvent,
-  MAX_REPLAY_GAP,
   resyncRequestSchema,
   sequencedEventSchema,
   serverErrorSchema,
   serverReadySchema,
   snapshotMessageSchema,
   viewportSyncSchema,
-  type WorkspaceEvent,
   WS_CLOSE_RATE_LIMITED,
   WS_CLOSE_UNAUTHORIZED,
 } from "@chorus/contracts";
@@ -20,246 +17,36 @@ import type {
   StoreCommit,
   WorkspaceStore,
 } from "../workspace/store";
+import { bufferOf, mergeKeyFor, mergeRecords } from "./hub/coalescing";
+import { decideResume } from "./hub/resume";
+import type {
+  BufferedRecord,
+  HubClient,
+  HubOptions,
+  HubSocket,
+  HubStats,
+} from "./hub/types";
 
-/** Maximum queued socket data before a client is marked backpressured. */
 export const HIGH_WATER_MARK = 262_144;
 
-/** Coalescing bucket for workspace-scoped (non-board) events. */
-const WORKSPACE_SCOPE_KEY = "__workspace__";
-
-/** Control frames per client per minute before the socket is dropped. */
 export const WS_CONTROL_LIMIT_PER_MINUTE = 60;
 
-/** Successful sends required to recover when buffer depth is unavailable. */
 export const RECOVERY_SENDS = 2;
 
-/** Maximum number of records buffered for one coalescing window. */
 export const MAX_COALESCE_BUFFER = 2000;
 
-/** Consecutive discarded frames allowed before closing a socket. */
 export const MAX_CONSECUTIVE_DROPS = 5;
 
-/** Viewport frames allowed per minute. */
 export const MAX_TELEMETRY_PER_MINUTE = 600;
 
-/** Frames exempt from the control-frame budget. */
 const BUDGET_EXEMPT_TYPES = new Set(["pong", "viewport.sync"]);
 
 export const PING_INTERVAL_MS = 30_000;
 export const PONG_TIMEOUT_MS = 10_000;
 export const COALESCE_MS = 100;
 
-/** Transport-neutral socket interface used by the hub. */
-export interface HubSocket {
-  close?: (code?: number, reason?: string) => void;
-  /** Pending bytes, when available from the transport. */
-  getBufferedAmount?: () => number;
-  /** Stable connection identifier shared across Elysia callbacks. */
-  id: string;
-  /** Negative means backpressure, zero dropped, positive bytes accepted. */
-  send: (data: string) => unknown;
-}
-
-/** Key used to coalesce records for the same streamed step. */
-function mergeKeyFor(record: BufferedRecord): string {
-  const event = record.event;
-  if (event.type === "step.delta_appended") {
-    return `${record.boardId ?? ""}|delta|${event.taskId}|${event.stepId}`;
-  }
-  if (event.type === "step.upserted") {
-    return `${record.boardId ?? ""}|upsert|${event.taskId}|${event.step.id}`;
-  }
-  return `${record.boardId ?? ""}|${record.fromSeq}`;
-}
-
-/**
- * A record as it sits in the coalescing window, carrying the range of log
- * sequences it now represents.
- *
- * The range is what makes coalescing compatible with resume. Merging folds log
- * rows 6..500 into one frame, and that frame has to tell the client it covers
- * all of them — otherwise the client resumes from the earliest sequence, the
- * server replays 7..500, and the transcript is appended twice.
- */
-interface BufferedRecord {
-  boardId: string | null;
-  event: WorkspaceEvent;
-  /** Lowest log sequence covered. */
-  fromSeq: number;
-  /** Highest log sequence covered; the client's cursor after applying. */
-  toSeq: number;
-}
-
-function bufferOf(record: SequencedRecord): BufferedRecord {
-  return {
-    boardId: record.boardId,
-    event: record.event,
-    fromSeq: record.seq,
-    toSeq: record.seq,
-  };
-}
-
-/**
- * Folds `next` into `target` when they are mergeable, reporting whether the
- * merge happened. Returns false when the pair is not the same unit of work, in
- * which case the caller buffers `next` separately.
- *
- * Builds a new event rather than mutating `target.event`: the record handed to
- * the hub is the same object the store passed to every commit listener, and a
- * committed event that changes after commit is not a safe invariant to rely on.
- */
-function mergeRecords(target: BufferedRecord, next: SequencedRecord): boolean {
-  const a = target.event;
-  const b = next.event;
-
-  // Contiguity is required, not optional.
-  //
-  // A frame declares the sequence range it covers, so merging must not span a
-  // gap. Folding step A's sequences 1 and 3 into one frame would claim 1..3
-  // while sequence 2 belongs to step B: the client's cursor jumps to 3, B's
-  // delta is then dismissed as already-seen, and its content is lost.
-  //
-  // Interleaved streams therefore compress less. The hot path is unaffected: a
-  // token stream for one part produces consecutive sequences for one step, which
-  // merges in full.
-  if (next.seq !== target.toSeq + 1) {
-    return false;
-  }
-
-  if (a.type === "step.delta_appended" && b.type === "step.delta_appended") {
-    if (a.taskId !== b.taskId || a.stepId !== b.stepId) {
-      return false;
-    }
-    target.event = { ...a, delta: `${a.delta}${b.delta}`, ts: b.ts };
-    target.toSeq = next.seq;
-    return true;
-  }
-
-  if (a.type === "step.upserted" && b.type === "step.upserted") {
-    if (a.taskId !== b.taskId || a.step.id !== b.step.id) {
-      return false;
-    }
-    // Latest content wins: the later upsert is the more current view of the step.
-    target.event = { ...a, step: b.step, ts: b.ts };
-    target.toSeq = next.seq;
-    return true;
-  }
-
-  // A delta after an upsert for the same step still belongs to that step's
-  // transcript, but the two message shapes differ, so it flushes separately
-  // rather than being silently reshaped.
-  return false;
-}
-
-/**
- * How to satisfy a resuming client.
- *
- * `pruned` exists because of a gap that is easy to miss: once events are pruned
- * into a snapshot, a client resuming from before that floor can have a *small*
- * gap — inside `MAX_REPLAY_GAP` — and still be missing everything, because the
- * rows no longer exist. Replaying what is left would silently diverge. Deciding
- * this in one pure, tested function is what keeps that from being re-derived
- * (incorrectly) at each call site.
- */
-export type ResumeDecision =
-  | { kind: "replay"; fromSeq: number }
-  | {
-      kind: "snapshot";
-      reason:
-        | "client-ahead"
-        | "gap-too-large"
-        | "initial"
-        | "pruned"
-        | "workspace-changed";
-    }
-  | { kind: "up-to-date" };
-
-export function decideResume(
-  since: number,
-  head: number,
-  replayFloor: number,
-  workspaceMatches = true
-): ResumeDecision {
-  if (!workspaceMatches) {
-    return { kind: "snapshot", reason: "workspace-changed" };
-  }
-
-  if (since > head) {
-    // The client is ahead of the server: a restored database, or a different
-    // one entirely. Replaying nothing would leave it permanently ahead.
-    return { kind: "snapshot", reason: "client-ahead" };
-  }
-
-  if (since === head) {
-    return { kind: "up-to-date" };
-  }
-
-  if (since < replayFloor) {
-    return { kind: "snapshot", reason: "pruned" };
-  }
-
-  if (head - since > MAX_REPLAY_GAP) {
-    return { kind: "snapshot", reason: "gap-too-large" };
-  }
-
-  return { kind: "replay", fromSeq: since };
-}
-
-interface Client {
-  /**
-   * Connection id, matching the socket's. Elysia reuses it across the wrapper
-   * objects it hands to `open`, `message`, and `close`, which is what makes a
-   * registry keyed on it work at all.
-   */
-  /** Frames the transport refused for backpressure (`send()` returned < 0). */
-  backpressuredFrames: number;
-  /** Board filter; `null` means every board (the single-operator mirror). */
-  boards: Set<string> | null;
-  /** Consecutive positive sends; recovery needs this to build up. */
-  cleanSends: number;
-  consecutiveDrops: number;
-  controlMessagesThisMinute: number;
-  controlWindowStart: number;
-  criticalOnly: boolean;
-  /** Signed device identity verified before the socket was registered. */
-  deviceId?: string;
-  /** Frames the transport discarded outright (`send()` returned 0). */
-  droppedFrames: number;
-  id: string;
-  lastPongAt: number;
-  /** Sequences already in this client's buffer. Gaps must be impossible. */
-  lastSeq: number;
-  /** True once `hello` completed — nothing is pushed before that. */
-  ready: boolean;
-  socket: HubSocket;
-  telemetryThisMinute: number;
-  telemetryWindowStart: number;
-}
-
-export interface HubOptions {
-  coalesceMs?: number;
-  isDeviceAllowed?: (deviceId: string) => boolean;
-  now?: () => number;
-  pingIntervalMs?: number;
-  pongTimeoutMs?: number;
-}
-
-export interface HubStats {
-  backpressuredFrames: number;
-  clients: number;
-  coalescerDepth: number;
-  criticalOnlyClients: number;
-  droppedFrames: number;
-  dropReasons: Record<string, number>;
-  headSeq: number;
-}
-
 export class WorkspaceHub {
-  readonly #clients = new Set<Client>();
-
-  /** Same clients as `#clients`, keyed by connection id. Kept adjacent so the two
-   * cannot drift: every removal path must update both. */
-  readonly #clientsById = new Map<string, Client>();
+  readonly #clients = new Map<string, HubClient>();
   readonly #dropReasons = new Map<string, number>();
   readonly #store: WorkspaceStore;
   readonly #now: () => number;
@@ -268,24 +55,11 @@ export class WorkspaceHub {
   readonly #pongTimeoutMs: number;
   readonly #isDeviceAllowed: HubOptions["isDeviceAllowed"];
 
-  /**
-   * Per-board buffers of coalescible events awaiting flush. Holds whole
-   * `SequencedRecord`s, not bare events: a coalesced delta must keep its
-   * sequence, or the client loses track of its own position in the log.
-   */
-  readonly #pending = new Map<string, BufferedRecord[]>();
-
-  /**
-   * Where a record will merge into one already buffered, keyed by the identity
-   * that makes two events the *same* piece of work: a run streaming tokens
-   * arrives as hundreds of deltas for one `stepId`, and sending one frame per
-   * token is exactly what the coalescing window exists to prevent.
-   */
+  readonly #pending: BufferedRecord[] = [];
   readonly #mergeIndex = new Map<string, BufferedRecord>();
   #flushTimer: ReturnType<typeof setTimeout> | null = null;
   #closed = false;
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  #pendingDepth = 0;
 
   constructor(store: WorkspaceStore, options: HubOptions = {}) {
     this.#isDeviceAllowed = options.isDeviceAllowed;
@@ -301,21 +75,14 @@ export class WorkspaceHub {
     return this.#store.workspaceId;
   }
 
-  // ── registry ──────────────────────────────────────────────────────────────
-
-  register(socket: HubSocket, deviceId?: string): Client {
-    // An id can outlive its socket if a connection is replaced in place. Without
-    // this, the new client shadows the old one in the id map while the old stays
-    // in the set — still receiving events and pings into a dead socket, and
-    // unreachable by unregister.
-    const existing = this.#clientsById.get(socket.id);
+  register(socket: HubSocket, deviceId?: string): HubClient {
+    const existing = this.#clients.get(socket.id);
     if (existing) {
       this.#drop(existing, "connection-replaced");
     }
 
-    const client: Client = {
+    const client: HubClient = {
       backpressuredFrames: 0,
-      boards: null,
       cleanSends: 0,
       controlMessagesThisMinute: 0,
       consecutiveDrops: 0,
@@ -325,9 +92,6 @@ export class WorkspaceHub {
       telemetryThisMinute: 0,
       telemetryWindowStart: this.#now(),
       criticalOnly: false,
-      // The socket's connection id, and the only identity. A separate
-      // generated id here silently broke removal, because the id map is keyed
-      // by the socket id and the two never matched.
       id: socket.id,
       lastPongAt: this.#now(),
       lastSeq: 0,
@@ -335,21 +99,19 @@ export class WorkspaceHub {
       socket,
     };
 
-    this.#clients.add(client);
-    this.#clientsById.set(socket.id, client);
+    this.#clients.set(socket.id, client);
     return client;
   }
 
   unregister(socket: HubSocket): void {
-    const client = this.#clientsById.get(socket.id);
+    const client = this.#clients.get(socket.id);
     if (client) {
       this.#drop(client, "socket-closed");
     }
   }
 
-  /** Closes every authenticated mirror for a device during explicit logout. */
   disconnectDevice(deviceId: string): number {
-    const clients = [...this.#clients].filter(
+    const clients = [...this.#clients.values()].filter(
       (client) => client.deviceId === deviceId
     );
     for (const client of clients) {
@@ -366,7 +128,7 @@ export class WorkspaceHub {
   hasReadyConnectionForDevice(deviceId: string): boolean {
     const healthyWithinMs = this.#pingIntervalMs + this.#pongTimeoutMs;
     const now = this.#now();
-    return [...this.#clients].some(
+    return [...this.#clients.values()].some(
       (client) =>
         client.deviceId === deviceId &&
         client.ready &&
@@ -379,7 +141,7 @@ export class WorkspaceHub {
     let criticalOnlyClients = 0;
     let droppedFrames = 0;
 
-    for (const client of this.#clients) {
+    for (const client of this.#clients.values()) {
       backpressuredFrames += client.backpressuredFrames;
       droppedFrames += client.droppedFrames;
       if (client.criticalOnly) {
@@ -390,10 +152,7 @@ export class WorkspaceHub {
     return {
       backpressuredFrames,
       clients: this.#clients.size,
-      coalescerDepth: [...this.#pending.values()].reduce(
-        (sum, buffer) => sum + buffer.length,
-        0
-      ),
+      coalescerDepth: this.#pending.length,
       criticalOnlyClients,
       droppedFrames,
       dropReasons: Object.fromEntries(this.#dropReasons),
@@ -401,12 +160,7 @@ export class WorkspaceHub {
     };
   }
 
-  // ── inbound ───────────────────────────────────────────────────────────────
-
-  /**
-   * Handles one raw client frame. Malformed input is answered with an error
-   * message and never throws into the socket's message handler.
-   */
+  // biome-ignore lint/suspicious/useAwait: Preserve the async socket-handler contract.
   async handleRawMessage(
     socket: HubSocket,
     raw: string | Uint8Array
@@ -426,17 +180,19 @@ export class WorkspaceHub {
       return;
     }
 
-    const message = parsed as { type?: unknown };
-
-    if (typeof message.type !== "string") {
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed) ||
+      !("type" in parsed) ||
+      typeof parsed.type !== "string"
+    ) {
       this.#sendError(socket, "missing message type");
       return;
     }
-
-    // High-frequency viewport updates and heartbeat replies have separate limits.
     if (
       !(
-        BUDGET_EXEMPT_TYPES.has(message.type) ||
+        BUDGET_EXEMPT_TYPES.has(parsed.type) ||
         this.#consumeControlBudget(client)
       )
     ) {
@@ -445,17 +201,11 @@ export class WorkspaceHub {
       return;
     }
 
-    this.#dispatch(client, socket, parsed, message.type);
+    this.#dispatch(client, socket, parsed, parsed.type);
   }
 
-  /**
-   * Routes one validated frame.
-   *
-   * Split out of `handleRawMessage` so the framing concerns (parse, rate limit)
-   * and the per-type handling can be read independently.
-   */
   #dispatch(
-    client: Client,
+    client: HubClient,
     socket: HubSocket,
     parsed: unknown,
     type: string
@@ -467,9 +217,6 @@ export class WorkspaceHub {
           this.#sendError(socket, "invalid hello");
           return;
         }
-        // A second hello mid-stream would replay from the client-supplied
-        // `since` rather than its real cursor, re-sending sequences it already
-        // applied.
         if (client.ready) {
           this.#sendError(socket, "already initialised");
           return;
@@ -484,8 +231,6 @@ export class WorkspaceHub {
           return;
         }
         if (!client.ready) {
-          // Otherwise a snapshot can precede ready and be followed by a second
-          // snapshot from the handshake still in flight.
           this.#sendError(socket, "resync before hello");
           return;
         }
@@ -506,16 +251,10 @@ export class WorkspaceHub {
           this.#sendError(socket, "invalid viewport.sync");
           return;
         }
-        // Viewport payloads carry a projectId, not a boardId, so there is
-        // nothing to scope by today. The filter below is wired for the day a
-        // payload does carry a board, rather than silently ignoring the scope.
-        const { boardId: viewportBoardId } = viewport.data.payload;
-        // Throttled, not disconnected: a stale viewport is worthless but a
-        // dropped connection over one is not a reasonable trade.
         if (!this.#consumeTelemetryBudget(client)) {
           return;
         }
-        this.#relayViewport(client, viewport.data.payload, viewportBoardId);
+        this.#relayViewport(client, viewport.data.payload);
         return;
       }
 
@@ -525,9 +264,8 @@ export class WorkspaceHub {
     }
   }
 
-  /** Sends the current head and resumes from the supplied cursor or a snapshot. */
   #handleHello(
-    client: Client,
+    client: HubClient,
     since: number,
     clientWorkspaceId?: string
   ): void {
@@ -540,11 +278,6 @@ export class WorkspaceHub {
         workspaceId: this.#store.workspaceId,
       })
     );
-
-    // A reconnect is a brand-new socket with no memory of the previous one, so
-    // the decision has to come from `since` alone — nothing per-connection can
-    // be trusted here. `since === 0` means the client has no history at all, and
-    // preferences/view mode live only in the snapshot blob, so it gets one.
     const decision =
       since === 0
         ? ({ kind: "snapshot", reason: "initial" } as const)
@@ -557,8 +290,6 @@ export class WorkspaceHub {
 
     switch (decision.kind) {
       case "up-to-date":
-        // Nothing is missing, so there is nothing to send. A snapshot here
-        // would be pure waste on every reconnect.
         break;
 
       case "replay": {
@@ -574,8 +305,6 @@ export class WorkspaceHub {
         break;
 
       default:
-        // Unreachable while ResumeDecision and this switch agree; the store
-        // snapshot is the safe fallback if they ever drift.
         this.#sendSnapshot(client);
         break;
     }
@@ -583,7 +312,7 @@ export class WorkspaceHub {
     client.ready = true;
   }
 
-  #sendSnapshot(client: Client): void {
+  #sendSnapshot(client: HubClient): void {
     const snapshot = this.#store.getSnapshot();
     this.#send(
       client,
@@ -601,14 +330,6 @@ export class WorkspaceHub {
     client.lastSeq = this.#store.headSeq();
   }
 
-  // ── outbound ──────────────────────────────────────────────────────────────
-
-  /**
-   * Fans out a store commit.
-   *
-   * Events are appended contiguously, so each one's sequence is derivable from
-   * the commit's range — no second bookkeeping to keep in sync.
-   */
   publish(commit: StoreCommit): void {
     if (this.#closed) {
       return;
@@ -623,13 +344,6 @@ export class WorkspaceHub {
     });
   }
 
-  /**
-   * Fans out one already-sequenced record.
-   *
-   * Public because callers that hold a single log entry (a replay, a test
-   * harness, a future admin tool) should not have to synthesise a fake commit
-   * to reach the delivery path.
-   */
   publishRecord(record: SequencedRecord): void {
     if (this.#closed) {
       return;
@@ -639,44 +353,15 @@ export class WorkspaceHub {
       this.#buffer(record);
       return;
     }
-
-    // One commit can expand to a delta *and* a control event with contiguous
-    // sequences, since the projector emits both. Delivering the control event
-    // while the delta still waits in the coalescer hands the client 6, 8, 9,
-    // ..., 7 — a gap, which it resolves by resyncing. So every token burst with
-    // a side event became a full-snapshot storm.
-    //
-    // This lives here rather than in `publish` so every entry point is ordered,
-    // including a replay or an admin tool calling `publishRecord` directly.
-    if (this.#pending.size > 0) {
+    if (this.#pending.length > 0) {
+      // Immediate events must follow every earlier buffered sequence.
       this.flush();
     }
 
     this.#deliver(bufferOf(record));
   }
 
-  /**
-   * Adds a record to its board's buffer, merging it into an existing entry when
-   * both describe the same unit of work.
-   *
-   * Time-batching alone is not enough. 500 deltas published inside one
-   * `COALESCE_MS` window would still be 500 frames in a single flush — the
-   * window would bound *when* they arrive, not *how many*. Merging by step is
-   * what actually reduces the frame count, and it is lossless: appended deltas
-   * concatenate, and an upsert for a step already buffered keeps the latest.
-   *
-   * A merged record spans a *range* of sequences, and the frame declares it
-   * (`fromSeq`..`toSeq`). Reporting only the earliest would leave the client
-   * resuming from inside the run, and the replay would duplicate the tail of
-   * the transcript permanently.
-   *
-   * The window is also bounded: at `MAX_COALESCE_BUFFER` it flushes immediately
-   * rather than growing. A long window during a heavy replay would otherwise
-   * accumulate thousands of distinct keys, most of which congested clients are
-   * about to skip anyway.
-   */
   #buffer(record: SequencedRecord): void {
-    const key = record.boardId ?? WORKSPACE_SCOPE_KEY;
     const buffered = bufferOf(record);
     const mergeKey = mergeKeyFor(buffered);
     const existing = this.#mergeIndex.get(mergeKey);
@@ -685,15 +370,12 @@ export class WorkspaceHub {
       return;
     }
 
-    if (this.#pendingDepth >= MAX_COALESCE_BUFFER) {
+    if (this.#pending.length >= MAX_COALESCE_BUFFER) {
       this.flush();
     }
 
-    const buffer = this.#pending.get(key) ?? [];
-    buffer.push(buffered);
-    this.#pending.set(key, buffer);
+    this.#pending.push(buffered);
     this.#mergeIndex.set(mergeKey, buffered);
-    this.#pendingDepth += 1;
     this.#scheduleFlush();
   }
 
@@ -705,45 +387,31 @@ export class WorkspaceHub {
       this.#flushTimer = null;
       this.flush();
     }, this.#coalesceMs);
-    // Never hold the process open for a coalescing window.
     this.#flushTimer.unref?.();
   }
 
-  /** Flushes every buffered board. Exposed so tests need not wait on timers. */
   flush(): void {
-    if (this.#pending.size === 0) {
+    if (this.#pending.length === 0) {
       return;
     }
 
-    const entries = [...this.#pending.entries()];
-    this.#pending.clear();
+    const records = this.#pending.splice(0);
     this.#mergeIndex.clear();
-    this.#pendingDepth = 0;
-
-    // Sequences are workspace-wide, not board-local. Sorting each board
-    // independently and then sending whole board buffers can deliver 1, 3, 2
-    // when events from two boards were interleaved. Merge only consumes
-    // contiguous ranges, so a global ordering preserves the cursor invariant.
-    const ordered = entries
-      .flatMap(([, records]) => records)
-      .sort((a, b) => a.fromSeq - b.fromSeq);
+    // Sequence numbers are workspace-wide, even when records belong to different boards.
+    const ordered = records.sort((a, b) => a.fromSeq - b.fromSeq);
 
     for (const record of ordered) {
-      // One unserialisable record must not discard the rest of the window:
-      // the records were already removed from the buffers above, so a throw
-      // here would drop them silently, and on the synchronous path it would
-      // escape into the store's commit and fail a write that is already
-      // durable.
       try {
         this.#deliver(record);
       } catch (error) {
+        // One bad frame must not prevent delivery of the rest of the window.
         console.error("[ws] delivery failed:", error);
       }
     }
   }
 
   #deliver(record: BufferedRecord): void {
-    for (const client of this.#clients) {
+    for (const client of this.#clients.values()) {
       if (!client.ready) {
         continue;
       }
@@ -751,76 +419,31 @@ export class WorkspaceHub {
     }
   }
 
-  /**
-   * Congestion check, evaluated *before* each send.
-   *
-   * The byte threshold is the pre-delivery signal (it is the only thing known
-   * before attempting a write); the `send()` status recorded by the previous
-   * send is the confirmation. Both are read because neither alone is sufficient:
-   * a positive send against a 16 MiB backlog proved nothing, and byte depth
-   * alone would not notice a transport reporting congestion.
-   */
-  #isCongested(client: Client, buffered: number): boolean {
+  #isCongested(client: HubClient, buffered: number): boolean {
     if (buffered > HIGH_WATER_MARK) {
       return true;
     }
-    // A drop counts too. `send()` returning 0 means the transport discarded the
-    // frame outright, which is stronger evidence than backpressure that the peer
-    // is gone. Counting only backpressured frames meant a socket returning 0 kept
-    // receiving every control event, silently lost all of them, and was never
-    // marked sick.
     return (
       (client.backpressuredFrames > 0 || client.droppedFrames > 0) &&
       client.cleanSends === 0
     );
   }
 
-  /**
-   * Recovery test.
-   *
-   * An earlier version required `RECOVERY_SENDS` consecutive positive sends
-   * before clearing. That deadlocked: while critical-only the hub skips
-   * coalescible events, so a client with no control traffic was never sent
-   * anything, never accumulated a clean send, and stayed throttled forever.
-   *
-   * So when the transport exposes a buffer gauge — the normal case — a low
-   * buffer is sufficient proof of health, and send statuses are only counted for
-   * diagnostics. Without a gauge there is nothing but send status to go on, so
-   * that path waits for a positive send (the heartbeat supplies one within
-   * 30 s).
-   */
-  #hasRecovered(client: Client, buffered: number, hasGauge: boolean): boolean {
+  #hasRecovered(
+    client: HubClient,
+    buffered: number,
+    hasGauge: boolean
+  ): boolean {
     if (hasGauge) {
       return buffered < HIGH_WATER_MARK / 2;
     }
     return client.cleanSends >= RECOVERY_SENDS;
   }
 
-  /**
-   * Per-client delivery with the measured backpressure policy.
-   *
-   * Above the mark the client is switched to critical-only: control events keep
-   * flowing, coalescible patches are skipped, and the client catches up via
-   * `hello(since)` when it reconnects. Nothing is silently lost.
-   */
-  #deliverTo(client: Client, record: BufferedRecord): void {
-    if (client.boards && record.boardId && !client.boards.has(record.boardId)) {
-      return;
-    }
-
-    // Idempotence. A coalesced backlog routinely outlives the handshake that
-    // replayed it: a client that reconnects mid-window receives the record via
-    // `eventsSince`, sets its cursor to head, and would otherwise get the same
-    // frame again when the window flushes.
+  #deliverTo(client: HubClient, record: BufferedRecord): void {
     if (record.toSeq <= client.lastSeq) {
       return;
     }
-
-    // Re-check the buffer *before* deciding to drop. Doing it the other way
-    // round latches the flag permanently: a critical-only client short-circuits
-    // every coalescible event, so the recovery branch below never runs and the
-    // client is throttled until it disconnects. The spike confirmed the buffer
-    // does drain, so the flag has to be able to observe that.
     const buffered = client.socket.getBufferedAmount?.() ?? 0;
     const hasBufferGauge =
       typeof client.socket.getBufferedAmount === "function";
@@ -843,7 +466,7 @@ export class WorkspaceHub {
     this.#sendSequenced(client, record);
   }
 
-  #sendSequenced(client: Client, record: BufferedRecord): void {
+  #sendSequenced(client: HubClient, record: BufferedRecord): void {
     this.#send(
       client,
       sequencedEventSchema.parse({
@@ -855,78 +478,44 @@ export class WorkspaceHub {
         type: "event",
       })
     );
-
-    // Advance the cursor only across a contiguous run. Skipping a coalescible
-    // event for a congested client leaves a hole, and a later control event must
-    // not step over it: the client's cursor would jump past the sequence it
-    // never received, and resuming from there would lose it for good.
+    // Advance only across a contiguous range; skipped frames must be replayed.
     if (record.fromSeq === client.lastSeq + 1) {
       client.lastSeq = record.toSeq;
     }
   }
 
-  /** Relays ephemeral viewport telemetry outside the event log. */
-  #relayViewport(
-    origin: Client,
-    payload: Record<string, unknown>,
-    viewportBoardId: unknown
-  ): void {
-    const message = JSON.stringify({
+  #relayViewport(origin: HubClient, payload: Record<string, unknown>): void {
+    const message = {
       payload,
       timestamp: this.#now(),
       type: "viewport.sync",
-    });
+    };
 
-    for (const client of this.#clients) {
+    for (const client of this.#clients.values()) {
       if (client === origin || !client.ready) {
         continue;
       }
-      // Same board filter as event delivery. Harmless while every client is
-      // subscribed to all boards, but the moment board scoping lands, board A's
-      // viewport would go to board B's subscribers.
-      if (
-        client.boards &&
-        typeof viewportBoardId === "string" &&
-        !client.boards.has(viewportBoardId)
-      ) {
-        continue;
-      }
-      // Accounted like any other frame: an unaccounted write is one a congested
-      // client keeps receiving.
-      this.#send(client, JSON.parse(message));
+      this.#send(client, message);
     }
   }
 
-  /**
-   * Removes a client from both registries.
-   *
-   * Every removal path must go through here. The heartbeat closes sockets
-   * itself, and clearing only the set left the id map holding a dead client, so
-   * a later frame on that id resolved to a closed socket.
-   */
-  #drop(client: Client, reason: string): void {
-    if (!this.#clients.delete(client)) {
+  #drop(client: HubClient, reason: string): void {
+    if (this.#clients.get(client.id) !== client) {
       return;
     }
+    this.#clients.delete(client.id);
     this.#dropReasons.set(reason, (this.#dropReasons.get(reason) ?? 0) + 1);
-    if (this.#clientsById.get(client.id) === client) {
-      this.#clientsById.delete(client.id);
-    }
   }
-
-  // ── lifecycle ─────────────────────────────────────────────────────────────
 
   #startHeartbeat(): void {
     this.#heartbeatTimer = setInterval(() => {
       const cutoff = this.#now() - this.#pingIntervalMs - this.#pongTimeoutMs;
-      for (const client of [...this.#clients]) {
+      for (const client of [...this.#clients.values()]) {
         if (client.lastPongAt < cutoff) {
           client.socket.close?.(4000, "pong timeout");
           this.#drop(client, "pong-timeout");
           continue;
         }
-        // Routed through #send so a ping that is itself refused counts toward
-        // congestion. A client that cannot take a ping is not healthy.
         this.#send(client, { at: this.#now(), type: "ping" });
       }
     }, this.#pingIntervalMs);
@@ -934,8 +523,6 @@ export class WorkspaceHub {
   }
 
   close(): void {
-    // Latched so a commit still in flight cannot arm a fresh flush timer that
-    // nothing will ever clear.
     this.#closed = true;
 
     if (this.#flushTimer !== null) {
@@ -946,31 +533,20 @@ export class WorkspaceHub {
       clearInterval(this.#heartbeatTimer);
       this.#heartbeatTimer = null;
     }
-
-    // Spec shutdown order: flush coalescers, then close sockets. Discarding the
-    // window would drop up to `COALESCE_MS` of deltas and leave the client with
-    // sequences it will never learn were consumed.
+    // Flush before closing sockets so the final sequence range is delivered.
     this.flush();
 
-    for (const client of [...this.#clients]) {
+    for (const client of [...this.#clients.values()]) {
       client.socket.close?.(1001, "server shutting down");
       this.#drop(client, "server-shutdown");
     }
   }
 
-  // ── helpers ───────────────────────────────────────────────────────────────
-
-  /**
-   * Resolves a socket to its client by connection id. Returns `undefined` for an
-   * unregistered socket, which is a normal race (it closed before we read it),
-   * so callers treat it as a no-op rather than an error.
-   */
-  #find(socket: HubSocket): Client | undefined {
-    return this.#clientsById.get(socket.id);
+  #find(socket: HubSocket): HubClient | undefined {
+    return this.#clients.get(socket.id);
   }
 
-  /** ~10 Hz sustained, which is well above any real pan or zoom. */
-  #consumeTelemetryBudget(client: Client): boolean {
+  #consumeTelemetryBudget(client: HubClient): boolean {
     const now = this.#now();
     if (now - client.telemetryWindowStart >= 60_000) {
       client.telemetryWindowStart = now;
@@ -980,7 +556,7 @@ export class WorkspaceHub {
     return client.telemetryThisMinute <= MAX_TELEMETRY_PER_MINUTE;
   }
 
-  #consumeControlBudget(client: Client): boolean {
+  #consumeControlBudget(client: HubClient): boolean {
     const now = this.#now();
     if (now - client.controlWindowStart >= 60_000) {
       client.controlWindowStart = now;
@@ -990,14 +566,7 @@ export class WorkspaceHub {
     return client.controlMessagesThisMinute <= WS_CONTROL_LIMIT_PER_MINUTE;
   }
 
-  /**
-   * Sends and records the transport's verdict.
-   *
-   * Elysia reports `-1` for backpressure and `0` for dropped; either means the
-   * socket is sick. Positive is bytes accepted. Counting them separately keeps
-   * "slow" and "gone" distinguishable in diagnostics.
-   */
-  #send(client: Client, message: unknown): void {
+  #send(client: HubClient, message: unknown): void {
     if (
       this.#isDeviceAllowed &&
       !(client.deviceId && this.#isDeviceAllowed(client.deviceId))
@@ -1026,10 +595,6 @@ export class WorkspaceHub {
 
     client.droppedFrames += 1;
     client.consecutiveDrops += 1;
-
-    // Backpressure resolves on its own; a discarded frame does not. A peer that
-    // keeps returning 0 is gone, and leaving it registered means every future
-    // control event is dropped too — silently, into a counter nobody alerts on.
     if (client.consecutiveDrops >= MAX_CONSECUTIVE_DROPS) {
       client.socket.close?.(1011, "frames dropped");
       this.#drop(client, "frames-dropped");
@@ -1038,8 +603,6 @@ export class WorkspaceHub {
 
   #sendError(socket: HubSocket, message: string): void {
     const frame = serverErrorSchema.parse({ message, type: "error" });
-    // Accounted, so a client flooding malformed frames is treated as sick rather
-    // than generating an unbounded stream of unanswered errors.
     const client = this.#find(socket);
     if (client) {
       this.#send(client, frame);
