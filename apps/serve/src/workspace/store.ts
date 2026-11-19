@@ -24,7 +24,7 @@ import {
   type StoredPushSubscription,
   WORKSPACE_ID_KEY,
 } from "./db";
-import { attachSessionToBoard, toWorkspaceEvents } from "./projector";
+import { attachSessionToBoard } from "./projector";
 import {
   DEFAULT_RETENTION_DAYS,
   isOverSizeCap,
@@ -34,6 +34,11 @@ import {
   shouldSnapshot,
   stripTerminalRunDetails,
 } from "./retention";
+import {
+  AGENT_RECEIPT_MAX_ROWS,
+  AGENT_RECEIPT_RETENTION_MS,
+  WorkspaceAgentEventProcessor,
+} from "./store/agent-events";
 import {
   boardIdOf,
   createBoardFromSeed,
@@ -80,31 +85,9 @@ export function pendingApprovalConflictMessage(
     : "This request is no longer waiting for a response. Refresh the board to see the current task state.";
 }
 
-const MAX_DROPPED_WARNING_KEYS = 256;
-const AGENT_DELTA_BATCH_WINDOW_MS = 50;
-const MAX_AGENT_DELTA_BATCH_EVENTS = 256;
-const MAX_AGENT_DELTA_BATCH_CHARS = 256 * 1024;
-
 interface PersistedBlob {
   snapshot: WorkspaceSnapshot;
   v: number;
-}
-
-interface PendingAgentDelta {
-  event: NormalizedAgentEvent;
-  reject: (error: unknown) => void;
-  resolve: (commit: StoreCommit | null) => void;
-}
-
-type StepDeltaWorkspaceEvent = Extract<
-  WorkspaceEvent,
-  { type: "step.delta_appended" }
->;
-
-function isStepDeltaWorkspaceEvent(
-  event: WorkspaceEvent
-): event is StepDeltaWorkspaceEvent {
-  return event.type === "step.delta_appended";
 }
 
 /** Provisions board worktrees without coupling the store to git commands. */
@@ -124,9 +107,6 @@ export interface WorktreeProvisioner {
 
 const WORKTREE_CLEANUP_PREFIX = "worktree-cleanup:v1:";
 const WORKTREE_PROVISION_PREFIX = "worktree-provision:v1:";
-const AGENT_RECEIPT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-const AGENT_RECEIPT_MAX_ROWS = 100_000;
-const AGENT_RECEIPT_PRUNE_INTERVAL = 256;
 const worktreeCleanupSchema = z.object({
   boardId: z.string().min(1),
   createdAt: z.number().int().nonnegative(),
@@ -149,16 +129,13 @@ export class WorkspaceStore {
   readonly #db: ChorusDatabase;
   readonly #options: Required<RetentionOptions>;
   readonly #queue: { promise: Promise<void> } = { promise: Promise.resolve() };
+  readonly #agentEvents: WorkspaceAgentEventProcessor<StoreCommit>;
   readonly #worktreeProvisioner: WorktreeProvisioner | undefined;
   readonly #repositoryRegistry: RepositoryRegistry | undefined;
   readonly #restorePersistedRepositoryRoots: boolean;
 
   readonly #commitListeners = new Set<(commit: StoreCommit) => void>();
   readonly #pendingApprovalActions = new Set<string>();
-  #agentEventTail: Promise<void> = Promise.resolve();
-  #pendingAgentDeltas: PendingAgentDelta[] = [];
-  #pendingAgentDeltaChars = 0;
-  #agentDeltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
   #closing = false;
   #closePromise: Promise<void> | null = null;
 
@@ -171,7 +148,6 @@ export class WorkspaceStore {
   };
 
   #eventsSinceSnapshot = 0;
-  #agentReceiptsSincePrune = 0;
 
   constructor(
     dataDir: string,
@@ -186,6 +162,18 @@ export class WorkspaceStore {
     this.#restorePersistedRepositoryRoots =
       options.restorePersistedRepositoryRoots !== false;
     this.#db = new ChorusDatabase(dataDir);
+    this.#agentEvents = new WorkspaceAgentEventProcessor<StoreCommit>({
+      commit: (events, boardId, receipts) =>
+        this.#commit(events, boardId, null, [], receipts),
+      enqueue: (work) => this.#enqueueNow(work, true),
+      getSnapshot: () => this.#snapshot,
+      hasReceipt: (id) => this.#db.hasAgentReceipt(id),
+      isClosing: () => this.#closing,
+      persistReceipts: (receipts) =>
+        this.#db.appendEvents([], null, [], receipts),
+      pruneReceipts: (cutoff, maxRows) =>
+        this.#db.pruneAgentReceipts(cutoff, maxRows),
+    });
     const persistedWorkspaceId = this.#db.getOrCreateMeta(
       WORKSPACE_ID_KEY,
       crypto.randomUUID()
@@ -313,8 +301,8 @@ export class WorkspaceStore {
 
   /** Resolves when every queued state change has committed. */
   async drain(): Promise<void> {
-    this.#flushPendingAgentDeltas();
-    await this.#agentEventTail;
+    this.#agentEvents.flushPendingDeltas();
+    await this.#agentEvents.waitForIdle();
     await this.#enqueue(async () => undefined);
   }
 
@@ -329,8 +317,9 @@ export class WorkspaceStore {
     }
 
     this.#closing = true;
-    this.#flushPendingAgentDeltas();
-    const closePromise = this.#agentEventTail
+    this.#agentEvents.flushPendingDeltas();
+    const closePromise = this.#agentEvents
+      .waitForIdle()
       .then(() => this.#queue.promise)
       .then(() => {
         this.#writeSnapshotNow();
@@ -700,336 +689,12 @@ export class WorkspaceStore {
     }
   }
 
-  /** Applies one normalized agent event, which may expand to several events. */
-  async applyAgentEvent(
+  /** Applies one normalized provider event to the shared workspace log. */
+  applyAgentEvent(
     agentEvent: NormalizedAgentEvent
   ): Promise<StoreCommit | null> {
-    if (!agentEvent.sessionID) {
-      return null;
-    }
-
-    if (this.#closing) {
-      throw new Error("workspace store is closing or closed");
-    }
-
-    if (typeof agentEvent.delta === "string") {
-      return this.#queueAgentDelta(agentEvent);
-    }
-
-    this.#flushPendingAgentDeltas();
-    return this.#queueAgentWork(() =>
-      Promise.resolve(this.#applyAgentEventToStore(agentEvent))
-    );
+    return this.#agentEvents.apply(agentEvent);
   }
-
-  #queueAgentDelta(event: NormalizedAgentEvent): Promise<StoreCommit | null> {
-    return new Promise((resolve, reject) => {
-      this.#pendingAgentDeltas.push({ event, reject, resolve });
-      this.#pendingAgentDeltaChars += event.delta?.length ?? 0;
-
-      if (
-        this.#pendingAgentDeltas.length >= MAX_AGENT_DELTA_BATCH_EVENTS ||
-        this.#pendingAgentDeltaChars >= MAX_AGENT_DELTA_BATCH_CHARS
-      ) {
-        this.#flushPendingAgentDeltas();
-        return;
-      }
-
-      if (this.#agentDeltaFlushTimer === null) {
-        this.#agentDeltaFlushTimer = setTimeout(() => {
-          this.#agentDeltaFlushTimer = null;
-          this.#flushPendingAgentDeltas();
-        }, AGENT_DELTA_BATCH_WINDOW_MS);
-        this.#agentDeltaFlushTimer.unref?.();
-      }
-    });
-  }
-
-  #flushPendingAgentDeltas(): void {
-    if (this.#agentDeltaFlushTimer !== null) {
-      clearTimeout(this.#agentDeltaFlushTimer);
-      this.#agentDeltaFlushTimer = null;
-    }
-
-    if (this.#pendingAgentDeltas.length === 0) {
-      return;
-    }
-
-    const pending = this.#pendingAgentDeltas;
-    this.#pendingAgentDeltas = [];
-    this.#pendingAgentDeltaChars = 0;
-    const commit = this.#queueAgentWork(() =>
-      Promise.resolve(
-        this.#applyAgentDeltaBatchToStore(pending.map(({ event }) => event))
-      )
-    );
-    commit.then(
-      (value) => {
-        for (const item of pending) {
-          item.resolve(value);
-        }
-      },
-      (error: unknown) => {
-        for (const item of pending) {
-          item.reject(error);
-        }
-      }
-    );
-  }
-
-  #queueAgentWork<T>(work: () => Promise<T>): Promise<T> {
-    const result = this.#agentEventTail.then(() =>
-      this.#enqueueNow(work, true)
-    );
-    this.#agentEventTail = result.then(
-      () => undefined,
-      () => undefined
-    );
-    return result;
-  }
-
-  #applyAgentDeltaBatchToStore(
-    agentEvents: NormalizedAgentEvent[]
-  ): StoreCommit | null {
-    const receipts = new Map<string, { id: string; ts: number }>();
-    const deltas = new Map<
-      string,
-      {
-        event: StepDeltaWorkspaceEvent;
-        chunks: string[];
-        timestamp: number;
-      }
-    >();
-
-    for (const agentEvent of agentEvents) {
-      this.#collectAgentDelta(agentEvent, receipts, deltas);
-    }
-
-    const events = [...deltas.values()].map(({ event, chunks, timestamp }) => ({
-      ...event,
-      delta: chunks.join(""),
-      ts: timestamp,
-    }));
-    const persistedReceipts = [...receipts.values()];
-    if (events.length === 0) {
-      this.#persistAgentReceipts(persistedReceipts);
-      return null;
-    }
-
-    const boardIds = new Set(events.map((event) => event.boardId));
-    const boardId = boardIds.size === 1 ? (events[0]?.boardId ?? null) : null;
-    const commit = this.#commit(events, boardId, null, [], persistedReceipts);
-    this.#pruneAgentReceiptsPeriodically(persistedReceipts.length);
-    return commit;
-  }
-
-  #collectAgentDelta(
-    agentEvent: NormalizedAgentEvent,
-    receipts: Map<string, { id: string; ts: number }>,
-    deltas: Map<
-      string,
-      {
-        event: StepDeltaWorkspaceEvent;
-        chunks: string[];
-        timestamp: number;
-      }
-    >
-  ): void {
-    const sessionId = agentEvent.sessionID;
-    if (!sessionId) {
-      return;
-    }
-
-    const board = this.#snapshot.boards.find(
-      (entry) => entry.session.sessionId === sessionId
-    );
-    if (!board) {
-      return;
-    }
-
-    const receipt = this.#agentReceipt(board.boardId, sessionId, agentEvent);
-    if (receipt && this.#hasAgentReceipt(receipt, receipts)) {
-      return;
-    }
-
-    const converted = toWorkspaceEvents(agentEvent, {
-      boardId: board.boardId,
-      taskId: board.session.currentTaskId ?? "",
-    });
-    const delta = converted.find(isStepDeltaWorkspaceEvent);
-    if (!delta || delta.taskId === "") {
-      if (converted.length > 0) {
-        this.#warnDroppedOnce(board.boardId, agentEvent);
-      }
-      this.#recordAgentReceipt(receipt, receipts);
-      return;
-    }
-
-    const key = JSON.stringify([delta.boardId, delta.taskId, delta.stepId]);
-    const existing = deltas.get(key);
-    if (existing) {
-      existing.chunks.push(delta.delta);
-      existing.timestamp = delta.ts;
-    } else {
-      deltas.set(key, {
-        event: delta,
-        chunks: [delta.delta],
-        timestamp: delta.ts,
-      });
-    }
-    this.#recordAgentReceipt(receipt, receipts);
-  }
-
-  #agentReceipt(
-    boardId: string,
-    sessionId: string,
-    event: NormalizedAgentEvent
-  ): { id: string; ts: number } | undefined {
-    if (!event.sourceEventId) {
-      return undefined;
-    }
-    return {
-      id: JSON.stringify([boardId, sessionId, event.sourceEventId]),
-      ts: Date.now(),
-    };
-  }
-
-  #hasAgentReceipt(
-    receipt: { id: string; ts: number },
-    batchReceipts: Map<string, { id: string; ts: number }>
-  ): boolean {
-    return (
-      batchReceipts.has(receipt.id) || this.#db.hasAgentReceipt(receipt.id)
-    );
-  }
-
-  #recordAgentReceipt(
-    receipt: { id: string; ts: number } | undefined,
-    receipts: Map<string, { id: string; ts: number }>
-  ): void {
-    if (receipt) {
-      receipts.set(receipt.id, receipt);
-    }
-  }
-
-  #applyAgentEventToStore(
-    agentEvent: NormalizedAgentEvent
-  ): StoreCommit | null {
-    const board = this.#snapshot.boards.find(
-      (entry) => entry.session.sessionId === agentEvent.sessionID
-    );
-    if (!board) {
-      return null;
-    }
-
-    const receipt = agentEvent.sourceEventId
-      ? {
-          id: JSON.stringify([
-            board.boardId,
-            agentEvent.sessionID,
-            agentEvent.sourceEventId,
-          ]),
-          ts: Date.now(),
-        }
-      : undefined;
-    if (receipt && this.#db.hasAgentReceipt(receipt.id)) {
-      return null;
-    }
-
-    const converted = toWorkspaceEvents(agentEvent, {
-      boardId: board.boardId,
-      taskId: board.session.currentTaskId ?? "",
-    });
-    const events = converted.filter(
-      (event) => !("taskId" in event) || event.taskId !== ""
-    );
-    if (events.length === 0) {
-      if (converted.length > 0) {
-        this.#warnDroppedOnce(board.boardId, agentEvent);
-        this.#persistAgentReceipt(receipt);
-      }
-      return null;
-    }
-
-    let projected = this.#snapshot;
-    for (const event of events) {
-      projected = projectWorkspaceEvent(projected, event);
-    }
-    if (projected === this.#snapshot) {
-      this.#persistAgentReceipt(receipt);
-      return null;
-    }
-
-    const commit = this.#commit(events, board.boardId, null, [], receipt);
-    if (receipt) {
-      this.#pruneAgentReceiptsPeriodically();
-    }
-    return commit;
-  }
-
-  #persistAgentReceipt(receipt: { id: string; ts: number } | undefined): void {
-    if (!receipt) {
-      return;
-    }
-    this.#persistAgentReceipts([receipt]);
-  }
-
-  #persistAgentReceipts(receipts: Array<{ id: string; ts: number }>): void {
-    if (receipts.length === 0) {
-      return;
-    }
-    this.#db.appendEvents([], null, [], receipts);
-    this.#pruneAgentReceiptsPeriodically(receipts.length);
-  }
-
-  #pruneAgentReceiptsPeriodically(receiptCount = 1): void {
-    this.#agentReceiptsSincePrune += receiptCount;
-    if (this.#agentReceiptsSincePrune < AGENT_RECEIPT_PRUNE_INTERVAL) {
-      return;
-    }
-    this.#agentReceiptsSincePrune = 0;
-    this.#db.pruneAgentReceipts(
-      Date.now() - AGENT_RECEIPT_RETENTION_MS,
-      AGENT_RECEIPT_MAX_ROWS
-    );
-  }
-
-  /**
-   * Warns once per board and session about dropped agent events.
-   *
-   * A streamed delta carries no task id and arrives per token, so warning on every
-   * one turned a single mis-bound session into thousands of identical lines and
-   * buried everything else in the log. One line per (board, session) names the
-   * condition; the count is kept so the scale is still visible.
-   */
-  #warnDroppedOnce(boardId: string, agentEvent: NormalizedAgentEvent): void {
-    if (this.#droppedWarnings.size > MAX_DROPPED_WARNING_KEYS) {
-      this.#droppedWarnings.clear();
-    }
-
-    const key = `${boardId}:${agentEvent.sessionID ?? "unknown"}`;
-    const seen = this.#droppedWarnings.get(key) ?? 0;
-    this.#droppedWarnings.set(key, seen + 1);
-
-    if (seen > 0) {
-      return;
-    }
-
-    logger.warn("agent-event-dropped-no-current-task", {
-      agentEventType: agentEvent.type,
-      boardId,
-      note: "repeats for this board and session are counted, not logged",
-      sessionID: agentEvent.sessionID,
-    });
-  }
-
-  /**
-   * Boards that have already reported a dropped agent event.
-   *
-   * Bounded, because the purpose is to stop a runaway stream from flooding the
-   * log and an unbounded map would replace one leak with another.
-   */
-  readonly #droppedWarnings = new Map<string, number>();
 
   /**
    * Commits `card.created` before later agent events need the task binding.
@@ -1584,8 +1249,8 @@ export class WorkspaceStore {
       return Promise.reject(new Error("workspace store is closing or closed"));
     }
 
-    this.#flushPendingAgentDeltas();
-    return this.#agentEventTail.then(() =>
+    this.#agentEvents.flushPendingDeltas();
+    return this.#agentEvents.waitForIdle().then(() =>
       // Once accepted above, preserve this operation through close. close()
       // waits for the event tail and then the queue; rejecting here would drop
       // a pre-close write that was waiting behind a buffered stream batch.
