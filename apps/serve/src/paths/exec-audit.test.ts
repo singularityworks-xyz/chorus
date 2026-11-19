@@ -10,6 +10,7 @@ const PROMISISED_EXEC = /promisify\(\s*exec\s*\)/;
 const SHELL_EXEC_CALL = /\bexecAsync\s*\(/;
 
 const SHELL_STRING_TEMPLATE = /(?<![.\w])exec(?:Async)?\s*\(\s*`/;
+const EXEC_FILE_ARGUMENT_ARRAY = /execFile\(\s*file,\s*args,/;
 
 function collectSourceFiles(dir: string): string[] {
   const glob = new Bun.Glob("**/*.ts");
@@ -47,13 +48,14 @@ describe("no shell-string child process execution", () => {
   });
 
   test("execFile call sites pass literal argument arrays", () => {
-    const snapshot = readFileSync(
-      join(SERVE_SRC, "snapshot", "index.ts"),
+    const snapshotRepository = readFileSync(
+      join(SERVE_SRC, "snapshot", "repository.ts"),
       "utf8"
     );
 
-    expect(snapshot).not.toContain("promisify(exec");
-    expect(snapshot).toContain(LOGIN_COMMAND_LITERAL);
+    expect(snapshotRepository).not.toContain("promisify(exec");
+    expect(snapshotRepository).toMatch(EXEC_FILE_ARGUMENT_ARRAY);
+    expect(snapshotRepository).toContain(LOGIN_COMMAND_LITERAL);
   });
 
   test("auth login never interpolates a directory into shell text", () => {
