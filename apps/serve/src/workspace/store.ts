@@ -1,15 +1,12 @@
 // biome-ignore-all lint/suspicious/useAwait: every public write returns the serial queue's promise; async is the contract callers rely on
 
-import { constants as fsConstants } from "node:fs";
-import { access, copyFile, readFile, rename, unlink } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import {
-  type ModelSelection,
-  type WorkspaceBoard,
-  type WorkspaceEvent,
-  type WorkspaceMutation,
-  type WorkspaceSnapshot,
-  workspaceSnapshotSchema,
+import { join } from "node:path";
+import type {
+  ModelSelection,
+  WorkspaceBoard,
+  WorkspaceEvent,
+  WorkspaceMutation,
+  WorkspaceSnapshot,
 } from "@chorus/contracts";
 import { createLogger } from "@chorus/logger";
 import type { NormalizedAgentEvent } from "@chorus/oc-adapter";
@@ -19,7 +16,6 @@ import {
   ChorusDatabase,
   type MetaChange,
   type PushSubscriptionRow,
-  type StoredEvent,
   type StoredPushSubscription,
   WORKSPACE_ID_KEY,
 } from "./db";
@@ -29,9 +25,7 @@ import {
   isOverSizeCap,
   MUTATION_ID_RETENTION_MS,
   type RetentionOptions,
-  retentionCutoff,
   shouldSnapshot,
-  stripTerminalRunDetails,
 } from "./retention";
 import {
   AGENT_RECEIPT_MAX_ROWS,
@@ -42,6 +36,7 @@ import {
   WorkspaceMutationProcessor,
   worktreeCleanupKey,
 } from "./store/mutations";
+import { WorkspacePersistence } from "./store/persistence";
 import {
   boardIdOf,
   diffSessionEvent,
@@ -55,8 +50,6 @@ const logger = createLogger(
   },
   "STORE"
 );
-
-const SNAPSHOT_BLOB_VERSION = 1;
 
 /** A decoded event log entry. */
 export interface SequencedRecord {
@@ -87,11 +80,6 @@ export function pendingApprovalConflictMessage(
     : "This request is no longer waiting for a response. Refresh the board to see the current task state.";
 }
 
-interface PersistedBlob {
-  snapshot: WorkspaceSnapshot;
-  v: number;
-}
-
 /** Provisions board worktrees without coupling the store to git commands. */
 export interface WorktreeProvisioner {
   assertRemovable?(repoDirectory: string, boardId: string): Promise<void>;
@@ -116,6 +104,7 @@ export class WorkspaceStore {
   readonly #queue: { promise: Promise<void> } = { promise: Promise.resolve() };
   readonly #agentEvents: WorkspaceAgentEventProcessor<StoreCommit>;
   readonly #mutations: WorkspaceMutationProcessor;
+  readonly #persistence: WorkspacePersistence;
   readonly #repositoryRegistry: RepositoryRegistry | undefined;
   readonly #restorePersistedRepositoryRoots: boolean;
 
@@ -146,6 +135,10 @@ export class WorkspaceStore {
     this.#restorePersistedRepositoryRoots =
       options.restorePersistedRepositoryRoots !== false;
     this.#db = new ChorusDatabase(dataDir);
+    this.#persistence = new WorkspacePersistence(
+      this.#db,
+      this.#repositoryRegistry
+    );
     this.#mutations = new WorkspaceMutationProcessor({
       database: this.#db,
       getSnapshot: () => this.#snapshot,
@@ -208,21 +201,14 @@ export class WorkspaceStore {
       );
     }
 
-    const snapshot = this.#db.latestSnapshot();
+    const loaded = this.#persistence.loadLatestSnapshot();
 
-    if (snapshot) {
-      this.#snapshot = this.#parseBlob(snapshot.blob);
-      const tail = this.#db.readEventsSince(snapshot.seq);
-      for (const stored of tail) {
-        this.#snapshot = projectWorkspaceEvent(
-          this.#snapshot,
-          this.#decode(stored)
-        );
-      }
-      this.#eventsSinceSnapshot = tail.length;
+    if (loaded) {
+      this.#snapshot = loaded.snapshot;
+      this.#eventsSinceSnapshot = loaded.replayed;
       logger.info("workspace-rehydrated", {
-        fromSnapshotSeq: snapshot.seq,
-        replayed: tail.length,
+        fromSnapshotSeq: loaded.snapshotSeq,
+        replayed: loaded.replayed,
         headSeq: this.#db.headSeq(),
       });
       await this.#mutations.reconcileWorktreeIntents();
@@ -231,7 +217,7 @@ export class WorkspaceStore {
     }
 
     const imported = legacySnapshotPath
-      ? await this.#importLegacySnapshot(legacySnapshotPath)
+      ? await this.#persistence.importLegacySnapshot(legacySnapshotPath)
       : null;
 
     if (imported) {
@@ -243,7 +229,7 @@ export class WorkspaceStore {
 
     await this.writeSnapshot();
     if (imported && legacySnapshotPath) {
-      await this.#parkLegacySnapshot(legacySnapshotPath);
+      await this.#persistence.parkLegacySnapshot(legacySnapshotPath);
     }
     await this.#mutations.reconcileWorktreeIntents();
     await this.#migrateLegacyGlobalModelSelection();
@@ -397,7 +383,7 @@ export class WorkspaceStore {
 
     return rows.map((row) => ({
       boardId: row.boardId,
-      event: this.#decode(row),
+      event: this.#persistence.decodeEvent(row),
       seq: row.seq,
     }));
   }
@@ -952,163 +938,13 @@ export class WorkspaceStore {
   }
 
   #writeSnapshotNow(): void {
-    const snapshot = this.#applyRetention(this.#snapshot);
-    const head = this.#db.headSeq();
-    this.#db.writeSnapshot(
-      head,
-      Date.now(),
-      JSON.stringify({
-        snapshot,
-        v: SNAPSHOT_BLOB_VERSION,
-      } satisfies PersistedBlob)
+    const saved = this.#persistence.writeSnapshot(
+      this.#snapshot,
+      this.#options.retentionDays
     );
-    this.#snapshot = snapshot;
-    this.#db.pruneEventsBefore(head);
+    this.#snapshot = saved.snapshot;
+    this.#persistence.pruneEventsBefore(saved.head);
     this.#eventsSinceSnapshot = 0;
-  }
-
-  #applyRetention(snapshot: WorkspaceSnapshot): WorkspaceSnapshot {
-    return stripTerminalRunDetails(
-      snapshot,
-      retentionCutoff(Date.now(), this.#options.retentionDays)
-    );
-  }
-
-  #parseBlob(blob: string): WorkspaceSnapshot {
-    let parsed: PersistedBlob;
-    try {
-      parsed = JSON.parse(blob) as PersistedBlob;
-    } catch (error) {
-      throw new Error(
-        `corrupt workspace snapshot in ${this.#db.path}: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
-    }
-
-    if (parsed.v !== SNAPSHOT_BLOB_VERSION) {
-      throw new Error(
-        `unsupported workspace snapshot version ${String(parsed.v)} in ${this.#db.path}`
-      );
-    }
-
-    try {
-      return workspaceSnapshotSchema.parse(parsed.snapshot);
-    } catch (error) {
-      throw new Error(
-        `corrupt workspace snapshot in ${this.#db.path}: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
-    }
-  }
-
-  #decode(stored: StoredEvent): WorkspaceEvent {
-    try {
-      return JSON.parse(stored.payload) as WorkspaceEvent;
-    } catch (error) {
-      throw new Error(
-        `corrupt event at seq ${stored.seq} in ${this.#db.path}: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
-    }
-  }
-
-  /**
-   * One-shot import of the pre-Phase-2 `workspace.json`.
-   *
-   * Guarded by an explicit env flag so the path can be deleted once the first
-   * production migration is confirmed, and loud on corruption: a silently
-   * emptied workspace is indistinguishable from data loss.
-   */
-  async #importLegacySnapshot(
-    legacyPath: string
-  ): Promise<WorkspaceSnapshot | null> {
-    let raw: string;
-    try {
-      await access(legacyPath);
-    } catch {
-      return null;
-    }
-
-    raw = await readFile(legacyPath, "utf8");
-
-    let parsed: WorkspaceSnapshot;
-    try {
-      parsed = workspaceSnapshotSchema.parse(JSON.parse(raw));
-    } catch (error) {
-      throw new Error(
-        `refusing to start: legacy workspace snapshot at ${legacyPath} is corrupt (${
-          error instanceof Error ? error.message : String(error)
-        }). Move it aside to start with an empty workspace.`
-      );
-    }
-
-    const importedBoards: WorkspaceBoard[] = [];
-    const checkoutOwners = new Map<string, string>();
-    for (const board of parsed.boards) {
-      const directory = this.#repositoryRegistry
-        ? await this.#repositoryRegistry.validateCandidate(board.repo.directory)
-        : resolve(board.repo.directory);
-      const checkout = this.#repositoryRegistry
-        ? await this.#repositoryRegistry.validateAuthorizedCheckout(
-            board.repo.worktree ?? directory
-          )
-        : resolve(board.repo.worktree ?? directory);
-      const identity =
-        process.platform === "win32"
-          ? checkout.toLocaleLowerCase("en-US")
-          : checkout;
-      const previousOwner = checkoutOwners.get(identity);
-      if (previousOwner) {
-        throw new Error(
-          `refusing to import legacy workspace at ${legacyPath}: boards ${previousOwner} and ${board.boardId} share checkout ${checkout}; preserve the source file and provision separate Chorus worktrees before retrying`
-        );
-      }
-      checkoutOwners.set(identity, board.boardId);
-      importedBoards.push({
-        ...board,
-        repo: {
-          ...board.repo,
-          directory,
-          sandboxes: [],
-          worktree: checkout,
-        },
-      });
-    }
-
-    const migrated = projectWorkspaceEvent(
-      { ...parsed, boards: importedBoards },
-      {
-        type: "board.selected",
-        boardId: parsed.selectedBoardId,
-        ts: Date.now(),
-      }
-    );
-    return migrated;
-  }
-
-  async #parkLegacySnapshot(legacyPath: string): Promise<void> {
-    const parkedPath = `${legacyPath}.imported`;
-    try {
-      await rename(legacyPath, parkedPath);
-      return;
-    } catch {
-      // Windows can reject a same-volume rename when the file is held by an
-      // antivirus/indexer. The database snapshot is already durable, so copy
-      // into a new target first and only then remove the source.
-    }
-
-    try {
-      await copyFile(legacyPath, parkedPath, fsConstants.COPYFILE_EXCL);
-      await unlink(legacyPath);
-    } catch (error) {
-      logger.warn("workspace-legacy-snapshot-not-parked", {
-        path: legacyPath,
-        errorName: error instanceof Error ? error.name : "unknown",
-      });
-    }
   }
 }
 
