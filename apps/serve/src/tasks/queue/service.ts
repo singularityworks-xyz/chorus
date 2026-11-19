@@ -8,12 +8,9 @@ import {
   findTaskInColumns,
   queueBoardPromptInputSchema,
 } from "@chorus/contracts";
-import { resolveInside, SandboxEscapeError } from "../../paths/sandbox";
-import type { BoardSessionRecord } from "../board-session-registry";
 import {
   BoardTaskCommandError,
   GlobalModelNotConfiguredError,
-  SessionOwnershipError,
 } from "../errors";
 import { taskLogger as logger } from "../logger";
 import {
@@ -21,70 +18,11 @@ import {
   assertCheckoutAuthorized,
   type BoardTaskRuntime,
   hasLiveTask,
-  sameDirectory,
   withBoardOperation,
 } from "../runtime";
 import { boardDirectory } from "../session-directory";
-
-type SdkPart =
-  | { text: string; type: "text" }
-  | { filename: string; mime: string; type: "file"; url: string };
-
-function resolveFilePath(rawPath: string, directory: string): string {
-  try {
-    return resolveInside(directory, rawPath);
-  } catch (error) {
-    if (error instanceof SandboxEscapeError || error instanceof Error) {
-      logger.warn("file-part-rejected", { reason: error.name });
-    }
-    throw error;
-  }
-}
-
-function convertPartsToSdk(
-  parts: NonNullable<QueueBoardPromptInput["parts"]>,
-  directory: string
-): SdkPart[] {
-  return parts.flatMap(
-    (part: {
-      type: string;
-      text?: string;
-      filename?: string;
-      path?: string;
-      mime?: string;
-      isDirectory?: boolean;
-      lineRange?: { start: number; end: number };
-    }) => {
-      if (part.type === "text") {
-        return { type: "text" as const, text: part.text ?? "" };
-      }
-      if (part.type === "file") {
-        const resolvedPath = resolveFilePath(part.path ?? "", directory);
-        const fileUrl = `file://${resolvedPath}`;
-        const rangeParams = part.lineRange
-          ? `?start=${part.lineRange.start}&end=${part.lineRange.end}`
-          : "";
-        logger.debug("file-part-resolved", {
-          rawPath: part.path,
-          resolvedPath,
-          fileUrl,
-          filename: part.filename,
-          mime: part.mime,
-          isDirectory: part.isDirectory,
-        });
-        return {
-          type: "file" as const,
-          filename: part.filename ?? "",
-          mime: part.isDirectory
-            ? "application/x-directory"
-            : (part.mime ?? "text/plain"),
-          url: fileUrl + rangeParams,
-        };
-      }
-      return [];
-    }
-  );
-}
+import { convertPartsToSdk } from "./prompt-parts";
+import { resolveBoardSession } from "./session-resolution";
 
 export class BoardTaskQueue {
   readonly context: BoardTaskRuntime;
@@ -104,10 +42,7 @@ export class BoardTaskQueue {
     }
     const title = input.text.slice(0, 120);
 
-    // The "does this board already have a live task" decision is made inside the
-    // store's queue, not here. Reading it here and committing after would let two
-    // concurrent prompts for one board both see no current task and both create a
-    // card, which breaks the idempotence this method promises.
+    // Create the card and check the live-task invariant in one store transaction.
     const commit = await this.context.workspaceStore.applyBoardEventsIf(
       input.boardId,
       [
@@ -147,9 +82,7 @@ export class BoardTaskQueue {
       return taskId;
     }
 
-    // A lost duplicate card creation is safe to resolve only to the task that
-    // already owns the board's live session. Public queueing rejects a busy
-    // board; this fallback is for a concurrent event that won the store queue.
+    // A racing request can only reuse the task that won the store transaction.
     const currentTaskId = this.context.workspaceStore.getBoard(input.boardId)
       ?.session.currentTaskId;
     if (!currentTaskId) {
@@ -159,137 +92,6 @@ export class BoardTaskQueue {
       );
     }
     return currentTaskId;
-  }
-
-  async #candidateDirectory({
-    candidate,
-    existing,
-    input,
-  }: {
-    candidate: string | undefined;
-    existing: BoardSessionRecord | undefined;
-    input: QueueBoardPromptInput;
-  }): Promise<string | null> {
-    if (!candidate) {
-      return null;
-    }
-
-    // Only when the candidate *is* the registry's session.
-    //
-    // The registry records where this board's own session was opened, which says
-    // nothing about a session id the client supplied. Taking the shortcut for a
-    // client-supplied id would validate the board's directory instead of the
-    // candidate's, and then reuse and persist someone else's session.
-    if (existing?.directory && candidate === existing.sessionId) {
-      return existing.directory;
-    }
-
-    try {
-      // Queried *without* the target directory. Passing it would scope the lookup
-      // to the very checkout we are trying to validate, so an unrelated session
-      // cannot appear valid just because the request supplied the target path.
-      const session = await this.context.bridge.getSession({
-        sessionID: candidate,
-        engineDirectory: input.directory,
-      });
-      return session.directory ?? null;
-    } catch {
-      logger.warn("queue-prompt:session-directory-unknown", {
-        boardId: input.boardId,
-        sessionId: candidate,
-      });
-      return null;
-    }
-  }
-
-  async #resolveSession({
-    existing,
-    input,
-    persistedBoard,
-  }: {
-    existing: BoardSessionRecord | undefined;
-    input: QueueBoardPromptInput;
-    persistedBoard: WorkspaceBoard | undefined;
-  }): Promise<{ createdSession: boolean; sessionId: string }> {
-    const boundSessionId =
-      existing?.sessionId ?? persistedBoard?.session.sessionId;
-    if (input.sessionId && input.sessionId !== boundSessionId) {
-      throw new SessionOwnershipError(
-        "session_ownership_conflict",
-        "the supplied session is not bound to this board"
-      );
-    }
-
-    const candidate = boundSessionId;
-    const candidateDirectory = candidate
-      ? await this.#candidateDirectory({ candidate, existing, input })
-      : null;
-
-    if (candidate && candidateDirectory === null) {
-      throw new SessionOwnershipError(
-        "session_directory_unknown",
-        "the engine could not verify this board's session directory; retry when the engine is available"
-      );
-    }
-
-    // A known mismatch is only forked after the current board binding is proven.
-    if (
-      candidate &&
-      candidateDirectory !== null &&
-      !sameDirectory(candidateDirectory, input.directory)
-    ) {
-      logger.info("queue-prompt:session-directory-mismatch", {
-        boardId: input.boardId,
-        candidateDirectory,
-        directory: input.directory,
-        sessionId: candidate,
-      });
-
-      const forked = await this.context.bridge.forkSession({
-        directory: input.directory,
-        sessionID: candidate,
-      });
-      logger.info("queue-prompt:session-forked", {
-        boardId: input.boardId,
-        directory: input.directory,
-        from: candidate,
-        sessionId: forked.id,
-      });
-      return { createdSession: true, sessionId: forked.id };
-    }
-
-    if (candidate) {
-      let source = "persisted";
-      if (input.sessionId) {
-        source = "input";
-      } else if (existing) {
-        source = "registry";
-      }
-
-      logger.info("queue-prompt:reusing-session", {
-        boardId: input.boardId,
-        sessionId: candidate,
-        source,
-      });
-      return { createdSession: false, sessionId: candidate };
-    }
-
-    logger.info("queue-prompt:creating-session", {
-      boardId: input.boardId,
-      directory: input.directory,
-    });
-
-    const session = await this.context.bridge.createSession({
-      title: input.text.slice(0, 80),
-      directory: input.directory,
-    });
-
-    logger.info("queue-prompt:session-created", {
-      boardId: input.boardId,
-      sessionId: session.id,
-    });
-
-    return { createdSession: true, sessionId: session.id };
   }
 
   queuePrompt(
@@ -458,24 +260,13 @@ export class BoardTaskQueue {
     const persistedBoard = this.context.workspaceStore.getBoard(parsed.boardId);
 
     if (!persistedBoard) {
-      // Refused rather than falling back to the caller's directory. A prompt for a
-      // board the store does not know is either a stale client or an attempt to
-      // skip board creation and aim the engine at an arbitrary path; the fallback
-      // made the second one work.
+      // A queued prompt must reference a persisted board; never trust a caller path alone.
       throw new Error(
         `no such board: ${parsed.boardId}. A prompt can only run against a board the server knows.`
       );
     }
 
-    // The working directory is the board's, not the caller's (plan P6 task 3).
-    //
-    // `repo.worktree` is the whole point of worktree-per-board: the first board
-    // for a repo keeps the primary checkout, and every additional board gets its
-    // own. Resolving it here rather than trusting `input.directory` means the
-    // agent actually runs in its own worktree, and a client cannot aim a prompt
-    // at an arbitrary path on the host.
-    // One resolver with the follow-up command paths, so a board's checkout is
-    // computed the same way everywhere (session-directory.ts).
+    // The board's checkout is authoritative; the request path is advisory.
     const directory = boardDirectory(persistedBoard);
     await assertCheckoutAuthorized(this.context, directory);
 
@@ -489,8 +280,7 @@ export class BoardTaskQueue {
     const input: QueueBoardPromptInput = {
       ...parsed,
       directory,
-      // The synced workspace preference is authoritative. Never let a stale
-      // board model or browser request select a different provider.
+      // Use the synced model selection instead of stale client values.
       model: defaultModelSelection,
     };
 
@@ -506,7 +296,8 @@ export class BoardTaskQueue {
 
     await this.context.bridge.subscribeDirectory(input.directory);
 
-    const { createdSession, sessionId } = await this.#resolveSession({
+    const { createdSession, sessionId } = await resolveBoardSession({
+      context: this.context,
       existing,
       input,
       persistedBoard,
