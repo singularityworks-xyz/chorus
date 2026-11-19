@@ -1,8 +1,5 @@
-import { access, mkdir } from "node:fs/promises";
-import { homedir } from "node:os";
-import path from "node:path";
+import { mkdir } from "node:fs/promises";
 import { createLogger } from "@chorus/logger";
-import { sdkVersion } from "@chorus/oc-adapter";
 import { cors } from "@elysiajs/cors";
 import { Elysia } from "elysia";
 import { LoginRateLimiter } from "./auth/brute-force";
@@ -16,20 +13,15 @@ import { createAuthRoutes } from "./auth/routes";
 import { SessionRegistry } from "./auth/session-registry";
 import { pruneExpiredTickets, type TicketStore } from "./auth/ticket";
 import { MissingTokenError, resolveToken } from "./auth/token";
-import { OpenCodeBridge } from "./bridge/opencode/bridge";
 import { loadConfig } from "./config";
 import { HostRemoteAccess } from "./hosting/remote-access";
 import { createRemoteAccessRoutes } from "./hosting/routes";
-import { EngineRegistry } from "./opencode/engine-registry";
 import { EngineUnavailableError } from "./opencode/process-manager/errors";
-import { OpenCodeProcessManager } from "./opencode/process-manager/manager";
-import { assertEngineLockstep } from "./paths/engine-lockstep";
 import { ProjectEngineContext } from "./projects/engine-context";
 import { NativeFolderPicker } from "./projects/folder-picker";
 import { ProviderService } from "./projects/providers/service";
 import { RepositoryRegistry } from "./projects/repository-registry";
 import { ProjectService } from "./projects/service";
-import { WorktreeManager } from "./projects/worktree-manager";
 import { resolvePushConfiguration } from "./push/config";
 import { PushDispatcher } from "./push/dispatcher";
 import { createPushRoutes } from "./push/routes";
@@ -40,11 +32,15 @@ import { mapRepositoryRegistryError } from "./routes/shared/repository-errors";
 import { voiceRoutes } from "./routes/voice";
 import { createWorkspaceRoutes } from "./routes/workspace";
 import { applySecurityHeaders } from "./security-headers";
+import { createEngineRuntime } from "./server/bootstrap/engine-runtime";
+import {
+  createWorkspaceRuntime,
+  pruneOrphanWorktrees,
+} from "./server/bootstrap/workspace-runtime";
 import { registerGracefulShutdown } from "./server/shutdown";
 import { BoardTaskService } from "./tasks/board-task-service";
 import { SessionWatchdog } from "./tasks/session-watchdog";
 import { serveWebFrontend } from "./web-frontend";
-import { WorkspaceStore } from "./workspace/store";
 import { createWsHandler } from "./ws/handler";
 import { WorkspaceHub } from "./ws/hub";
 
@@ -87,121 +83,14 @@ const corsPolicy = resolveCorsPolicy({
 });
 const corsOptions = corsOptionsFor(corsPolicy);
 
-const engineAuth =
-  config.opencodeUsername && config.opencodePassword
-    ? {
-        password: config.opencodePassword,
-        username: config.opencodeUsername,
-      }
-    : undefined;
-const processManager = config.opencodePerWorktree
-  ? null
-  : new OpenCodeProcessManager({
-      baseUrl: config.opencodeBaseUrl,
-      databasePath: path.resolve(config.dataDir, "opencode.db"),
-      directory: config.opencodeDirectory,
-      port: config.opencodePort,
-      username: config.opencodeUsername,
-      password: config.opencodePassword,
-      expectedVersion: sdkVersion(),
-    });
-const engineRegistry = config.opencodePerWorktree
-  ? new EngineRegistry({
-      databasePath: path.resolve(config.dataDir, "opencode.db"),
-      expectedVersion: sdkVersion(),
-      username: config.opencodeUsername,
-      password: config.opencodePassword,
-    })
-  : null;
-
-if (config.autoStartOpencode && processManager) {
-  await processManager.start();
-}
-
-// Check the running engine version, including engines adopted from a remote URL.
-if (processManager) {
-  const engineVersion = config.autoStartOpencode
-    ? processManager.observedVersion
-    : await processManager.probeVersion();
-  assertEngineLockstep(sdkVersion(), engineVersion);
-}
-
-const bridge = new OpenCodeBridge(
-  config.opencodeBaseUrl,
-  config.opencodeDirectory,
-  engineAuth,
-  {
-    ...(engineRegistry ? { engineProvider: engineRegistry } : {}),
-    ...(processManager
-      ? { ensureEngineReady: () => processManager.assertReady(sdkVersion()) }
-      : {}),
-  }
-);
-
-async function fileExists(candidate: string): Promise<boolean> {
-  try {
-    await access(candidate);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function legacySnapshotPaths(): string[] {
-  return [
-    path.join(homedir(), ".chorus", "workspace.json"),
-    path.join(process.cwd(), ".chorus", "workspace.json"),
-  ];
-}
-
-const worktrees = new WorktreeManager();
-
-const workspaceStore = new WorkspaceStore(config.dataDir, {
-  dbSizeCapMb: config.dbSizeCapMb,
-  retentionDays: config.retentionDays,
-  snapshotInterval: config.snapshotInterval,
-  worktreeProvisioner: worktrees,
+const { bridge, engineAuth, engineRegistry, processManager } =
+  await createEngineRuntime(config);
+const { workspaceStore, worktrees } = await createWorkspaceRuntime({
+  bridge,
+  config,
+  isProduction,
+  logger,
   repositoryRegistry,
-  restorePersistedRepositoryRoots: !isProduction,
-});
-
-if (config.enableLegacyWorkspaceImport) {
-  for (const candidate of legacySnapshotPaths()) {
-    if (await fileExists(candidate)) {
-      await workspaceStore.load(candidate);
-      logger.info("workspace-legacy-import-attempted", { from: candidate });
-      break;
-    }
-  }
-} else {
-  await workspaceStore.load();
-}
-
-bridge.setRecoverySessionProvider((directory) =>
-  workspaceStore
-    .getSnapshot()
-    .boards.filter(
-      (board) =>
-        (board.repo.worktree ?? board.repo.directory) === directory &&
-        board.session.currentTaskId !== undefined &&
-        (board.session.state === "active" ||
-          Object.values(board.columns)
-            .flat()
-            .some(
-              (task) =>
-                (task.pendingApprovals?.length ?? 0) > 0 ||
-                task.pendingApproval !== undefined
-            ))
-    )
-    .flatMap((board) =>
-      board.session.sessionId ? [board.session.sessionId] : []
-    )
-);
-
-logger.info("workspace-ready", {
-  dataDir: config.dataDir,
-  database: workspaceStore.databasePath,
-  headSeq: workspaceStore.headSeq(),
 });
 
 const pushConfiguration = await resolvePushConfiguration(
@@ -214,32 +103,12 @@ const pushConfiguration = await resolvePushConfiguration(
   workspaceStore
 );
 
-{
-  const boards = workspaceStore.getSnapshot().boards;
-  const liveBoardIds = new Set(boards.map((board) => board.boardId));
-  const repositories = new Set([
-    ...boards.map((board) => board.repo.directory),
-    ...repositoryRegistry.roots,
-  ]);
-
-  for (const directory of repositories) {
-    try {
-      const removed = await worktrees.pruneOrphans(directory, liveBoardIds);
-      if (removed.length > 0) {
-        logger.info("worktree-orphans-pruned", {
-          count: removed.length,
-          repository: directory,
-        });
-      }
-    } catch (error) {
-      // A moved or invalid repository must not prevent server startup.
-      logger.warn("worktree-prune-failed", {
-        error: error instanceof Error ? error.message : String(error),
-        repository: directory,
-      });
-    }
-  }
-}
+await pruneOrphanWorktrees({
+  repositoryRegistry,
+  workspaceStore,
+  worktrees,
+  logger,
+});
 
 const ticketStore: TicketStore = workspaceStore.meta;
 const sessionRegistry = new SessionRegistry(ticketStore, token);
