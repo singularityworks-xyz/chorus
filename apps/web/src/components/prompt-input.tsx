@@ -11,7 +11,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CommandPalette } from "@/components/command-palette";
 import { ComposerDock } from "@/components/composer-dock";
 import { ComposerHint } from "@/components/composer-hint";
-import { createModelKey, ModelPicker } from "@/components/model-picker";
 import { Button } from "@/components/ui/button";
 import {
   sharedDropdownContentClass,
@@ -26,6 +25,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  createModelKey,
+  ModelPicker,
+} from "@/features/models/components/model-picker";
 import { providerCatalogInvalidator } from "@/features/settings/provider-catalog-invalidator";
 import { isWorkspaceSessionLive } from "@/features/workspace/session-status";
 import type { WorkspaceBoard } from "@/features/workspace/types";
