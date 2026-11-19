@@ -1,7 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { createLogger } from "@chorus/logger";
 import { resolveCorsPolicy } from "./auth/cors";
-import { startLocalEntry } from "./auth/local-entry";
 import { SessionRegistry } from "./auth/session-registry";
 import { pruneExpiredTickets, type TicketStore } from "./auth/ticket";
 import { MissingTokenError, resolveToken } from "./auth/token";
@@ -13,13 +12,12 @@ import { PushDispatcher } from "./push/dispatcher";
 import { subscribeToAgentEvents } from "./server/bootstrap/agent-events";
 import { createEngineRuntime } from "./server/bootstrap/engine-runtime";
 import { createHttpApplication } from "./server/bootstrap/http-application";
-import { recoverBoardSessions } from "./server/bootstrap/recover-sessions";
+import { startServeServer } from "./server/bootstrap/start-server";
 import { createTaskRuntime } from "./server/bootstrap/task-runtime";
 import {
   createWorkspaceRuntime,
   pruneOrphanWorktrees,
 } from "./server/bootstrap/workspace-runtime";
-import { registerGracefulShutdown } from "./server/shutdown";
 import { WorkspaceHub } from "./ws/hub";
 
 const config = loadConfig();
@@ -146,71 +144,17 @@ const app = createHttpApplication({
   workspaceStore,
 });
 
-try {
-  await bridge.start();
-  logger.info(
-    engineRegistry ? "bridge-started-with-engine-pool" : "bridge-connected",
-    { url: config.opencodeBaseUrl }
-  );
-} catch (error) {
-  logger.error("bridge-failed", error instanceof Error ? error : undefined, {
-    url: config.opencodeBaseUrl,
-  });
-}
-
-await recoverBoardSessions({ bridge, logger, workspaceStore });
-
-let localEntry: ReturnType<typeof startLocalEntry> | null = null;
-try {
-  if (config.localEntryEnabled) {
-    localEntry = startLocalEntry({ token, registry: sessionRegistry });
-  }
-  app.listen({ hostname: config.bindAddress, port: config.port });
-} catch (error) {
-  pushDispatcher.stop();
-  hub.close();
-  bridge.stop();
-  await localEntry?.stop(true);
-  await remoteAccess.close();
-  await workspaceStore.close();
-  await Promise.all([processManager?.stop(), engineRegistry?.stop()]);
-  throw error;
-}
-
-logger.info("server-running", {
-  host: app.server?.hostname,
-  port: app.server?.port,
-  opencode: config.opencodeBaseUrl,
-  directory: config.opencodeDirectory,
-  ws: `ws://${app.server?.hostname}:${app.server?.port}/ws`,
-});
-
-registerGracefulShutdown({
-  beginEngineShutdown: () => {
-    processManager?.beginShutdown();
-    engineRegistry?.beginShutdown();
-  },
-  closeRemoteAccess: () => remoteAccess.close(),
-  closeWorkspaceHub: () => hub.close(),
-  closeWorkspaceStore: () => workspaceStore.close(),
-  forceKillEngines: () => {
-    processManager?.forceKill().catch(() => undefined);
-    engineRegistry?.forceKill().catch(() => undefined);
-  },
-  forceKillRemoteAccess: () => remoteAccess.forceKill(),
+await startServeServer({
+  app,
+  bridge,
+  config,
+  engineRegistry,
   logger,
-  stopBridge: () => bridge.stop(),
-  stopHttpServer: async () => {
-    await app.server?.stop(true);
-  },
-  stopLocalEntry: async () => {
-    await localEntry?.stop(true);
-  },
-  stopPushDispatcher: () => pushDispatcher.stop(),
-  stopEngines: async () => {
-    await Promise.all([
-      processManager?.stop() ?? Promise.resolve(),
-      engineRegistry?.stop() ?? Promise.resolve(),
-    ]);
-  },
+  processManager,
+  pushDispatcher,
+  remoteAccess,
+  sessionRegistry,
+  token,
+  workspaceHub: hub,
+  workspaceStore,
 });
