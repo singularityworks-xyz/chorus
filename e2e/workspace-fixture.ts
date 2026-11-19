@@ -39,7 +39,11 @@ export const test = base.extend<{ isolatedWorkspace: undefined }>({
 
 export async function signIn(page: Page): Promise<void> {
   await page.goto("/login");
-  await page.getByLabel("Access token").fill(TOKEN);
+  await completeSignIn(page);
+}
+
+export async function completeSignIn(page: Page): Promise<void> {
+  await page.getByLabel("Device code or server access token").fill(TOKEN);
   const pending = page.waitForResponse(
     (response) => new URL(response.url()).pathname === "/api/auth/login"
   );

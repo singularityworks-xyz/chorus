@@ -53,6 +53,11 @@ test.describe("desktop canvas controls", () => {
     await createBoard(page, boardTitle);
     await selectBoard(page, boardTitle);
 
+    await page.getByRole("button", { name: "Fit view" }).click();
+    await page
+      .getByTestId("desktop-canvas")
+      .getByRole("heading", { name: boardTitle, exact: true })
+      .click();
     await page.keyboard.press("n");
 
     await expect(
@@ -107,7 +112,9 @@ test.describe("desktop canvas controls", () => {
       page.getByRole("alert").filter({ hasText: "It remains open; try again." })
     ).toBeVisible();
     await expect(
-      page.locator(`[data-board-title="${boardTitle}"]`)
+      page
+        .getByTestId("desktop-canvas")
+        .getByRole("heading", { name: boardTitle, exact: true })
     ).toBeAttached();
     await expect(
       page.getByRole("button", { name: `Remove ${boardTitle} board` })

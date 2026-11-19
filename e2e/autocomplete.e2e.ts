@@ -47,7 +47,11 @@ test.describe("board autocomplete", () => {
   }) => {
     const boardTitle = `E2E autocomplete ${crypto.randomUUID().slice(0, 8)}`;
     await createBoard(page, boardTitle);
-    await selectBoard(page, boardTitle);
+    if (test.info().project.name === "mobile") {
+      await page.getByRole("button", { name: "Create Task" }).click();
+    } else {
+      await selectBoard(page, boardTitle);
+    }
 
     let attempts = 0;
     await page.route(

@@ -23,7 +23,7 @@ import {
 } from "./serve-env";
 import { start, stop } from "./serve-process";
 
-import { signIn, test } from "./workspace-fixture";
+import { completeSignIn, signIn, test } from "./workspace-fixture";
 
 /**
  * Creates a board from inside the page.
@@ -345,47 +345,26 @@ test.describe("client sync", () => {
     await otherContext.close();
   });
 
-  test("a dead session stops reconnecting and shows the login gate", async ({
-    browser,
+  test("a lost session redirects to sign-in and restores the requested page", async ({
     page,
   }) => {
     await signIn(page);
     await waitForLive(page);
-
-    // Drop the session cookie out from under the page. The next socket upgrade
-    // carries no credential, the hub answers 4401, and the client must stop
-    // rather than reconnect forever.
+    const title = uniqueTitle("E2E sign-in recovery");
+    await createBoard(page, title);
+    await expectBoardPresent(page, title);
     await page.context().clearCookies();
-
     await page.reload();
 
-    await expect(page.getByText("Session expired")).toBeVisible({
-      timeout: 30_000,
-    });
-
-    // The gate is a state, not a redirect: the URL is unchanged and there is no
-    // loop, so a dead session cannot bounce the browser between routes.
-    expect(new URL(page.url()).pathname).toBe("/");
-
-    // Signing back in clears the gate without a manual reload.
-    await page.getByRole("link", { name: "Sign in" }).click();
-    await page.waitForURL((url) => url.pathname === "/login");
+    await expect(page).toHaveURL((url) => url.pathname === "/login");
     expect(new URL(page.url()).searchParams.get("returnTo")).toBe("/");
-    await page.getByLabel("Access token").fill(TOKEN);
-    const loginResponse = page.waitForResponse((response) =>
-      response.url().endsWith("/api/auth/login")
-    );
-    await page.getByRole("button", { name: "Continue" }).click();
-    const response = await loginResponse;
-    expect(
-      response.ok(),
-      `login request returned ${String(response.status())}`
-    ).toBe(true);
-    await page.waitForURL((url) => url.pathname === "/");
-    await expect(page.getByText("Session expired")).toHaveCount(0, {
-      timeout: 30_000,
-    });
-    expect(browser).toBeDefined();
+    await expect(
+      page.getByRole("heading", { name: "Connect to Chorus" })
+    ).toBeVisible();
+
+    await completeSignIn(page);
+    await waitForLive(page);
+    await expectBoardPresent(page, title);
   });
 
   test("the phone layout replaces the canvas with a lane list", async ({

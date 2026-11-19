@@ -116,9 +116,12 @@ test.describe("agent lifecycle", () => {
       page.getByText(prompt).filter({ visible: true }).first()
     ).toBeVisible();
     if (!HAS_PROVIDER) {
-      await expect(
-        page.getByRole("button", { name: "Approve", exact: true })
-      ).toBeVisible();
+      const approve = page.getByRole("button", {
+        name: "Approve",
+        exact: true,
+      });
+      await approve.click();
+      await expect(approve).toHaveCount(0);
       await expect(
         page.getByText("Thinking", { exact: true }).first()
       ).toBeVisible();
