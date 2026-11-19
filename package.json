@@ -1,6 +1,6 @@
 {
   "name": "chorus",
-  "version": "0.3.50",
+  "version": "0.3.52",
   "private": true,
   "scripts": {
     "build": "turbo run build",

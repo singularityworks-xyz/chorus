@@ -1,8 +1,8 @@
 import { z } from "zod";
-import { sha256Schema } from "./hosting";
-import { portableRepositoryPathSchema } from "./repository-transfer";
-import { reviewCheckpointSchema } from "./review-transfer";
-import { portableWorkspaceStateSchema } from "./workspace-transfer";
+import { sha256Schema } from "../contracts";
+import { portableRepositoryPathSchema } from "./repository";
+import { reviewCheckpointSchema } from "./review";
+import { portableWorkspaceStateSchema } from "./workspace";
 
 export const MAX_WORKSPACE_CHECKPOINT_BYTES = 1024 * 1024 * 1024;
 export const MAX_WORKSPACE_MANIFEST_BYTES = 16 * 1024 * 1024;

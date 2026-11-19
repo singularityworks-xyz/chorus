@@ -1137,19 +1137,8 @@ export class WorkspaceStore {
   readonly #droppedWarnings = new Map<string, number>();
 
   /**
-   * Commits already-built board events for one board.
-   *
-   * `applyMutation` is for client mutations and `applyAgentEvent` for normalized
-   * stream events, which is a different shape. Neither can express "the server
-   * decided a card now exists" — the event log needs that when a prompt is
-   * queued, because `board.session.currentTaskId` is the only thing that lets
-   * `applyAgentEvent` attach a task to subsequent agent events, and
-   * `card.created` is the only projector branch that sets it
-   * (`packages/contracts/src/projector.ts`).
-   *
-   * Enqueued and committed through `#commit` like every other write, so the
-   * store stays the single emit path and the hub still learns about this from
-   * `onCommit` rather than from a second broadcast.
+   * Commits `card.created` before later agent events need the task binding.
+   * Events still use the regular commit path and hub notification.
    */
   async applyBoardEvents(
     boardId: string,

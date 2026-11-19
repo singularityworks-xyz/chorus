@@ -3,7 +3,7 @@ import {
   hostIdentitySchema,
   ownershipReleasePayloadSchema,
   signedOwnershipReleaseSchema,
-} from "./hosting";
+} from "./contracts";
 
 const release = {
   checkpointHash: "a".repeat(64),

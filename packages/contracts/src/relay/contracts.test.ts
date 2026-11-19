@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { relayOperatorConfigSchema, validateRelayConnection } from "./relay";
+import {
+  relayOperatorConfigSchema,
+  validateRelayConnection,
+} from "./contracts";
 
 const operator = {
   accountOrigin: "https://accounts.example.com",

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   devicePairingTokenResponseSchema,
   webSocketTicketResponseSchema,
-} from "./auth";
+} from "./contracts";
 
 describe("WebSocket ticket response", () => {
   test("accepts a generated 16-byte hex ticket", () => {

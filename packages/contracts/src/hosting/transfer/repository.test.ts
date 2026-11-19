@@ -3,7 +3,7 @@ import {
   portableGitRefSchema,
   portableRepositoryPathSchema,
   repositoryCheckpointSchema,
-} from "./repository-transfer";
+} from "./repository";
 
 const content = { digest: "a".repeat(64), bytes: 0 };
 const empty = {

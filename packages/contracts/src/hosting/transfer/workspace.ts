@@ -6,9 +6,9 @@ import {
   workspaceBoardSchema,
   workspaceHistoryEntrySchema,
   workspacePreferencesSchema,
-} from "./base";
-import { workspaceAuthoritySchema } from "./hosting";
-import { portableRepositoryPathSchema } from "./repository-transfer";
+} from "../../workspace/base";
+import { workspaceAuthoritySchema } from "../contracts";
+import { portableRepositoryPathSchema } from "./repository";
 
 const portableTaskSchema = taskSchema.extend({
   taggedFiles: z.array(portableRepositoryPathSchema).optional(),

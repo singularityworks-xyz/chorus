@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { reviewCheckpointSchema } from "./review-transfer";
+import { reviewCheckpointSchema } from "./review";
 
 test("review checkpoints enforce explicit unique roots and matching object format", () => {
   const value = {

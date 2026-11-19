@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { sessionFileDiffsSchema } from "./session-diff";
+import { sessionFileDiffsSchema } from "./diff";
 
 describe("session diff contracts", () => {
   test("accepts the normalized file content shape consumed by the viewer", () => {

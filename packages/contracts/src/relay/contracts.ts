@@ -4,7 +4,7 @@ import {
   hostIdSchema,
   hostPublicKeySchema,
   sha256Schema,
-} from "./hosting";
+} from "../hosting/contracts";
 
 export const relayHttpsOriginSchema = z
   .url()

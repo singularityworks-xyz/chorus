@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { sha256Schema } from "./hosting";
+import { sha256Schema } from "../contracts";
 
 export const MAX_REPOSITORY_CHECKPOINT_BYTES = 256 * 1024 * 1024;
 export const MAX_REPOSITORY_FILE_BYTES = 16 * 1024 * 1024;
