@@ -1,22 +1,12 @@
 import { mkdir } from "node:fs/promises";
 import { createLogger } from "@chorus/logger";
-import { cors } from "@elysiajs/cors";
-import { Elysia } from "elysia";
-import { LoginRateLimiter } from "./auth/brute-force";
-import { corsOptionsFor, resolveCorsPolicy } from "./auth/cors";
-import { createDeviceManagementRoutes } from "./auth/device-routes";
-import { authGuardHandler, isPublicFrontendPath } from "./auth/guard";
+import { resolveCorsPolicy } from "./auth/cors";
 import { startLocalEntry } from "./auth/local-entry";
-import { DevicePairingTokenStore } from "./auth/pairing";
-import { UnregisteredRootError } from "./auth/roots";
-import { createAuthRoutes } from "./auth/routes";
 import { SessionRegistry } from "./auth/session-registry";
 import { pruneExpiredTickets, type TicketStore } from "./auth/ticket";
 import { MissingTokenError, resolveToken } from "./auth/token";
 import { loadConfig } from "./config";
 import { HostRemoteAccess } from "./hosting/remote-access";
-import { createRemoteAccessRoutes } from "./hosting/routes";
-import { EngineUnavailableError } from "./opencode/process-manager/errors";
 import { ProjectEngineContext } from "./projects/engine-context";
 import { NativeFolderPicker } from "./projects/folder-picker";
 import { ProviderService } from "./projects/providers/service";
@@ -24,15 +14,8 @@ import { RepositoryRegistry } from "./projects/repository-registry";
 import { ProjectService } from "./projects/service";
 import { resolvePushConfiguration } from "./push/config";
 import { PushDispatcher } from "./push/dispatcher";
-import { createPushRoutes } from "./push/routes";
-import { createHttpRoutes } from "./routes";
-import { createProjectRoutes } from "./routes/projects";
-import { createProviderRoutes } from "./routes/providers";
-import { mapRepositoryRegistryError } from "./routes/shared/repository-errors";
-import { voiceRoutes } from "./routes/voice";
-import { createWorkspaceRoutes } from "./routes/workspace";
-import { applySecurityHeaders } from "./security-headers";
 import { createEngineRuntime } from "./server/bootstrap/engine-runtime";
+import { createHttpApplication } from "./server/bootstrap/http-application";
 import {
   createWorkspaceRuntime,
   pruneOrphanWorktrees,
@@ -40,8 +23,6 @@ import {
 import { registerGracefulShutdown } from "./server/shutdown";
 import { BoardTaskService } from "./tasks/board-task-service";
 import { SessionWatchdog } from "./tasks/session-watchdog";
-import { serveWebFrontend } from "./web-frontend";
-import { createWsHandler } from "./ws/handler";
 import { WorkspaceHub } from "./ws/hub";
 
 const config = loadConfig();
@@ -81,8 +62,6 @@ const corsPolicy = resolveCorsPolicy({
   corsAllowedOrigins: process.env.CORS_ALLOWED_ORIGINS,
   isProduction,
 });
-const corsOptions = corsOptionsFor(corsPolicy);
-
 const { bridge, engineAuth, engineRegistry, processManager } =
   await createEngineRuntime(config);
 const { workspaceStore, worktrees } = await createWorkspaceRuntime({
@@ -137,26 +116,8 @@ pushDispatcher.start();
 
 pruneExpiredTickets(ticketStore);
 
-const loginRateLimiter = new LoginRateLimiter();
-const pairingTokenStore = new DevicePairingTokenStore();
-const ticketOptions = { now: Date.now, store: ticketStore };
-
 workspaceStore.onCommit((commit) => {
   hub.publish(commit);
-});
-
-const authRoutes = createAuthRoutes({
-  sessionRegistry,
-  isProduction,
-  localOrigins: corsPolicy.allowedOrigins,
-  onLogoutDevice: async (deviceId) => {
-    hub.disconnectDevice(deviceId);
-    await workspaceStore.deleteDevicePushSubscriptions(deviceId);
-  },
-  pairingTokenStore,
-  rateLimiter: loginRateLimiter,
-  ticketStore,
-  token,
 });
 
 const watchdog = new SessionWatchdog(bridge, {
@@ -277,98 +238,22 @@ bridge.subscribe(async (event) => {
   });
 });
 
-const securedApp = new Elysia()
-  // Apply headers before routing, including authentication short-circuits.
-  .onRequest(({ set }) => {
-    applySecurityHeaders(set.headers);
-  })
-
-  .onStart(() => {
-    logger.info("server-starting", { port: config.port });
-  })
-  .onError(({ error, code, set }) => {
-    if (error instanceof EngineUnavailableError) {
-      set.status = 503;
-      return { code: error.code, message: error.message };
-    }
-    if (error instanceof UnregisteredRootError) {
-      set.status = 403;
-      return { code: "unregistered_directory", message: error.message };
-    }
-    const repositoryError = mapRepositoryRegistryError(error);
-    if (repositoryError) {
-      set.status = repositoryError.status;
-      return {
-        code: repositoryError.code,
-        message: repositoryError.message,
-      };
-    }
-
-    logger.error(
-      `server-error: ${code}`,
-      error instanceof Error ? error : undefined
-    );
-  })
-  // Keep the frontend reachable so users can enter their token.
-  .get("/", () => serveWebFrontend("/"))
-  .get("/*", ({ request }) => {
-    const url = new URL(request.url);
-    return serveWebFrontend(url.pathname);
-  })
-  // Register the guard before route plugins so nested routes inherit it.
-  .resolve(
-    { as: "global" },
-    authGuardHandler({
-      sessionRegistry,
-      isStaticAsset: isPublicFrontendPath,
-      ticketOptions,
-      token,
-    })
-  )
-
-  .use(authRoutes)
-  .use(
-    createRemoteAccessRoutes({
-      token,
-      registry: sessionRegistry,
-      remote: remoteAccess,
-    })
-  )
-  .use(
-    createDeviceManagementRoutes({
-      token,
-      registry: sessionRegistry,
-      onRevoke: async (deviceId) => {
-        hub.disconnectDevice(deviceId);
-        await workspaceStore.deleteDevicePushSubscriptions(deviceId);
-      },
-    })
-  )
-  .use(
-    createPushRoutes({
-      allowedHosts: config.pushAllowedHosts,
-      configuration: pushConfiguration,
-      store: workspaceStore,
-      token,
-    })
-  )
-
-  .use(createHttpRoutes(bridge, boardTasks, workspaceStore))
-  .use(createProjectRoutes(projectService, isProduction))
-  .use(createProviderRoutes(providerService))
-  .use(createWorkspaceRoutes(workspaceStore, boardTasks))
-  .use(voiceRoutes)
-  .use(
-    createWsHandler({
-      sessionRegistry,
-      hub,
-      ticketOptions,
-      token,
-    })
-  );
-
-// Mount CORS only when an explicit development allowlist exists.
-const app = corsOptions ? securedApp.use(cors(corsOptions)) : securedApp;
+const app = createHttpApplication({
+  boardTasks,
+  bridge,
+  config,
+  corsPolicy,
+  hub,
+  isProduction,
+  logger,
+  projectService,
+  providerService,
+  pushConfiguration,
+  remoteAccess,
+  sessionRegistry,
+  token,
+  workspaceStore,
+});
 
 try {
   await bridge.start();
