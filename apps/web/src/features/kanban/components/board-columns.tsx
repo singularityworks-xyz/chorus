@@ -14,8 +14,9 @@ import {
 import { ResizablePanel } from "@/components/ui/resizable";
 import type { KanbanTaskActionState } from "@/features/kanban/hooks/use-kanban-card-actions";
 import { cn } from "@/lib/utils";
+import { computeDiffTotals } from "../task-card/diff-summary";
+import { TaskCard } from "../task-card/task-card";
 import { KanbanColumn, KanbanColumnContent } from "./kanban";
-import { computeDiffTotals, TaskCard } from "./task-card";
 
 const COLUMNS: Record<
   string,
