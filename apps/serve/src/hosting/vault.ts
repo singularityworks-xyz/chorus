@@ -51,7 +51,6 @@ async function readWrappingKey(root: string): Promise<string> {
   return value;
 }
 
-/** Credentials never enter chorus.db, workspace events, or browser storage. */
 export class HostVault {
   readonly #db: Database;
   readonly #envelope: SecretEnvelope;
@@ -181,7 +180,7 @@ export class HostVault {
         ) {
           throw new Error("The host signing identity is corrupt");
         }
-        // Also rejects malformed public coordinates before they can be approved.
+
         publicKeyHash(identity.publicKey);
         return identity;
       })

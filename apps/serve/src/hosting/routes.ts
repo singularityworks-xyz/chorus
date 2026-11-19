@@ -31,8 +31,6 @@ export function createRemoteAccessRoutes(options: {
       };
     })
     .onRequest(async ({ request, set }) => {
-      // Elysia merges onRequest hooks into the parent; restrict this hook to
-      // this module so health, login and private local entry retain their guards.
       if (!isRemoteControl(request)) {
         return;
       }

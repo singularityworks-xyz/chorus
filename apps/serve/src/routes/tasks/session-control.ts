@@ -136,12 +136,6 @@ export function createSessionControlRoutes({
     .get(
       "/tasks/:sessionID/questions",
       async ({ params }) => {
-        // The board's directory, then narrowed to this session.
-        //
-        // This passed the session id where a directory belongs, so the engine
-        // was asked to list questions for a path called "sess-…" and returned
-        // nothing. The engine lists per directory, so scoping by session is our
-        // job.
         const questions = await bridge.listQuestions(
           await directoryFor(params.sessionID)
         );
@@ -260,12 +254,6 @@ export function createSessionControlRoutes({
           directory,
         });
 
-        // Bind the fork to the board before prompting it.
-        //
-        // Follow-up commands resolve their directory from the board that owns
-        // the session, so an unbound fork makes every later command for the new
-        // session fail as unknown — and agent events for it have no board to
-        // attach to. The fork *is* the board's session now.
         await attachForkedSession(workspaceStore, params.sessionID, forked.id);
 
         await bridge.promptSession({

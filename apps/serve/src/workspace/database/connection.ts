@@ -81,7 +81,7 @@ export function openChorusDatabase(dataDir: string): Database {
   db.exec("PRAGMA foreign_keys = ON");
   db.exec(SCHEMA);
   migratePushSubscriptions(db);
-  // The database contains workspace paths and user content.
+
   chmodSync(dbPath, 0o600);
   return db;
 }

@@ -5,11 +5,8 @@ import { expect } from "@playwright/test";
 import { E2E_REPO_DIR } from "./serve-env";
 import { signIn, test } from "./workspace-fixture";
 
-// CI uses the scripted engine through Serve's real adapter. The opt-in case
-// below uses the pinned engine with a configured external model.
 const HAS_PROVIDER = process.env.CHORUS_E2E_AGENT === "1";
 
-/** Creates a board bound to the throwaway fixture repo and returns its title. */
 async function createBoard(page: Page, title: string): Promise<string> {
   await page.evaluate(
     async ({ boardTitle, directory }) => {
@@ -40,21 +37,12 @@ async function createBoard(page: Page, title: string): Promise<string> {
   return title;
 }
 
-/**
- * Picks a board in the composer's selector.
- *
- * Necessary, not incidental: `handleSubmit` returns early unless a board is
- * selected, so a board created through the API is invisible to the composer until
- * it is chosen here. Typing a prompt without this silently does nothing, which
- * looks identical to an agent that never started.
- */
 async function selectBoard(page: Page, title: string): Promise<void> {
   await page.getByRole("combobox").click();
   await page.getByRole("option", { name: title }).click();
   await expect(page.getByRole("combobox")).toContainText(title);
 }
 
-/** Types a prompt into the composer and submits it. */
 async function submitPrompt(page: Page, text: string): Promise<void> {
   const composer = page.getByRole("textbox", { name: "Prompt Chorus" });
   await composer.click();
@@ -63,14 +51,6 @@ async function submitPrompt(page: Page, text: string): Promise<void> {
 }
 
 test.describe("agent lifecycle", () => {
-  // Desktop only, deliberately.
-  //
-  // The lifecycle under test is server-side — card creation, session binding,
-  // delta projection — and one project covers it. The phone has no board chip
-  // for a single board and its composer select does not open under automation,
-  // so driving selection there would mean testing a workaround. The phone layout
-  // itself is covered by `sync.e2e.ts`, which asserts the lane list owns the
-  // viewport and renders the board.
   test.beforeEach(async ({ page }) => {
     await signIn(page);
     await expect
@@ -135,8 +115,7 @@ test.describe("agent lifecycle", () => {
       testInfo.project.name !== "desktop",
       "agent lifecycle is server-side; covered by the desktop project"
     );
-    // Scoped to this test on purpose: `test.skip` in a describe body would skip
-    // every test in it, including the provider-free one above.
+
     test.skip(
       !HAS_PROVIDER,
       "needs a configured model provider; set CHORUS_E2E_AGENT=1"
@@ -145,9 +124,6 @@ test.describe("agent lifecycle", () => {
     const board = `E2E agent run ${crypto.randomUUID().slice(0, 8)}`;
     await createBoard(page, board);
 
-    // Required, not incidental: `handleSubmit` returns early unless a board is
-    // selected, so without this the prompt is typed and silently never sent —
-    // which would look exactly like an agent that did not start.
     await selectBoard(page, board);
 
     await submitPrompt(
@@ -155,8 +131,6 @@ test.describe("agent lifecycle", () => {
       "Write the word CHORUS into proof.txt and then stop."
     );
 
-    // Reaching `done` means the whole path held: card created, session bound,
-    // deltas streamed into steps, and the terminal transition projected.
     await expect
       .poll(
         () =>
@@ -177,12 +151,6 @@ test.describe("agent lifecycle", () => {
       )
       .toBeGreaterThan(0);
 
-    // The agent really ran: it wrote the file it was asked for.
-    //
-    // Read from the checkout directly. The previous version asserted
-    // `typeof proof === "boolean"`, which is true whether the request succeeded
-    // or not — a test that could not fail, guarding the one thing this case
-    // exists to prove.
     const proofPath = join(E2E_REPO_DIR, "proof.txt");
     await expect
       .poll(

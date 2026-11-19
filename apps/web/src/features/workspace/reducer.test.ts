@@ -287,7 +287,6 @@ describe("optimistic board positions", () => {
   });
 
   test("a server patch that contradicts the guess wins anyway", () => {
-    // A server position overrides a stale local guess.
     const dragged = workspaceReducer(withBoards([board("board-1")]), {
       boardId: "board-1",
       mutationId: "m1",
@@ -333,7 +332,6 @@ describe("optimistic board positions", () => {
       type: "server/events",
     });
 
-    // Only a position event can confirm a pending drag.
     expect(state.pendingDrags.size).toBe(1);
   });
 
@@ -641,7 +639,6 @@ describe("local optimistic preferences", () => {
   });
 });
 
-// Duplicate events append content, so the sync layer must deduplicate them.
 describe("the projector is not idempotent", () => {
   test("card.created appends rather than deduping", () => {
     const snapshotBoard = board("board-1", {

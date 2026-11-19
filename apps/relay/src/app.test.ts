@@ -14,8 +14,7 @@ describe("relay HTTP authorization", () => {
     const config = testConfig();
     const database = new Database(":memory:");
     const auth = createRelayAuth(database, config);
-    // Registry storage is real but deliberately unreachable. None of these
-    // unauthorized requests may reach PostgreSQL or enrollment side effects.
+
     const pool = new Pool({
       host: "127.0.0.1",
       port: 1,

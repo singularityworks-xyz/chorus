@@ -7,8 +7,7 @@ import { RelayRegistry } from "./registry";
 import { createFrpPlugin, createTunnelVerifier } from "./tunnel/plugin";
 
 const config = loadRelayConfig();
-// Separate pools: enrollment holds a registry transaction while creating an
-// OAuth client. Sharing an exhausted pool would deadlock those operations.
+
 const poolOptions = {
   connectionString: config.databaseUrl,
   max: 8,

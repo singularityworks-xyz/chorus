@@ -6,20 +6,6 @@ import { useEffect, useState } from "react";
 import { safeNotificationReturnTo } from "@/features/notifications/browser";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 
-/**
- * The root layout cannot react to AUTH_EXPIRED because Next.js layouts are
- * cached during client navigation. This gate sits inside the provider that
- * receives the event and can preserve the current board/card target.
- *
- * Serve deliberately returns the same unauthorized result for missing,
- * expired, and invalid sessions. Keep the copy neutral instead of claiming the
- * user had a session that expired. The sync layer already stops retrying a
- * rejected session; this gate provides the sign-in path.
- *
- * Do not mount the canvas until a saved or server snapshot is available. That
- * prevents an empty workspace from being mistaken for successfully loaded
- * state while the initial connection is still being resolved.
- */
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const { authExpired, connectionError, hydrated, sessionStatus } =

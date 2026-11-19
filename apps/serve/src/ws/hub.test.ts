@@ -59,7 +59,7 @@ function makeSocket(buffered = 0): FakeSocket {
     send(data: string) {
       socket.sent.push(data);
       socket.messages.push(JSON.parse(data) as Record<string, unknown>);
-      // Matches Bun's ServerWebSocket: send() reports bytes accepted.
+
       return data.length;
     },
   } as FakeSocket;
@@ -78,7 +78,6 @@ async function connect(hub: WorkspaceHub, socket: FakeSocket, since = 0) {
   );
 }
 
-/** Seeds a board and returns its id. */
 async function seedBoard(
   store: WorkspaceStore,
   title = "Repo"
@@ -215,7 +214,6 @@ describe("resume handshake", () => {
     const hub = new WorkspaceHub(store);
     const socket = makeSocket();
 
-    // Client has only seen seq 1.
     await connect(hub, socket, 1);
 
     expect(socket.messages[0]?.type).toBe("ready");
@@ -234,7 +232,6 @@ describe("resume handshake", () => {
     await store.load();
     const boardId = await seedBoard(store);
 
-    // Fill past MAX_REPLAY_GAP.
     for (let index = 0; index < MAX_REPLAY_GAP + 5; index += 1) {
       await store.applyMutation({
         baseRevision: null,
@@ -307,9 +304,6 @@ describe("resume handshake", () => {
   });
 
   test("a client resuming from before the snapshot floor gets a snapshot", async () => {
-    // Events are pruned into snapshots. A client resuming from below the floor
-    // has a small gap that cannot actually be replayed — serving it the few rows
-    // that remain would silently diverge.
     const store = makeStore();
     await store.load();
     const boardId = await seedBoard(store);
@@ -320,7 +314,7 @@ describe("resume handshake", () => {
       payload: { boardId, position: { x: 9, y: 9 } },
       type: "board.move",
     });
-    // Snapshot at head, which prunes everything below it.
+
     await store.writeSnapshot();
 
     const hub = new WorkspaceHub(store);
@@ -499,7 +493,6 @@ describe("decideResume", () => {
   });
 
   test("a position below the replay floor cannot be served", () => {
-    // Small gap, but the rows are gone.
     expect(decideResume(3, 8, 7)).toEqual({
       kind: "snapshot",
       reason: "pruned",
@@ -710,7 +703,6 @@ describe("coalescing", () => {
       hub.publishRecord(stepEvent("board-1", index, `s${index}`));
     }
 
-    // Nothing yet: the window is 10s. Fifty *distinct* steps, so nothing merges.
     expect(socket.messages).toHaveLength(0);
     expect(hub.stats().coalescerDepth).toBe(50);
 
@@ -733,10 +725,6 @@ describe("coalescing", () => {
     }
     hub.publishRecord(approvalEvent("board-1", 21));
 
-    // The approval is not buffered itself, but it also does not overtake the
-    // deltas: delivering it first handed the client 21 then 1..20, a gap it
-    // resolves by resyncing, so every token burst with a side event turned into
-    // a full-snapshot storm.
     expect(socket.messages).toHaveLength(21);
     expect((socket.messages.at(-1)?.event as { type: string }).type).toBe(
       "card.waiting_for_approval"
@@ -756,23 +744,18 @@ describe("coalescing", () => {
     await connect(hub, socket, 0);
     socket.messages.length = 0;
 
-    // A streaming response part: hundreds of token deltas for ONE stepId.
     for (let index = 1; index <= 500; index += 1) {
       hub.publishRecord(stepEvent("board-1", index, "part-abc"));
     }
 
     await Bun.sleep(250);
 
-    // They merge by step, so 500 deltas collapse to a single frame.
     expect(socket.messages).toHaveLength(1);
-    // The frame declares the whole run it covers. Reporting only `seq: 1` left
-    // the client resuming from inside the run, and the replay appended the tail
-    // of the transcript a second time.
+
     expect(socket.messages[0]?.fromSeq).toBe(1);
     expect(socket.messages[0]?.seq).toBe(500);
     expect(hub.stats().coalescerDepth).toBe(0);
 
-    // ...and the merge is lossless: every token is still there, in order.
     const merged = socket.messages[0]?.event as { delta: string };
     expect(merged.delta).toBe("x".repeat(500));
 
@@ -813,10 +796,6 @@ describe("coalescing", () => {
 
     hub.flush();
 
-    // Sequences 1 and 3 are both part-a but are not contiguous, so they stay
-    // separate. Merging them would claim the range 1..3 while sequence 2 holds
-    // part-b's content: the cursor jumps to 3 and part-b's delta is then
-    // dismissed as already-seen and lost.
     expect(socket.messages).toHaveLength(3);
     expect(socket.messages.map((m) => m.seq as number)).toEqual([1, 2, 3]);
   });
@@ -834,8 +813,6 @@ describe("coalescing", () => {
     hub.publishRecord(stepEvent("board-1", 3, "part-b"));
     hub.flush();
 
-    // Same stepId on another board must not absorb the first board's delta,
-    // and interleaved board records must respect the workspace-wide cursor.
     expect(socket.messages.map((message) => message.seq)).toEqual([1, 2, 3]);
   });
 
@@ -873,7 +850,6 @@ describe("backpressure", () => {
     await connect(hub, socket, 0);
     socket.messages.length = 0;
 
-    // Socket has stalled: its buffer is already past the mark.
     socket.buffered = HIGH_WATER_MARK + 1;
     hub.publishRecord(bufferedEvent("board-1", 1));
     hub.flush();
@@ -895,7 +871,6 @@ describe("backpressure", () => {
     hub.flush();
     expect(socket.messages).toHaveLength(0);
 
-    // An approval must reach the operator regardless of radio conditions.
     hub.publishRecord({
       boardId: "board-1",
       event: {
@@ -927,13 +902,11 @@ describe("backpressure", () => {
     hub.flush();
     expect(socket.messages).toHaveLength(0);
 
-    // Just under the mark but above half of it: hysteresis keeps it flagged.
     socket.buffered = HIGH_WATER_MARK - 1;
     hub.publishRecord(bufferedEvent("board-1", 2));
     hub.flush();
     expect(socket.messages).toHaveLength(0);
 
-    // Below half: the client recovers.
     socket.buffered = HIGH_WATER_MARK / 4;
     hub.publishRecord(bufferedEvent("board-1", 3));
     hub.flush();
@@ -948,7 +921,7 @@ describe("backpressure", () => {
     await store.load();
     const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
     const socket = makeSocket();
-    // A socket that cannot report its buffered amount must never be throttled.
+
     // biome-ignore lint/performance/noDelete: simulates a transport without the method
     delete (socket as { getBufferedAmount?: () => number }).getBufferedAmount;
     await connect(hub, socket, 0);
@@ -979,9 +952,6 @@ describe("backpressure recovery", () => {
   }
 
   test("a critical-only client recovers from a drained buffer alone", async () => {
-    // Regression: recovery once required N consecutive positive sends, but a
-    // critical-only client is sent nothing coalescible, so it could never
-    // accumulate them and stayed throttled forever.
     const store = makeStore();
     await store.load();
     const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
@@ -995,7 +965,6 @@ describe("backpressure recovery", () => {
     expect(socket.messages).toHaveLength(0);
     expect(hub.stats().criticalOnlyClients).toBe(1);
 
-    // Socket drains; no control traffic ever arrives for this client.
     socket.buffered = 0;
     hub.publishRecord(coalescible("board-1", 2));
     hub.flush();
@@ -1016,12 +985,9 @@ describe("backpressure recovery", () => {
     await connect(hub, socket, 0);
     socket.messages.length = 0;
 
-    // The gauge reads as absent, so congestion comes from send status alone.
     hub.publishRecord(coalescible("board-1", 1));
     hub.flush();
 
-    // A control event still flows to a critical-only client, which is the
-    // positive send that lets recovery happen.
     hub.publishRecord({
       boardId: "board-1",
       event: {
@@ -1042,9 +1008,6 @@ describe("backpressure recovery", () => {
   });
 
   test("send statuses are counted separately for diagnostics", async () => {
-    // Each mode gets a fresh client: a client that has already registered
-    // backpressure goes critical-only, after which coalescible events are
-    // skipped and no further status is ever reported.
     const modes = [
       { expected: "backpressuredFrames", status: -1 },
       { expected: "droppedFrames", status: 0 },
@@ -1068,15 +1031,12 @@ describe("backpressure recovery", () => {
   });
 
   test("clients are tracked by connection id, not object identity", async () => {
-    // Elysia hands `open` and `message` different wrapper objects for the same
-    // connection. Keying by object identity silently missed every lookup.
     const store = makeStore();
     await store.load();
     const hub = new WorkspaceHub(store);
     const registered = makeSocket(0);
     await connect(hub, registered, 0);
 
-    // A different object, same connection id — exactly what Elysia produces.
     const sameConnection = {
       ...registered,
       messages: [] as Record<string, unknown>[],
@@ -1094,8 +1054,6 @@ describe("backpressure recovery", () => {
       JSON.stringify({ since: 0, type: "hello" })
     );
 
-    // The lookup resolved to the *registered* client by id, so its socket
-    // received the handshake rather than the frames being dropped on the floor.
     expect(registered.sent.length).toBeGreaterThan(0);
     expect(hub.clientCount()).toBe(1);
 
@@ -1143,7 +1101,6 @@ describe("heartbeat", () => {
     await connect(hub, socket, 0);
     socket.messages.length = 0;
 
-    // Three intervals, no pong ever arrives.
     clock += PONG_TIMEOUT_MS * 3;
     await Bun.sleep(25);
 
@@ -1152,9 +1109,6 @@ describe("heartbeat", () => {
     expect(hub.clientCount()).toBe(0);
     expect(hub.stats().dropReasons["pong-timeout"]).toBe(1);
 
-    // Regression: the heartbeat used to clear only the client set, leaving the
-    // id map holding a dead client. A late frame on that id then resolved to a
-    // closed socket instead of being dropped as unknown.
     const before = socket.sent.length;
     await hub.handleRawMessage(
       socket,
@@ -1199,8 +1153,6 @@ describe("heartbeat", () => {
     await connect(hub, socket, 0);
     socket.messages.length = 0;
 
-    // A transport that refuses the ping must register as backpressured, so a
-    // client that cannot even take a heartbeat gets treated as sick.
     socket.send = () => -1;
     clock += 1000;
     await Bun.sleep(10);
@@ -1212,10 +1164,6 @@ describe("heartbeat", () => {
 });
 
 describe("sequence accounting across coalescing", () => {
-  // Regression tests for the interaction between coalescing and resume, where a
-  // merged frame reporting a single sequence made clients duplicate or lose
-  // content.
-
   test("resume after a coalesced flush does not replay merged deltas", async () => {
     const store = makeStore();
     await store.load();
@@ -1223,7 +1171,7 @@ describe("sequence accounting across coalescing", () => {
     await seedSession(store);
 
     const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
-    // Mirror index.ts: the hub learns about commits from the store.
+
     store.onCommit((commit) => hub.publish(commit));
 
     const a = makeSocket(0);
@@ -1234,13 +1182,9 @@ describe("sequence accounting across coalescing", () => {
     );
     a.messages.length = 0;
 
-    // The seed events above are already buffered; deliver them, then start
-    // counting from the coalesced delta run only.
     hub.flush();
     a.messages.length = 0;
 
-    // Same partID: repeated updates to one part is what a token stream looks
-    // like, and it is the only shape that produces mergeable deltas.
     for (const content of ["d1", "d2", "d3"]) {
       await emitDelta(store, content);
     }
@@ -1253,11 +1197,8 @@ describe("sequence accounting across coalescing", () => {
       .map((m) => (m.event as { delta?: string }).delta ?? "")
       .join("");
 
-    // The client has now applied everything the hub sent it.
     expect(consumed.length).toBeGreaterThan(0);
 
-    // Reconnect exactly where the client left off: a well-behaved client asks
-    // for strictly after its cursor.
     const b = makeSocket(0);
     hub.register(b);
     await hub.handleRawMessage(
@@ -1274,7 +1215,6 @@ describe("sequence accounting across coalescing", () => {
       .map((m) => (m.event as { delta?: string }).delta ?? "")
       .join("");
 
-    // Anything already delivered must not come back.
     expect(replayed).toBe("");
 
     hub.close();
@@ -1288,11 +1228,9 @@ describe("sequence accounting across coalescing", () => {
     const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
     store.onCommit((commit) => hub.publish(commit));
 
-    // A delta lands in the coalescing window.
     const headBefore = store.headSeq();
     await emitDelta(store, "d11");
 
-    // The client reconnects mid-window and the replay covers the same record.
     const b = makeSocket(0);
     hub.register(b);
     await hub.handleRawMessage(
@@ -1306,7 +1244,6 @@ describe("sequence accounting across coalescing", () => {
     const fromReplay = b.messages.filter((m) => m.type === "event");
     expect(fromReplay.length).toBeGreaterThan(0);
 
-    // The window flushes afterwards. Nothing may be delivered twice.
     hub.flush();
 
     const all = b.messages.filter((m) => m.type === "event");
@@ -1393,8 +1330,6 @@ describe("coalescing correctness", () => {
   });
 
   test("a skipped coalescible event is not stepped over by a later control event", async () => {
-    // Congestion skips a delta. The cursor must stay behind the hole, or the
-    // client resumes past a sequence it never received and loses it for good.
     const store = makeStore();
     await store.load();
     const hub = new WorkspaceHub(store, { coalesceMs: 10_000 });
@@ -1402,7 +1337,6 @@ describe("coalescing correctness", () => {
     await connect(hub, socket, 0);
     socket.messages.length = 0;
 
-    // Force congestion: the buffer sits above the high-water mark.
     socket.buffered = HIGH_WATER_MARK + 1;
 
     hub.publishRecord({
@@ -1420,7 +1354,6 @@ describe("coalescing correctness", () => {
     hub.flush();
     expect(socket.messages).toHaveLength(0);
 
-    // A control event still flows, and must not advance past sequence 1.
     hub.publishRecord({
       boardId: "board-1",
       event: {
@@ -1437,8 +1370,6 @@ describe("coalescing correctness", () => {
     expect(delivered).toHaveLength(1);
     expect(delivered[0]?.fromSeq).toBe(2);
 
-    // The hole is still visible to the client as a gap, which is what makes it
-    // resync rather than silently diverge.
     expect(delivered[0]?.fromSeq).toBeGreaterThan(1);
 
     hub.close();
@@ -1447,9 +1378,6 @@ describe("coalescing correctness", () => {
 
 describe("telemetry and liveness rate limits", () => {
   test("a burst of viewport frames does not close the socket", async () => {
-    // A one-second canvas drag produces well over 60 frames. Charging those
-    // against the control budget hard-closed a healthy connection
-    // with 4429.
     const store = makeStore();
     await store.load();
     const clock = 1_000_000;
@@ -1480,8 +1408,6 @@ describe("telemetry and liveness rate limits", () => {
   });
 
   test("pong is never charged against the control budget", async () => {
-    // A client pinging every second for a minute was previously disconnected at
-    // 60 s, which is exactly how long a healthy idle session lasts.
     const store = makeStore();
     await store.load();
     let clock = 1_000_000;
@@ -1501,8 +1427,6 @@ describe("telemetry and liveness rate limits", () => {
   });
 
   test("a repeated hello is refused rather than replaying again", async () => {
-    // Replaying from the client-supplied `since` rather than its real cursor
-    // re-sends sequences it has already applied.
     const store = makeStore();
     await store.load();
     const hub = new WorkspaceHub(store);
@@ -1537,8 +1461,6 @@ describe("telemetry and liveness rate limits", () => {
   });
 
   test("a peer discarding frames is closed rather than ignored", async () => {
-    // Backpressure resolves on its own; a discarded frame does not. A socket
-    // returning 0 kept receiving every control event and silently lost them all.
     const store = makeStore();
     await store.load();
     const hub = new WorkspaceHub(store);
@@ -1597,9 +1519,6 @@ describe("telemetry and liveness rate limits", () => {
   });
 
   test("a throwing commit listener cannot fail a durable write", async () => {
-    // The listener is the hub, which writes to sockets, and it runs inside the
-    // serial commit queue. A throw here would report a projection failure for a
-    // write that is already durable.
     const store = makeStore();
     await store.load();
 

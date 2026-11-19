@@ -7,7 +7,6 @@ import {
 
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 
-/** Backend-only encrypted storage; never a custom network encryption protocol. */
 export class SecretEnvelope {
   readonly #key: Buffer;
 

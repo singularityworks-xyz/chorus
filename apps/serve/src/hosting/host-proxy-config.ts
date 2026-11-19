@@ -2,7 +2,6 @@ import { hostIdSchema } from "@chorus/contracts";
 
 const HOSTNAME = /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/;
 
-/** The public TLS endpoint lives on the user's host, behind the opaque relay. */
 export function createHostProxyConfig(options: {
   hostname: string;
   hostId: string;

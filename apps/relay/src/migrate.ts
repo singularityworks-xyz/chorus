@@ -4,7 +4,6 @@ import { createRelayAuth } from "./auth";
 import { loadRelayConfig } from "./config";
 import { RELAY_SCHEMA } from "./registry";
 
-// Explicit operator operation; normal startup never silently migrates schemas.
 const config = loadRelayConfig();
 const pool = new Pool({ connectionString: config.databaseUrl, max: 2 });
 try {

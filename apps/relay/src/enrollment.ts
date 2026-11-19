@@ -25,7 +25,6 @@ function digest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-/** A five-minute host approval exchange. No browser receives machine credentials. */
 export class RelayEnrollment {
   readonly #registry: RelayRegistry;
   readonly #auth: RelayAuth;
@@ -159,7 +158,6 @@ export class RelayEnrollment {
       });
     } catch (error) {
       if (createdClientId) {
-        // Never deliver a credential whose host reservation failed to commit.
         await this.#auth
           .disableMachineClient(headers, createdClientId)
           .catch(() => undefined);

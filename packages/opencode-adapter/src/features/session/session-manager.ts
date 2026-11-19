@@ -12,15 +12,6 @@ import { normalizeSessionDiff } from "./session-diff";
 
 export type { SessionFileDiff } from "./session-diff";
 
-/**
- * Unwraps a generated-client response, keeping the failure legible.
- *
- * The client does not throw on a failed request — it resolves with
- * `{ error: { code, path, ... } }` and `data` undefined. Throwing "returned no
- * data" for that case is actively harmful: a connection refused to the engine was
- * reported as a missing payload, which reads like a version or parsing problem
- * and sent the investigation at the wrong layer entirely. Name the real error.
- */
 function unwrap<T>(
   result: { data?: T; error?: unknown },
   operation: string
@@ -38,7 +29,6 @@ function unwrap<T>(
   throw new Error(`OpenCode ${operation} returned no data and no error`);
 }
 
-/** The human-readable part of a client error, when it carries one. */
 function errorDetail(record: Record<string, unknown>): string {
   if (typeof record.message === "string") {
     return `: ${record.message}`;
@@ -211,9 +201,6 @@ export class SessionManager {
       variant: input.variant,
     });
 
-    // The generated client resolves `{ error }` rather than throwing, so ignoring
-    // the result means a prompt that never reached the engine still reports
-    // `accepted: true` back through the queue response.
     if (result.error !== undefined) {
       throw new Error(
         `OpenCode session.promptAsync failed: ${describeError(result.error)}`

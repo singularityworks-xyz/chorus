@@ -306,7 +306,6 @@ describe("OpenCodeBridge", () => {
       ]);
       await firstStore.close();
 
-      // This is the same durable workspace file Serve opens during startup.
       const restartedStore = new WorkspaceStore(dataDirectory);
       store = restartedStore;
       await restartedStore.load();

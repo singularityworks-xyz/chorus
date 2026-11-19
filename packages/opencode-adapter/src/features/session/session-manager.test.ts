@@ -1,15 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import { SessionManager } from "./session-manager";
 
-/**
- * The generated client does not throw on a failed request — it resolves with
- * `{ error }` and `data` undefined. Every call site that ignores the result
- * therefore reports success for a request the engine refused, which is how a
- * prompt that never landed came back as `accepted: true`.
- *
- * These pin the two paths a queued prompt depends on.
- */
-
 const PROMPT_FAILED = /promptAsync failed/;
 const CREATE_FAILED = /session.create failed/;
 const CONNECTION_REFUSED = /ConnectionRefused/;
@@ -45,9 +36,6 @@ describe("SessionManager error surfacing", () => {
   });
 
   test("the failure names the engine's reason, not just that data was absent", async () => {
-    // The old message was "returned no data", which reads like a parsing or
-    // version problem and points at the wrong layer. It cost real diagnosis time
-    // when an unreachable engine was reported that way.
     const manager = new SessionManager(
       clientReturning({
         error: {

@@ -14,7 +14,6 @@ interface BoardTaskCommandButtonState {
   title: string;
 }
 
-/** Mirrors the server's single-live-task rule using the board state in the UI. */
 export function hasLiveBoardTask(columns: Columns): boolean {
   return (
     Boolean(columns.in_progress?.length) ||
@@ -22,10 +21,6 @@ export function hasLiveBoardTask(columns: Columns): boolean {
   );
 }
 
-/**
- * Includes local command transitions so another card cannot be started while
- * an accepted command is waiting for its authoritative board event.
- */
 export function isBoardTaskCommandBusy(
   columns: Columns,
   actionStates: Readonly<Record<string, BoardTaskActionState | undefined>>
@@ -42,7 +37,6 @@ export function isBoardTaskCommandBusy(
   );
 }
 
-/** Queue placement does not confirm a run; active, review, or done does. */
 export function hasObservedTaskCommand(
   taskId: string,
   columns: Columns

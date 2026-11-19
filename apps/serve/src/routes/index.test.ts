@@ -130,7 +130,6 @@ function makeMockBoardTasks() {
 }
 
 describe("HTTP routes", () => {
-  /** The worktree a seeded board owns, so tests can prove it is the one used. */
   const BOARD_WORKTREE = "/repo/.chorus-worktrees/board-1";
 
   function makeApp() {
@@ -171,9 +170,7 @@ describe("HTTP routes", () => {
       createHttpRoutes(
         bridge as never,
         boardTasks as never,
-        // The store backs the registered-root check on the git/snapshot routes,
-        // and resolves the checkout a follow-up command runs against. A session it
-        // cannot place is refused rather than silently defaulted.
+
         {
           getBoard: (boardId: string) =>
             boardId === "board-1"
@@ -894,9 +891,6 @@ describe("HTTP routes", () => {
     });
 
     test("refuses a session no board owns", async () => {
-      // The directory for a follow-up command comes from the board, so a session
-      // the server cannot place has no safe directory. Falling back to the one
-      // serve was started in is how a command lands in the wrong checkout.
       const { app, bridge } = makeApp();
 
       const res = await app.handle(
@@ -907,8 +901,6 @@ describe("HTTP routes", () => {
         })
       );
 
-      // A lookup miss, not a server fault. Letting it default to 500 hid the
-      // actionable message from anything keying on status.
       expect(res.status).toBe(404);
       expect(bridge.replyPermission).not.toHaveBeenCalled();
     });
@@ -988,8 +980,6 @@ describe("HTTP routes", () => {
         text: "start fresh",
       });
 
-      // The fork becomes the board's session, or every later command for it fails
-      // as unknown and its agent events have no board.
       expect(updateBoardSession).toHaveBeenCalledWith("board-1", {
         sessionId: "sess-forked",
         state: "active",

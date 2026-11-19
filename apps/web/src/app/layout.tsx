@@ -28,20 +28,6 @@ export const metadata: Metadata = {
   },
 };
 
-/**
- * Root layout: document shell only.
- *
- * The workspace chrome (header, composer, socket provider) lives in the
- * `(workspace)` route group rather than here. Two reasons, both learned the hard
- * way:
- *
- * - `/login` must render without it. Gated by a cookie, the workspace shell would
- *   401 constantly behind the login form, and its fixed header overlays the page
- *   and swallows clicks on the form.
- * - The root layout is cached in the client during navigation and does not
- *   re-render (Next.js 16 docs), so a session check here could not respond to the
- *   `AUTH_EXPIRED` event the sync layer emits.
- */
 export default function RootLayout({
   children,
 }: Readonly<{

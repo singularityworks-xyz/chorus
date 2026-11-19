@@ -25,7 +25,6 @@ export interface RepositoryRootMeta {
   setMeta(key: string, value: string): void;
 }
 
-/** Operator-approved checkout roots, independent of workspace board records. */
 export class RepositoryRegistry {
   readonly #roots = new Set<string>();
 
@@ -84,11 +83,6 @@ export class RepositoryRegistry {
     return canonical;
   }
 
-  /**
-   * Accepts an approved root or an exact Git-registered worktree beneath it.
-   * Directory-taking engine commands must not turn an authenticated request
-   * into access to arbitrary host paths.
-   */
   async validateAuthorizedCheckout(candidate: string): Promise<string> {
     if (!isAbsolute(candidate)) {
       throw new RepositoryRegistryError(
@@ -172,7 +166,6 @@ export class RepositoryRegistry {
     return canonical;
   }
 
-  /** The caller must have obtained this path through the host folder picker. */
   validatePickedRoot(candidate: string): Promise<string> {
     return validateGitRoot(candidate);
   }

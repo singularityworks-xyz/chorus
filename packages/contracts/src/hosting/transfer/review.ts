@@ -1,7 +1,6 @@
 import { z } from "zod";
 import { checkpointContentSchema, gitObjectIdSchema } from "./repository";
 
-/** Explicit tree roots only; source Git config, indexes and unrelated objects stay private. */
 export const reviewCheckpointSchema = z
   .strictObject({
     version: z.literal(1),

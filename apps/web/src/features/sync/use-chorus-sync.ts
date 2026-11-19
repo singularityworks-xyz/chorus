@@ -53,7 +53,6 @@ export function useChorusSync(
   onAuthExpiredRef.current = options.onAuthExpired;
   onRestoredRef.current = options.onRestoredSnapshot;
 
-  // Sequence numbers let snapshot handling discard events it already includes.
   const pendingEvents = useRef<{ event: WorkspaceEvent; seq: number }[]>([]);
 
   const syncRef = useRef<ChorusSync | null>(null);

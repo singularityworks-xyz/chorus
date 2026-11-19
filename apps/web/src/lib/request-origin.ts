@@ -1,4 +1,3 @@
-/** Exact origins, including port and protocol; sibling hosts are not trusted. */
 export function mutationOriginMatches(
   origin: string | null,
   host: string | null,

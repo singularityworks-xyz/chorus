@@ -41,7 +41,6 @@ export function useWorkspaceMutation(
   const mutateWorkspace = useCallback(
     async (mutation: WorkspaceMutation): Promise<void> => {
       try {
-        // The websocket delivers state changes; this request only acknowledges them.
         const response = await fetch("/api/workspace", {
           body: JSON.stringify(mutation),
           headers: { "content-type": "application/json" },

@@ -315,7 +315,7 @@ export class ChorusSync {
       case "ready": {
         this.#handshakeInFlight = false;
         this.#connectionWorkspaceId = frame.workspaceId ?? null;
-        // Reset only after the authenticated handshake is ready.
+
         this.#backoff.reset();
         this.#setState({ lastError: null, status: "live" });
         this.#options.onStatus?.("live");
@@ -464,7 +464,7 @@ export class ChorusSync {
     if (socket === null) {
       return;
     }
-    // Some transports fire `onclose` synchronously during teardown.
+
     socket.onclose = null;
     socket.onerror = null;
     socket.onmessage = null;

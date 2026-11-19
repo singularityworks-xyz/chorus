@@ -124,10 +124,6 @@ export function attachPromptTask(
   };
 }
 
-/**
- * Delegates to the shared projector so `apps/web` and `apps/serve` cannot
- * drift on how a session binds to a board.
- */
 export function attachSessionToBoard(
   board: WorkspaceBoard,
   sessionId: string

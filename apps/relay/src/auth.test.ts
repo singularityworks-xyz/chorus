@@ -15,8 +15,7 @@ describe("relay account authentication", () => {
     try {
       await (await getMigrations(relay.auth.options)).runMigrations();
       const context = await relay.auth.$context;
-      // Account fixtures cross the real database adapter; all session, admin,
-      // token issuance, JWKS, and signature validation paths remain real.
+
       const user = await context.internalAdapter.createUser(
         {
           name: "Owner",

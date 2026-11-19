@@ -36,7 +36,6 @@ export class EventLogStore {
       return { firstSeq: head + 1, lastSeq: head };
     }
 
-    // Event rows and their sequence head must commit together.
     return this.#db
       .transaction(() => {
         let seq = this.#metadata.headSeq();

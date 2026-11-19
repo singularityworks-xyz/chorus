@@ -4,7 +4,6 @@ import {
   type WorkspaceBoard,
 } from "@chorus/contracts";
 
-/** Structured file references become portable relative paths; prose/history stays intact. */
 export function portableTaskPaths(
   columns: WorkspaceBoard["columns"],
   checkout: string

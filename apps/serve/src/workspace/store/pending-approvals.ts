@@ -83,7 +83,7 @@ export class PendingApprovalController {
     } = {}
   ): Promise<PendingApprovalActionResult<T>> {
     const actionKey = JSON.stringify([sessionId, requestId]);
-    // Claim in the write queue, then keep provider I/O outside it.
+
     const claim = await this.#enqueue(() => {
       if (this.#actions.has(actionKey)) {
         return "already_resolving" as const;

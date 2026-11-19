@@ -8,11 +8,6 @@ interface CommandAttempt {
 
 const WINDOWS_DRIVE_PATTERN = /^[A-Za-z]:[\\/]/;
 
-/**
- * POSIX single-quote escaping. Everything between the quotes is literal, so
- * `$(...)`, backticks, and embedded quotes in a directory name cannot escape
- * into command substitution.
- */
 function quotePosix(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
@@ -61,9 +56,6 @@ export class AuthLoginLauncher {
 
     switch (process.platform) {
       case "darwin": {
-        // Terminal.app has no working-directory argument, so the `cd` has to
-        // stay in the script text — but it is POSIX-quoted, and the AppleScript
-        // string itself is JSON-escaped.
         const script = `cd ${quotePosix(directory)} && ${loginCommand}`;
         return runDetached("osascript", [
           "-e",
@@ -72,8 +64,6 @@ export class AuthLoginLauncher {
       }
 
       case "linux": {
-        // Every attempt below runs a constant command string; the working
-        // directory travels as a process argument, never as shell text.
         const attempts: CommandAttempt[] = [
           {
             command: "x-terminal-emulator",

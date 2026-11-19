@@ -326,8 +326,7 @@ describe("agent events applied to a board", () => {
     expect(column(next, "done")).toHaveLength(1);
     expect(next.session.state).toBe("active");
     expect(next.session.errorMessage).toBe("no activity");
-    // Released, or the next prompt on this board attaches its agent events to a
-    // card that is already finished and the new work never appears.
+
     expect(next.session.currentTaskId).toBeUndefined();
   });
 
@@ -364,7 +363,6 @@ describe("streamed deltas", () => {
     return events.reduce(applyEventToBoard, board);
   }
 
-  /** Opens a part-scoped response step and seeds `content` into it. */
   function boardWithStreamingStep(content: string) {
     const board = makeBoard();
     const opened = applyDomainEvents(

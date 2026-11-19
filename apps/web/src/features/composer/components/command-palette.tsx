@@ -96,7 +96,7 @@ export function CommandPalette({
     Math.max(anchorRect.width, 320),
     window.innerWidth - SIDE_PADDING * 2
   );
-  // Clamp left so we don't overflow the right edge of the viewport
+
   const clampedLeft = Math.min(
     anchorRect.left,
     window.innerWidth - panelWidth - SIDE_PADDING

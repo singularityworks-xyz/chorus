@@ -89,7 +89,6 @@ export async function publishWorkspaceCheckpoint(
   }
 }
 
-/** Produces a verified inactive candidate; no store/engine/authority activation occurs. */
 export async function stageWorkspaceCheckpoint(
   checkpointDirectory: string,
   digest: string,

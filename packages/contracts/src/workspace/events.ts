@@ -14,7 +14,6 @@ import {
   workspaceColumnIdSchema,
 } from "./base/tasks";
 
-/** The four board lanes used by task transitions. */
 export const WORKSPACE_COLUMN_IDS = [
   "queue",
   "in_progress",
@@ -24,10 +23,8 @@ export const WORKSPACE_COLUMN_IDS = [
 
 export type WorkspaceColumnId = z.infer<typeof workspaceColumnIdSchema>;
 
-/** Snapshot blob version. Bump when a persisted shape changes incompatibly. */
 export const WORKSPACE_SNAPSHOT_VERSION = 1;
 
-/** Timestamp recorded when the event is appended. */
 const workspaceEventBaseSchema = z.object({
   ts: z.number().int().nonnegative(),
 });
@@ -36,7 +33,6 @@ const boardScopedSchema = workspaceEventBaseSchema.extend({
   boardId: z.string().min(1),
 });
 
-/** Why a task entered the approval lane. */
 export const approvalRequestKindSchema = z.enum(["permission", "question"]);
 
 export type ApprovalRequestKind = z.infer<typeof approvalRequestKindSchema>;
@@ -269,7 +265,6 @@ export const workspaceEventSchema = z.discriminatedUnion("type", [
 export type WorkspaceEvent = z.infer<typeof workspaceEventSchema>;
 export type WorkspaceEventType = WorkspaceEvent["type"];
 
-/** Events whose state belongs to one board. */
 export type BoardScopedEvent = Extract<WorkspaceEvent, { boardId: string }>;
 
 export const BOARD_SCOPED_EVENT_TYPES = [
@@ -305,7 +300,6 @@ const BOARD_SCOPED_EVENT_TYPE_SET: ReadonlySet<string> = new Set(
   BOARD_SCOPED_EVENT_TYPES
 );
 
-/** Narrows by event type because workspace selection also carries `boardId`. */
 export function isBoardScopedEvent(
   event: WorkspaceEvent
 ): event is BoardScopedEvent {

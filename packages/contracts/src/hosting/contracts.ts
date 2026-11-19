@@ -4,7 +4,6 @@ export const hostIdSchema = z.uuid();
 export const workspaceIdSchema = z.uuid();
 export const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 
-/** Only the public portion of a host's P-256 signing identity crosses machines. */
 export const hostPublicKeySchema = z.strictObject({
   crv: z.literal("P-256"),
   kty: z.literal("EC"),
@@ -44,7 +43,6 @@ export const handoffPhaseSchema = z.enum([
   "recovery_required",
 ]);
 
-/** A source release authorizes one prepared checkpoint on one specific host. */
 export const ownershipReleasePayloadSchema = z
   .strictObject({
     checkpointHash: sha256Schema,

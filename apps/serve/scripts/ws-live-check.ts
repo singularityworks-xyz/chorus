@@ -1,18 +1,3 @@
-/**
- * Live Phase-3 verification against a running serve process.
- *
- * Unit tests cover the hub in isolation; this proves the wiring. It caught the
- * one bug unit tests could not: Elysia hands `open` and `message` different
- * wrapper objects, so an identity-keyed client registry missed every lookup and
- * the handshake silently produced zero frames.
- *
- * Ordering matters — every client that is expected to share an event stream must
- * be connected *before* the mutations in question, otherwise it legitimately
- * receives a snapshot instead and its stream is not comparable.
- *
- * Usage: bun run apps/serve/scripts/ws-live-check.ts <port>
- */
-
 const port = Number(process.argv[2] ?? "2150");
 
 interface Frame {
@@ -109,7 +94,6 @@ async function createBoard(title: string): Promise<number> {
   return response.status;
 }
 
-// ── both clients connect before any mutation ───────────────────────────────
 const clientA = await openSocket();
 clientA.send({ since: 0, type: "hello" });
 await clientA.waitFor(() => clientA.frames.some((f) => f.type === "snapshot"));
@@ -118,7 +102,6 @@ const clientB = await openSocket();
 clientB.send({ since: 0, type: "hello" });
 await clientB.waitFor(() => clientB.frames.some((f) => f.type === "snapshot"));
 
-// ── 1. handshake ────────────────────────────────────────────────────────────
 const readyFrame = clientA.frames.find((f) => f.type === "ready");
 const snapshotFrame = clientA.frames.find((f) => f.type === "snapshot");
 const workspaceId = readyFrame?.workspaceId;
@@ -138,7 +121,6 @@ const headBefore = readyFrame?.head ?? 0;
 clientA.frames.length = 0;
 clientB.frames.length = 0;
 
-// ── 2. HTTP mutation reaches both sockets, sequenced ────────────────────────
 const statusA = await createBoard("First");
 const gotOnA = await clientA.waitFor(() => seqsOf(clientA).length >= 1);
 const gotOnB = await clientB.waitFor(() => seqsOf(clientB).length >= 1);
@@ -153,7 +135,6 @@ record(
   `http=${statusA} A=${JSON.stringify(seqsOf(clientA))} B=${JSON.stringify(seqsOf(clientB))} expectedFirst=${headBefore + 1}`
 );
 
-// ── 3. two connected clients converge ───────────────────────────────────────
 const statusB = await createBoard("Second");
 await clientA.waitFor(() => seqsOf(clientA).length >= 2);
 await clientB.waitFor(() => seqsOf(clientB).length >= 2);
@@ -172,7 +153,6 @@ clientA.close();
 clientB.close();
 await Bun.sleep(200);
 
-// ── 4. a caught-up reconnect gets ready and nothing redundant ───────────────
 const clientC = await openSocket();
 clientC.send({ since: lastSeen, type: "hello", workspaceId });
 await clientC.waitFor(() => clientC.frames.some((f) => f.type === "ready"));
@@ -189,7 +169,6 @@ record(
 clientC.close();
 await Bun.sleep(200);
 
-// ── 5. a small gap replays instead of snapshotting ──────────────────────────
 const clientD = await openSocket();
 clientD.send({ since: 1, type: "hello", workspaceId });
 await clientD.waitFor(() => clientD.frames.some((f) => f.type === "event"));
@@ -204,7 +183,6 @@ record(
 );
 clientD.close();
 
-// ── 6. resync on demand ─────────────────────────────────────────────────────
 await Bun.sleep(150);
 const clientE = await openSocket();
 clientE.send({ since: lastSeen, type: "hello", workspaceId });
@@ -221,7 +199,6 @@ record(
 );
 clientE.close();
 
-// ── 7. viewport relay reaches the other client and is never sequenced ───────
 await Bun.sleep(150);
 const sender = await openSocket();
 sender.send({ since: lastSeen, type: "hello", workspaceId });

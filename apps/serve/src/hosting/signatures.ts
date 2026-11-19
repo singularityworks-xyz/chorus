@@ -37,15 +37,12 @@ export function generateHostKey() {
 }
 
 export function publicKeyHash(input: HostPublicKey): string {
-  // Length/alphabet validation alone does not prove a point lies on P-256.
   createPublicKey({ format: "jwk", key: hostPublicKeySchema.parse(input) });
   return createHash("sha256")
     .update(serializeHostPublicKey(input))
     .digest("hex");
 }
 
-// Explicit fields plus a purpose label prevent property-order ambiguity and
-// replaying a target's preparation signature as a source's ownership release.
 function releaseBytes(input: OwnershipReleasePayload): Buffer {
   const value = ownershipReleasePayloadSchema.parse(input);
   return Buffer.from(

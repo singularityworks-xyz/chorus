@@ -178,7 +178,6 @@ export function ModelPicker({
               />
               <div className="flex min-h-0 flex-col bg-[#161616]">
                 <div className="border-white/6 border-b px-3 py-2">
-                  {/* Desktop: description + search side by side. Mobile: search only, full width */}
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
                     <div className="min-w-0">
                       <div className="text-[10px] text-white/35 uppercase tracking-[0.22em]">

@@ -21,11 +21,6 @@ interface ExecFileResult {
   stdout: string;
 }
 
-/**
- * Argument-array process execution. Never pass an interpolated shell string
- * here — every git invocation in this module goes through this helper so
- * client-supplied paths and revisions cannot become shell syntax.
- */
 function execFileText(
   file: string,
   args: string[],

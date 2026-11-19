@@ -527,6 +527,5 @@ if (cleanupFailures.length > 0) {
 process.stdout.write(
   `PASS: pinned OpenCode ${sdkVersion()} loaded ${providerID}/${modelID}, streamed and persisted replies on two isolated boards through the shared engine database, and made exactly two requests to the local fixture endpoint. No external provider was used.\n`
 );
-// The OpenCode SDK leaves keep-alive handles after the engine child and local
-// provider are stopped. Exit only after every controlled resource is cleaned.
+
 process.exit(0);

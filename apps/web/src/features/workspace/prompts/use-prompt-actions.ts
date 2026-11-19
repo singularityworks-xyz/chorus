@@ -70,7 +70,6 @@ export function usePromptActions({
           await response.json()
         );
 
-        // The queued event creates the card; this response only clears the composer.
         return {
           ...payload,
           task: {

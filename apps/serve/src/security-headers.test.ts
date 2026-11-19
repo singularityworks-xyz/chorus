@@ -18,8 +18,6 @@ describe("Content-Security-Policy (plan P4.4)", () => {
   });
 
   test("unsafe-eval is never granted", () => {
-    // The plan forbids it explicitly. If a future framework change demands eval
-    // that is a signal to change the framework, not to weaken this header.
     expect(CONTENT_SECURITY_POLICY).not.toContain("unsafe-eval");
   });
 
@@ -59,8 +57,6 @@ describe("Content-Security-Policy (plan P4.4)", () => {
   });
 
   test("an error response is hardened too", () => {
-    // The 503 "Next.js dev server not running" page is rendered HTML and must
-    // carry the policy like any other document.
     const response = withSecurityHeaders(new Response("nope", { status: 503 }));
 
     expect(response.status).toBe(503);

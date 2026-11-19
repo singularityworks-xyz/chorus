@@ -36,7 +36,6 @@ export const relayOperatorConfigSchema = z.strictObject({
 });
 export type RelayOperatorConfig = z.infer<typeof relayOperatorConfigSchema>;
 
-/** The installation pins its operator; enrollment cannot redirect to another relay. */
 export function validateRelayConnection(
   input: unknown,
   operator: RelayOperatorConfig,

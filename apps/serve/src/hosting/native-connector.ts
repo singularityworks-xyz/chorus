@@ -39,7 +39,6 @@ async function terminate(child: ChildProcess): Promise<void> {
   });
 }
 
-/** Runs only pinned native executables, with private configs and no shell/GUI. */
 export class NativeHostConnector {
   readonly #options: ConnectorOptions;
   readonly #children: ChildProcess[] = [];
@@ -123,8 +122,6 @@ export class NativeHostConnector {
         return;
       }
       const environment = {
-        // Do not give relay children provider keys, CHORUS_TOKEN, or inherited
-        // proxy/TLS override variables. Windows requires its system directory.
         PATH: process.env.PATH,
         SystemRoot: process.env.SystemRoot,
         WINDIR: process.env.WINDIR,

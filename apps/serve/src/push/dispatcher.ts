@@ -339,7 +339,6 @@ export class PushDispatcher {
           task.pendingApprovals ??
           (task.pendingApproval ? [task.pendingApproval] : []);
         for (const request of requests) {
-          // Wait for engine reconciliation to recover legacy requests without IDs.
           if (!request.requestId) {
             continue;
           }

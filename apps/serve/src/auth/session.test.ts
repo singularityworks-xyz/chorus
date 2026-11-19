@@ -32,8 +32,6 @@ describe("session cookie signing (spec §6.1, plan P4.2)", () => {
   test("the cookie is version-prefixed", async () => {
     const issued = await issueSessionCookie({ token: TOKEN });
 
-    // The verifier requires the prefix; omitting it once made every issued
-    // cookie unverifiable and turned a correct login into a 401.
     expect(issued.cookie.split(".")).toHaveLength(3);
     expect(issued.cookie.startsWith("v1.")).toBe(true);
   });
@@ -41,9 +39,6 @@ describe("session cookie signing (spec §6.1, plan P4.2)", () => {
   test("the signing key is derived, not the raw token", async () => {
     const payload = new TextEncoder().encode("probe");
 
-    // Sign the same bytes with the derived key and with the raw token imported
-    // directly as an HMAC key. Different signatures prove the HKDF derivation
-    // actually happened rather than the token being used as-is.
     const derivedSignature = await crypto.subtle.sign(
       "HMAC",
       await deriveSessionKey(TOKEN, ["sign"]),
@@ -65,8 +60,6 @@ describe("session cookie signing (spec §6.1, plan P4.2)", () => {
   });
 
   test("derivation is labelled, so the key cannot be reused elsewhere", async () => {
-    // Two labels must not produce the same key material; the plan fixes the
-    // label to "chorus-session" so a future purpose cannot collide with this.
     const sessionKey = await deriveSessionKey(TOKEN, ["sign"]);
 
     const signature = await crypto.subtle.sign(
@@ -82,8 +75,6 @@ describe("session cookie signing (spec §6.1, plan P4.2)", () => {
     const issued = await issueSessionCookie({ token: TOKEN });
     const [, expires, signature] = issued.cookie.split(".");
 
-    // Push the expiry forward by hand and keep the old signature: the longest
-    // possible lifetime, forged.
     const forgedExpiry = (Number.parseInt(expires, 36) + 86_400_000).toString(
       36
     );

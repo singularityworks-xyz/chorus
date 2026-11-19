@@ -32,7 +32,6 @@ const portableTaskSchema = taskSchema.extend({
     .optional(),
 });
 
-/** Filesystem roots and engine project identifiers are replaced with checkpoint IDs. */
 export const portableRepoContextSchema = z.strictObject({
   repositoryId: z.uuid(),
   checkoutId: z.uuid(),

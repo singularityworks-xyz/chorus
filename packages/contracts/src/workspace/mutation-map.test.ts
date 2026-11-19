@@ -8,14 +8,6 @@ import {
   MUTATION_EVENT_MAP,
 } from "./mutation-map";
 
-/**
- * Guards the 1-mutation-to-1-event contract (plan Phase 1, task 5).
- *
- * If someone adds a `WorkspaceMutation` variant and forgets to map it, or maps
- * it to an event type that does not exist, the store's log and the UI would
- * drift apart silently. These tests fail first.
- */
-
 const MINIMAL_PAYLOADS: Record<string, unknown> = {
   "board.create": {
     baseRevision: null,
@@ -147,8 +139,6 @@ describe("mutation to event mapping", () => {
   });
 
   test("every mapped event type is a real WorkspaceEvent discriminator", () => {
-    // Sampling each mapped type through the union proves the string is a
-    // discriminator the schema actually accepts, not just a plausible name.
     const known = new Set<string>([
       ...BOARD_SCOPED_EVENT_TYPES,
       ...AGENT_EVENT_TYPES,
@@ -238,7 +228,6 @@ describe("vocabulary completeness", () => {
       "preference.board_view_mode_set",
     ]);
 
-    // every discriminator in the union must be accounted for somewhere
     const accounted = new Set<string>([
       ...unionTypes,
       "board.task_plan_updated",

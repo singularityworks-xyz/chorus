@@ -8,14 +8,7 @@ const SHELL_EXEC_IMPORT =
   /import\s*\{[^}]*\bexec\b[^}]*\}\s*from\s*["']node:child_process["']/;
 const PROMISISED_EXEC = /promisify\(\s*exec\s*\)/;
 const SHELL_EXEC_CALL = /\bexecAsync\s*\(/;
-/**
- * A shell-string exec call.
- *
- * The negative lookbehind skips `db.exec(...)`, which is SQLite's SQL
- * executor rather than child_process's — the Phase 2 database layer trips this
- * otherwise. What remains is the RCE shape this guard exists for: a bare
- * `exec(` / `execAsync(` built from a template string.
- */
+
 const SHELL_STRING_TEMPLATE = /(?<![.\w])exec(?:Async)?\s*\(\s*`/;
 
 function collectSourceFiles(dir: string): string[] {
@@ -34,9 +27,6 @@ const LEGACY_AUTH_LOGIN_SHELL = [
 const LOGIN_COMMAND_LITERAL = 'execFileText("git", [';
 
 describe("no shell-string child process execution", () => {
-  // Regression guard for the Phase 0 RCE hotfix. git used to run through
-  // `exec("git " + args)`, which turned HTTP-supplied directory/hash values
-  // into shell syntax. Any reintroduction must fail here, loudly.
   test("serve source imports no bare exec and builds no shell command strings", () => {
     const offenders: string[] = [];
 
@@ -62,7 +52,6 @@ describe("no shell-string child process execution", () => {
       "utf8"
     );
 
-    // every invocation routes through the argument-array helper
     expect(snapshot).not.toContain("promisify(exec");
     expect(snapshot).toContain(LOGIN_COMMAND_LITERAL);
   });

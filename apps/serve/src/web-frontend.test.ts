@@ -5,16 +5,6 @@ import { basename, join } from "node:path";
 import { InvalidPathError, SandboxEscapeError } from "./paths/sandbox";
 import { resolveStaticPath, setStaticRoot } from "./web-frontend";
 
-/**
- * Static-path traversal guard (spec §6.4, plan P4.6).
- *
- * `path.join(WEB_PROD_DIR, pathname)` on its own reads and returns any file on
- * the host: a request for `/../../etc/passwd` joins straight out of the web root.
- * These tests pin the rejection, since the HTTP-level coverage in
- * `auth/auth-matrix.test.ts` cannot distinguish "rejected" from "no build
- * present".
- */
-
 const roots: string[] = [];
 
 function makeRoot(): string {
@@ -62,7 +52,6 @@ describe("resolveStaticPath", () => {
   test("rejects percent-encoded traversal", () => {
     makeRoot();
 
-    // Decoded before resolution, so an encoded separator cannot slip past.
     for (const attack of [
       "/%2e%2e/%2e%2e/etc/passwd",
       "/%2E%2E%2F%2E%2E%2Fetc%2Fpasswd",
@@ -88,15 +77,12 @@ describe("resolveStaticPath", () => {
   test("rejects a malformed percent escape instead of throwing a TypeError", () => {
     makeRoot();
 
-    // `decodeURIComponent` throws on `%zz`; that is a client error and must not
-    // surface as a 500.
     expect(() => resolveStaticPath("/%zz")).toThrow(InvalidPathError);
   });
 
   test("rejects a symlink inside the root that points outside it", () => {
     const root = makeRoot();
-    // Deliberately not `makeRoot()`: that would re-point the static root and
-    // the "root" under test would no longer be the root.
+
     const outside = mkdtempSync(join(tmpdir(), "chorus-outside-"));
     roots.push(outside);
     writeFileSync(join(outside, "secret.txt"), "secret");
@@ -106,8 +92,6 @@ describe("resolveStaticPath", () => {
       process.platform === "win32" ? "junction" : "dir"
     );
 
-    // Lexical containment passes this: the path is under the root and uses no
-    // `..`. Only realpath resolution catches it.
     expect(() => resolveStaticPath("/escape/secret.txt")).toThrow(
       SandboxEscapeError
     );
@@ -116,8 +100,6 @@ describe("resolveStaticPath", () => {
   test("rejects a prefix-sibling directory", () => {
     const root = makeRoot();
 
-    // `root` and `root-sibling` share a string prefix but are distinct trees.
-    // A naive `startsWith(root)` check would accept the sibling.
     const siblingName = `${basename(root)}-sibling`;
 
     expect(() => resolveStaticPath(`/../${siblingName}`)).toThrow(

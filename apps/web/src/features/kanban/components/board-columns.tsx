@@ -332,7 +332,6 @@ export function KanbanColumnRenderer({
   );
 }
 
-// Shared lane content for the desktop card and stacked phone layout.
 export function KanbanColumnBody({
   boardId,
   boardBusy,

@@ -9,8 +9,6 @@ import {
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 
-// Container build only: no third-party install scripts, downloads, npm fallback,
-// CPU feature probes, or process startup. x64 always uses the portable baseline.
 if (process.platform !== "linux" || !["x64", "arm64"].includes(process.arch)) {
   throw new Error(
     "the container engine installer supports Linux x64/arm64 only"

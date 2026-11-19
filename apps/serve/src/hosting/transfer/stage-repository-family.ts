@@ -30,7 +30,6 @@ const familyInputSchema = z.strictObject({
 });
 export type RepositoryFamilyInput = z.infer<typeof familyInputSchema>;
 
-/** Every directory this module can mutate belongs to its fresh inactive family. */
 export async function stageRepositoryFamily(
   input: RepositoryFamilyInput,
   stagingParent: string
@@ -94,7 +93,7 @@ export async function stageRepositoryFamily(
         recursive: true,
         mode: 0o700,
       });
-      // Detached worktree history may not be reachable from a shared branch.
+
       if (worktree.checkpoint.history) {
         const history = await worktree.content.path(
           worktree.checkpoint.history

@@ -1,7 +1,6 @@
 import { relayOperatorConfigSchema } from "@chorus/contracts";
 import { z } from "zod";
 
-/** Parse failures intentionally omit raw environment values (which include credentials). */
 export function loadRelayConfig(
   env: Record<string, string | undefined> = process.env
 ) {

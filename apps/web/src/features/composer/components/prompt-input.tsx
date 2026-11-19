@@ -154,7 +154,7 @@ export function PromptInput() {
                 ))}
               </div>
             )}
-            {/* The placeholder is not an accessible name. */}
+
             <Textarea
               aria-label="Prompt Chorus"
               className="scrollbar-hide max-h-40 min-h-8 w-full resize-none overflow-y-auto rounded-none border-0 bg-transparent p-0 font-medium text-[15px] text-white/90 shadow-none placeholder:text-white/40 focus-visible:ring-0 focus-visible:ring-offset-0 dark:bg-transparent"

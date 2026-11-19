@@ -22,17 +22,6 @@ export class InvalidPathError extends Error {
   }
 }
 
-/**
- * Resolves `candidate` against `root` and rejects anything that escapes it.
- *
- * - Relative candidates resolve under `root`.
- * - Absolute candidates must already live inside `root`.
- * - Rejects NUL bytes and paths that traverse above `root` (including
- *   prefix-sibling cases such as `/data2` against `/data`).
- *
- * This is lexical containment. Symlink resolution is layered on in the
- * security phase; callers that touch the filesystem must still guard roots.
- */
 export function resolveInside(root: string, candidate: string): string {
   if (candidate.length === 0) {
     throw new InvalidPathError(candidate);
@@ -72,13 +61,6 @@ export function isInside(root: string, candidate: string): boolean {
 const GIT_REVISION_PATTERN = /^[0-9a-zA-Z][0-9a-zA-Z._/@{}^~-]*$/;
 const WHITESPACE_PATTERN = /\s/;
 
-/**
- * Validates a client-supplied git revision before it reaches an argument array.
- *
- * `execFile` already removes the shell-injection class, but a leading `-` or a
- * range/whitespace sequence could still be interpreted as a git option or
- * revision range. Reject those explicitly.
- */
 export function assertSafeGitRevision(value: string): string {
   if (value.length === 0 || value.length > 512) {
     throw new InvalidPathError(value);

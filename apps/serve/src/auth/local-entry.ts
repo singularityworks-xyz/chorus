@@ -35,7 +35,6 @@ export function localEntryRequestAllowed(
   );
 }
 
-/** Only this separate 127.0.0.1 listener can create installed local sessions. */
 export function createLocalEntry(options: {
   token: string;
   registry: SessionRegistry;

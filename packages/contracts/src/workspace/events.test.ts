@@ -40,7 +40,6 @@ const step = agentStepSchema.parse({
   summary: "Thinking",
 });
 
-/** Every event variant, keyed by discriminator — the round-trip corpus. */
 const EVENT_CORPUS: Record<WorkspaceEvent["type"], WorkspaceEvent> = {
   "board.created": { type: "board.created", ts: TS, boardId: "board-1", board },
   "board.moved": {
@@ -318,11 +317,6 @@ describe("board scoping", () => {
 });
 
 describe("control vs coalescible events", () => {
-  /**
-   * The two types allowed to be batched. Everything else MUST be control, so an
-   * event added later without updating `COALESCIBLE_EVENT_TYPES` is delivered
-   * immediately instead of becoming droppable under backpressure.
-   */
   const EXPECTED_COALESCIBLE: WorkspaceEvent["type"][] = [
     "step.upserted",
     "step.delta_appended",
@@ -337,9 +331,6 @@ describe("control vs coalescible events", () => {
   });
 
   test("every non-coalescible event is classified as control", () => {
-    // This is the table that actually protects Phase 3. It previously asserted
-    // only that the two predicates disagreed — which is arithmetic, since
-    // isCoalescibleEvent is defined as !isControlEvent, so it could never fail.
     const control = ALL_TYPES.filter((type) =>
       isControlEvent(EVENT_CORPUS[type])
     );
@@ -350,15 +341,11 @@ describe("control vs coalescible events", () => {
   });
 
   test("run.started is a control event, not batchable", () => {
-    // It flips session.state to active and binds currentTaskId. Batched or
-    // dropped, the card renders stuck with no run.
     expect(isControlEvent(EVENT_CORPUS["run.started"])).toBe(true);
     expect(isCoalescibleEvent(EVENT_CORPUS["run.started"])).toBe(false);
   });
 
   test("a plan update is a control event, not batchable", () => {
-    // Reachable from the board.task.plan.update mutation. Batchable, it would
-    // be dropped in critical-only mode and the card would lose its plan text.
     expect(isControlEvent(EVENT_CORPUS["board.task_plan_updated"])).toBe(true);
   });
 
@@ -435,8 +422,6 @@ describe("wire envelopes", () => {
   });
 
   test("every server frame the hub emits is in the message union", () => {
-    // A client validating with this union would otherwise reject the heartbeat
-    // and read a healthy server as broken.
     for (const frame of [
       { at: TS, type: "ping" },
       { head: 4, protocolVersion: "1", type: "ready" },
@@ -500,8 +485,6 @@ describe("wire envelopes", () => {
   });
 
   test("a snapshot with a malformed board is rejected", () => {
-    // The snapshot is the client's entire resume path; `z.unknown()` here would
-    // hand arbitrary shapes straight to the UI.
     expect(() =>
       snapshotMessageSchema.parse({
         type: "snapshot",
@@ -532,8 +515,6 @@ describe("wire envelopes", () => {
   });
 
   test("rejects an envelope whose boardId disagrees with the event", () => {
-    // Phase 3 fans out by the envelope value. A mismatch routes the patch to
-    // the wrong board's subscribers and is unrecoverable client-side.
     expect(() =>
       sequencedEventSchema.parse({
         type: "event",

@@ -72,9 +72,6 @@ describe("workspace routes", () => {
     const { dir, store } = createStore("dedup");
     await store.load();
 
-    // The hub is fed by the store's commit hook, so the meaningful assertion is
-    // that a retried request produces exactly one commit — not that some
-    // transport happened to stay quiet.
     const commits: number[] = [];
     store.onCommit((commit) => commits.push(commit.lastSeq));
 
@@ -106,7 +103,7 @@ describe("workspace routes", () => {
     );
 
     expect(second.status).toBe(200);
-    // No new state, so no second commit — and therefore nothing new downstream.
+
     expect(commits).toHaveLength(1);
     expect(store.getSnapshot().boards).toHaveLength(1);
     expect(store.headSeq()).toBe(1);

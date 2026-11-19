@@ -8,7 +8,7 @@ export function restoreDatabaseFile(
 ): { integrity: string; path: string } {
   mkdirSync(dataDir, { recursive: true });
   const dbPath = resolveDbPath(dataDir);
-  // Sidecars belong to the current target database, not the replacement file.
+
   for (const suffix of ["-wal", "-shm"]) {
     rmSync(`${dbPath}${suffix}`, { force: true });
   }

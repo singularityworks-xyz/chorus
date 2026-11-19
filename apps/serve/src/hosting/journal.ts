@@ -44,15 +44,6 @@ export class HostAuthorityError extends Error {
   }
 }
 
-/**
- * Local durable ownership journal; never replicated to the central relay.
- *
- * The caller owns engine quiescence and verified checkpoint storage. A target
- * receipt must only be issued AFTER its checkpoint is durable. `fence` must run
- * inside the source store's drained execution barrier. There are deliberately
- * no time-based ownership transitions. This journal supports a trusted pair of
- * hosts; expanding a workspace to a third host requires an authority chain.
- */
 export class HostJournal {
   readonly #db: Database;
   readonly #identity: HostIdentity;
@@ -108,7 +99,6 @@ export class HostJournal {
     this.#db.close();
   }
 
-  /** Only an authenticated, explicit approval on this host may call this. */
   approvePeer(input: HostIdentity): void {
     const peer = hostIdentitySchema.parse(input);
     if (peer.hostId === this.#identity.hostId) {
@@ -212,7 +202,6 @@ export class HostJournal {
       .immediate();
   }
 
-  /** Call only after engines are stopped and queued workspace writes drained. */
   fence(workspaceId: string, transferId: string): void {
     this.#db
       .transaction(() => {
@@ -228,7 +217,6 @@ export class HostJournal {
       .immediate();
   }
 
-  /** Receives a checkpoint already durably staged and verified by its importer. */
   stage(
     authorityInput: WorkspaceAuthority,
     transferId: string,

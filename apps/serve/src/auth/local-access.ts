@@ -1,4 +1,3 @@
-/** Whether a direct socket peer belongs to the IPv4 or IPv6 loopback range. */
 const IPV4_MAPPED_PREFIX = /^::ffff:/;
 const IPV4_OCTET_PATTERN = /^\d{1,3}$/;
 

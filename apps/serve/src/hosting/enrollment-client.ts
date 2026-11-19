@@ -18,7 +18,6 @@ export class RemoteConnectionError extends Error {
   }
 }
 
-/** Relay polling credentials never reach browser responses or WS events. */
 export class HostEnrollmentClient {
   readonly #operator: RelayOperatorConfig;
   readonly #vault: HostVault;
@@ -93,7 +92,7 @@ export class HostEnrollmentClient {
       this.#operator,
       this.#vault.identity().hostId
     );
-    // Persist before acknowledgement; a lost reply cannot lose the sole copy.
+
     this.#vault.saveConnection(connection);
     try {
       const ack = relayEnrollmentPollResponseSchema.parse(

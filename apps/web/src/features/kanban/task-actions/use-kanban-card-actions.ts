@@ -12,7 +12,6 @@ import { useTaskApprovalActions } from "./use-task-approval-actions";
 
 export type { KanbanCardActions, KanbanTaskActionState } from "./types";
 
-/** Shared board commands and state for desktop and mobile lane views. */
 export function useKanbanCardActions({
   boardId,
   columns,

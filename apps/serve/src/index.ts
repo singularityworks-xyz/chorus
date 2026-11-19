@@ -34,7 +34,6 @@ const logger = createLogger(
 
 await mkdir(config.dataDir, { recursive: true });
 
-// Resolve the signing token before starting engines or listeners.
 let token: string;
 try {
   const resolved = await resolveToken({

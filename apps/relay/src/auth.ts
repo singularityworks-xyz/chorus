@@ -7,7 +7,6 @@ import type { RelayConfig } from "./config";
 
 export const INTERNAL_AUTH_HEADER = "x-chorus-relay-internal";
 
-/** Accounts authorize tunnel registration, never commands on a user workspace. */
 export function createRelayAuth(
   database: BetterAuthOptions["database"],
   config: RelayConfig
@@ -34,8 +33,6 @@ export function createRelayAuth(
     account: { accountLinking: { enabled: false } },
     session: { expiresIn: 86_400 * 7, freshAge: 600 },
     advanced: {
-      // Supply the __Host- name ourselves; Better Auth would otherwise prepend
-      // __Secure-. The attributes below still REQUIRE secure, host-only cookies.
       useSecureCookies: false,
       cookiePrefix: "__Host-chorus-relay",
       defaultCookieAttributes: {

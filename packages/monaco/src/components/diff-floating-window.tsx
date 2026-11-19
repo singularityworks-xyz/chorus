@@ -64,8 +64,6 @@ export function DiffFloatingWindow({
       const models = diffModelsRef.current;
       diffModelsRef.current = null;
 
-      // The wrapper disposes its editor during the child unmount. Dispose the
-      // retained models after that cleanup has reset the diff editor's model.
       queueMicrotask(() => {
         if (!mountedRef.current) {
           disposeDiffModels(models);

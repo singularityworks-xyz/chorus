@@ -23,7 +23,6 @@ function run(file: string, args: string[]): Promise<string> {
   });
 }
 
-/** A dedicated app-owned subdirectory only; never alter a repository's ACL. */
 export async function ensurePrivateHostDirectory(
   directory: string
 ): Promise<string> {
@@ -37,7 +36,7 @@ export async function ensurePrivateHostDirectory(
     await chmod(root, 0o700);
     return root;
   }
-  // Native utilities run hidden; no PowerShell, shell interpolation, or GUI.
+
   const identity = await run("whoami.exe", ["/user", "/fo", "csv", "/nh"]);
   const sid = SID.exec(identity)?.[1];
   if (!sid) {

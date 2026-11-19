@@ -6,17 +6,13 @@ import { LOCAL_ENTRY_PORT } from "@chorus/contracts";
 export interface ServerConfig {
   autoStartOpencode: boolean;
   bindAddress: string;
-  /** Delta coalescing window in ms (spec §7). */
+
   coalesceMs: number;
-  /** Where chorus.db, snapshots, and the internal session secret live. */
+
   dataDir: string;
-  /** Hard ceiling on chorus.db before the log compacts itself (spec §5). */
+
   dbSizeCapMb: number;
-  /**
-   * One-shot import of the pre-Phase-2 `workspace.json` into SQLite. Off by
-   * default so the path can be deleted once the migration is confirmed; a
-   * corrupt legacy file aborts boot rather than starting empty.
-   */
+
   enableLegacyWorkspaceImport: boolean;
   hostname: string;
   localEntryEnabled: boolean;
@@ -29,9 +25,9 @@ export interface ServerConfig {
   port: number;
   pushAllowedHosts: string[];
   pushEnabled: string | undefined;
-  /** Terminal-run step detail older than this is compacted (spec §5). */
+
   retentionDays: number;
-  /** Events appended between full-state snapshots. */
+
   snapshotInterval: number;
   vapidPrivateKey: string | undefined;
   vapidPublicKey: string | undefined;
@@ -173,8 +169,6 @@ export function loadConfig(): ServerConfig {
     );
   }
 
-  // Parsed once. Reading it twice risked the two sites drifting apart, which is
-  // the exact failure this change exists to prevent.
   const opencodePort = parseTcpPort(
     process.env.OPENCODE_PORT,
     4096,
@@ -209,16 +203,12 @@ export function loadConfig(): ServerConfig {
     bindAddress,
     localEntryEnabled,
     hostname: process.env.HOSTNAME ?? "localhost",
-    // One source of truth for the engine address. Previously the process manager
-    // hardcoded 4096 and this defaulted to `http://localhost:4096`
-    // independently, so overriding one silently desynchronised the port we spawn
-    // on from the URL every client request went to.
+
     opencodePort,
     ...engine,
     opencodePerWorktree,
     opencodeDirectory: process.env.OPENCODE_DIRECTORY ?? process.cwd(),
-    // ~/.chorus keeps parity with where the pre-Phase-2 store wrote, so an
-    // existing operator finds their state where they expect it.
+
     coalesceMs: parsePositive(process.env.COALESCE_MS, 100, "COALESCE_MS"),
     dataDir: process.env.DATA_DIR ?? path.join(homedir(), ".chorus"),
     dbSizeCapMb: parsePositive(

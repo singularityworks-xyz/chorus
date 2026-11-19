@@ -52,7 +52,6 @@ async function waitForWeb(origin: string, child: ChildProcess): Promise<void> {
   throw new Error("production frontend did not become ready");
 }
 
-/** Explicit build-stage HTTP check. No browser, engine, E2E runner or relay. */
 async function main() {
   const repository = resolve(import.meta.dir, "../../../../..");
   const runtime = join(
@@ -99,8 +98,7 @@ async function main() {
       })
     )
     .listen({ hostname: "127.0.0.1", port: 0 });
-  // Reserve an OS-assigned port, then release it immediately before starting
-  // this single hidden child. A collision fails rather than spawning retries.
+
   const reservation = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,

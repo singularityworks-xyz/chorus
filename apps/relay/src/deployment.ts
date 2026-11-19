@@ -3,7 +3,6 @@ import {
   relayOperatorConfigSchema,
 } from "@chorus/contracts";
 
-/** Central routing only. Host traffic is never sent to a TLS terminator here. */
 export function renderRelayDeployment(input: RelayOperatorConfig) {
   const config = relayOperatorConfigSchema.parse({
     accountOrigin: input.accountOrigin,

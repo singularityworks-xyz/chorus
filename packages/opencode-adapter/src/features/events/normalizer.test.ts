@@ -5,9 +5,6 @@ import { normalizeSessionHistory } from "./normalizer/history";
 import { resetMessageTracking } from "./normalizer/message-tracking";
 import type { SessionMessageWithParts } from "./normalizer/types";
 
-// Real opencode streams deliver message.updated (role=assistant) before any
-// of that message's part events; the normalizer relies on it to classify
-// parts. Every part-event test therefore records the parent message first.
 function assistantMessageUpdated(sessionID: string, messageID: string) {
   return {
     id: `evt-${messageID}`,
@@ -377,7 +374,6 @@ describe("normalizeEvent", () => {
     expect(result.timestamp).toBeDefined();
   });
 
-  // SDK 1.18 requires an `id` on every event; the fixtures above all carry one.
   test("normalizes message.part.delta as a delta with a part id", () => {
     resetMessageTracking();
     const sessionID = "sess-delta";
@@ -481,8 +477,6 @@ describe("normalizeEvent", () => {
   });
 
   test("an unrecorded parent message drops part content instead of guessing", () => {
-    // The engine did not tell us this message is assistant-authored, so the
-    // normalizer refuses rather than attributing text it cannot place.
     const raw = {
       id: "evt-orphan",
       properties: {
@@ -524,8 +518,6 @@ describe("normalizeEvent", () => {
     } as OpencodeEvent);
     expect(before.delta).toBe("kept");
 
-    // A reconnect: the engine will not replay the parent, so the remembered role
-    // is exactly the thing that would otherwise mask the gap.
     resetMessageTracking();
 
     const after = normalizeEvent({

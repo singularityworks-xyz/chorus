@@ -9,7 +9,6 @@ import { gitText, RepositoryTransferError } from "./git";
 
 const TREE_ENTRY = /^(100644|100755) blob ([a-f0-9]+) +(\d+)\t(.+)$/s;
 
-/** Inspect bounded regular-file trees without checking out or executing their content. */
 export async function verifyReviewTrees(
   directory: string,
   trees: ReviewCheckpoint["trees"],

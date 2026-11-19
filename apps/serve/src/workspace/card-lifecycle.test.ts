@@ -5,17 +5,6 @@ import { join } from "node:path";
 import type { NormalizedAgentEvent } from "@chorus/oc-adapter";
 import { WorkspaceStore } from "../workspace/store";
 
-/**
- * The card lifecycle a prompt has to produce, end to end through the store.
- *
- * This is the path that was silently broken: a queued prompt created no card, so
- * `board.session.currentTaskId` stayed undefined, so `applyAgentEvent` built
- * every event with an empty task id and discarded all of them. The board stayed
- * empty while the agent worked. Each stage below is asserted against the
- * projected board, not against the raw event list, because the projection is
- * what the UI renders.
- */
-
 const REPO = { directory: "/tmp/repo", sandboxes: [], worktree: "/tmp/repo" };
 
 function createStore(prefix: string): { dir: string; store: WorkspaceStore } {
@@ -65,12 +54,6 @@ async function seedBoardWithSession(store: WorkspaceStore): Promise<string> {
   return boardId;
 }
 
-/**
- * Commits the `card.created` the way `BoardTaskService.queuePrompt` does.
- *
- * Duplicated here rather than imported because the service needs a bridge; this
- * test is about what the store does with the event once it exists.
- */
 async function seedQueuedCard(store: WorkspaceStore, boardId: string) {
   const taskId = "task-1";
   await store.applyBoardEvents(boardId, [
@@ -152,14 +135,12 @@ describe("card lifecycle from a queued prompt", () => {
 
     expect(lane("queue")).toBe(1);
 
-    // The agent picks the card up.
     await store.applyAgentEvent(
       agentEvent("sess-1", { activity: "thinking", text: "working" })
     );
     expect(lane("in_progress")).toBe(1);
     expect(lane("queue")).toBe(0);
 
-    // It needs a human.
     await store.applyAgentEvent(
       agentEvent("sess-1", {
         activity: "waiting_for_approval",
@@ -170,7 +151,6 @@ describe("card lifecycle from a queued prompt", () => {
     expect(lane("approve")).toBe(1);
     expect(lane("in_progress")).toBe(0);
 
-    // The run finishes.
     await store.applyAgentEvent(
       agentEvent("sess-1", { activity: "idle", type: "session.idle" })
     );
@@ -184,7 +164,6 @@ describe("card lifecycle from a queued prompt", () => {
     await store.load();
     const boardId = await seedBoardWithSession(store);
 
-    // No queued card, so there is no current task to attach activity to.
     expect(store.getBoard(boardId)?.session.currentTaskId).toBeUndefined();
 
     const commit = await store.applyAgentEvent(

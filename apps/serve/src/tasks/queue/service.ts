@@ -42,7 +42,6 @@ export class BoardTaskQueue {
     }
     const title = input.text.slice(0, 120);
 
-    // Create the card and check the live-task invariant in one store transaction.
     const commit = await this.context.workspaceStore.applyBoardEventsIf(
       input.boardId,
       [
@@ -82,7 +81,6 @@ export class BoardTaskQueue {
       return taskId;
     }
 
-    // A racing request can only reuse the task that won the store transaction.
     const currentTaskId = this.context.workspaceStore.getBoard(input.boardId)
       ?.session.currentTaskId;
     if (!currentTaskId) {
@@ -260,13 +258,11 @@ export class BoardTaskQueue {
     const persistedBoard = this.context.workspaceStore.getBoard(parsed.boardId);
 
     if (!persistedBoard) {
-      // A queued prompt must reference a persisted board; never trust a caller path alone.
       throw new Error(
         `no such board: ${parsed.boardId}. A prompt can only run against a board the server knows.`
       );
     }
 
-    // The board's checkout is authoritative; the request path is advisory.
     const directory = boardDirectory(persistedBoard);
     await assertCheckoutAuthorized(this.context, directory);
 
@@ -280,7 +276,7 @@ export class BoardTaskQueue {
     const input: QueueBoardPromptInput = {
       ...parsed,
       directory,
-      // Use the synced model selection instead of stale client values.
+
       model: defaultModelSelection,
     };
 

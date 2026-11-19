@@ -46,7 +46,6 @@ export class EventStream {
     const key = options?.directory ?? "__default__";
 
     if (this.#dirSubscriptions.has(key)) {
-      // Only the owning handle may stop this directory pump.
       return { stop: () => undefined };
     }
 
@@ -67,12 +66,10 @@ export class EventStream {
         directory: options?.directory,
       });
     } catch (error) {
-      // Release the claim so a later subscription can retry.
       this.#release(key, sub);
       throw error;
     }
 
-    // Keep reconnection detached so subscribe resolves after the first stream opens.
     this.#pump(
       sub,
       key,
@@ -91,7 +88,6 @@ export class EventStream {
     };
   }
 
-  // Reconnect after stream loss; cap consecutive attempts that deliver nothing.
   async #pump(
     sub: DirSubscription,
     key: string,
@@ -202,7 +198,6 @@ export class EventStream {
         delivered += 1;
       }
     } finally {
-      // Close the SDK iterator after stop or stream end.
       await iterator.return?.(undefined).catch(() => undefined);
     }
   }
@@ -241,7 +236,6 @@ export class EventStream {
     }
   }
 
-  /** Reopens the stream, or returns null when it will not open. */
   async #reopen(
     directory: string | undefined,
     abort: AbortController
@@ -270,7 +264,6 @@ export class EventStream {
     }
   }
 
-  // Resolve early when stopped during the retry delay.
   async #backoff(attempt: number, abort: AbortController): Promise<void> {
     const ceiling = Math.min(
       STREAM_RECONNECT_BASE_MS * 2 ** (attempt - 1),
@@ -284,7 +277,6 @@ export class EventStream {
         resolve();
       }, delayMs);
 
-      // Remove the listener when the timer wins to avoid retaining one per retry.
       function onAbort(): void {
         clearTimeout(timer);
         resolve();
@@ -305,7 +297,6 @@ export class EventStream {
 
 const ABORTED = Symbol("aborted");
 
-// Interrupt a pending iterator read when its subscription stops.
 function raceAbort<T>(
   pending: Promise<T>,
   signal: AbortSignal
@@ -334,7 +325,7 @@ function raceAbort<T>(
       },
       (error: unknown) => {
         signal.removeEventListener("abort", onAbort);
-        // Observe late iterator failures even when abort already won the race.
+
         settle(() => reject(error));
       }
     );

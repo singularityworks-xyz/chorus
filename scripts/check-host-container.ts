@@ -68,8 +68,7 @@ async function stop(container: string, target: "serve" | "web") {
     "{{.State.ExitCode}} {{.State.OOMKilled}}",
     container,
   ]);
-  // Installed Next 16.2.2 awaits server cleanup, then exits 143 on SIGTERM.
-  // Serve handles that signal itself and must exit 0; 137/oom are never success.
+
   assert(
     state === "0 false" || (target === "web" && state === "143 false"),
     `container did not exit gracefully (${state})`

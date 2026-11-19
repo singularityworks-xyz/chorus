@@ -17,7 +17,7 @@ export function createApprovalPayload(
     boardId: event.boardId,
     boardTitle: boardTitle.slice(0, 160),
     cardId: event.taskId,
-    // Keep user prompt text off external push providers.
+
     cardTitle:
       event.kind === "permission" ? "Permission request" : "Question request",
     kind: event.kind,

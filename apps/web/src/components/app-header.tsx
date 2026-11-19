@@ -121,7 +121,6 @@ export function AppHeader() {
     setBoardViewMode,
   } = useWorkspace();
 
-  // Close notification pane on outside click
   useEffect(() => {
     if (!notifOpen) {
       return;

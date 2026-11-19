@@ -447,9 +447,6 @@ async function loadOrSeedQualificationBoards(
     return existingBoardIds;
   }
 
-  // Task dispatch now requires the same installation-wide model selection
-  // used by the UI. Seed a deterministic fixture model in this disposable
-  // workspace so the lifecycle test exercises accepted runs and streaming.
   await request("/workspace/mutations", {
     baseRevision: null,
     clientId: "qualification",
@@ -487,7 +484,6 @@ async function loadOrSeedQualificationBoards(
   return boardIds;
 }
 
-/** Real repositories, SDK, HTTP commands, SQLite writer and authenticated WS mirrors. */
 export async function startPhase6Harness({
   interactive = false,
   localEntryWebPort,
@@ -500,7 +496,7 @@ export async function startPhase6Harness({
   interactive?: boolean;
   localEntryWebPort?: number;
   questionReplyDelayMs?: number;
-  /** Keep fixture data at this disposable path so a second process can reopen it. */
+
   rootDirectory?: string;
   servePort?: number;
   tcpFaultProxyMirrors?: number;

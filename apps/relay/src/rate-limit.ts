@@ -1,4 +1,3 @@
-/** Bounded ingress buckets; trusted ingress must overwrite x-real-ip. */
 export class RelayRateLimiter {
   readonly #buckets = new Map<string, { expires: number; used: number }>();
   readonly #now: () => number;

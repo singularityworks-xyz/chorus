@@ -13,10 +13,7 @@ export interface QuestionReplyInput {
     optionIndices?: number[];
     customAnswer?: string;
   }>;
-  /**
-   * The board's checkout, so the engine routes the reply to the session that
-   * raised it. A board's worktree is not the directory serve was started in.
-   */
+
   directory?: string;
   requestID: string;
 }

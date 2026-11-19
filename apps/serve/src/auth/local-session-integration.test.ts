@@ -131,7 +131,7 @@ describe("local access with registered sessions", () => {
       });
       expect(fresh.status).toBe(200);
       expect(cookieHeader(fresh)).not.toBe(cookies);
-      // Production's device cap is an explicit conflict, not a server error.
+
       for (let index = 0; index < 9; index++) {
         const added = await fetch(`${base}/auth/login`, {
           method: "POST",

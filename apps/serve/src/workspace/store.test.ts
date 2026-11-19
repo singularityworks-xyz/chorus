@@ -29,7 +29,6 @@ const LEGACY_CHECKOUT_COLLISION = /share checkout/;
 
 type StoreOptions = ConstructorParameters<typeof WorkspaceStore>[1];
 
-/** POSIX permission bits are a bitmask, so masking is the correct operation. */
 function fileMode(path: string): number {
   // biome-ignore lint/suspicious/noBitwiseOperators: mode is a bitfield
   return statSync(path).mode & 0o777;
@@ -93,7 +92,6 @@ async function seedBoard(store: WorkspaceStore, title = "Repo") {
   return event.board.boardId;
 }
 
-/** A board with a live card and bound session — the precondition for agent events. */
 async function seedActiveBoard(store: WorkspaceStore) {
   const boardId = await seedBoard(store);
 
@@ -673,7 +671,6 @@ describe("WorkspaceStore idempotency", () => {
     await first.load();
     const boardId = await seedBoard(first);
 
-    // Fixed id so the post-restart replay can reuse it verbatim.
     await first.applyMutation({
       baseRevision: null,
       clientId: "test-client",
@@ -733,7 +730,6 @@ describe("WorkspaceStore serialization", () => {
     const committed = storm.filter((entry) => entry !== null);
     expect(committed).toHaveLength(200);
 
-    // Exactly one event per mutation, contiguous, no gaps or duplicates.
     const seqs = committed.map((entry) => entry.lastSeq).sort((a, b) => a - b);
     expect(new Set(seqs).size).toBe(seqs.length);
     expect(seqs[0]).toBe(2);
@@ -795,10 +791,6 @@ describe("WorkspaceStore durability", () => {
 
     const before = store.getSnapshot();
 
-    // Closing the database is a faithful stand-in for a failed write: the
-    // INSERT can no longer succeed. The invariant under test is that memory is
-    // not swapped when the append throws. `headSeq()` cannot be read after
-    // close, so the sequence assertion happens against a reopened database.
     await store.close();
 
     await expect(
@@ -840,8 +832,6 @@ describe("WorkspaceStore durability", () => {
     await seedBoard(first);
     await first.close();
 
-    // Rewrite the newest snapshot row with garbage, leaving no valid base for
-    // replay to fall back on.
     const { Database } = await import("bun:sqlite");
     const db = new Database(join(dir, "chorus.db"));
     db.exec("UPDATE snapshots SET blob = 'not-json'");
@@ -948,9 +938,6 @@ describe("WorkspaceStore snapshots and retention", () => {
 
     await store.writeSnapshot();
 
-    // Head survives in meta even though the covered rows are gone. The event
-    // *at* the snapshot seq stays until the next snapshot, per spec §5's
-    // `seq < snapshotSeq` window.
     expect(store.headSeq()).toBe(2);
     expect(countEvents(store.databasePath)).toBe(1);
 
@@ -1594,8 +1581,7 @@ describe("WorkspaceStore legacy migration", () => {
     expect(store.getSnapshot().boards).toHaveLength(1);
     expect(store.getSnapshot().boards[0]?.boardId).toBe("legacy-1");
     expect(store.getSnapshot().preferences.composerHintDismissed).toBe(true);
-    // The import lands as a snapshot rather than events, so the log starts empty
-    // and the first real mutation is seq 1.
+
     expect(store.headSeq()).toBe(0);
 
     const afterImport = await store.applyMutation(
@@ -1606,7 +1592,6 @@ describe("WorkspaceStore legacy migration", () => {
     );
     expect(afterImport?.firstSeq).toBe(1);
 
-    // The original is parked, not deleted.
     expect(() => statSync(legacyPath)).toThrow();
     expect(statSync(`${legacyPath}.imported`).isFile()).toBe(true);
     await store.close();

@@ -156,12 +156,10 @@ function reconstructDeleted(hunks: DiffHunk[]): string {
   );
   const lastLine = hunks.flatMap((hunk) => hunk.lines).at(-1);
   const withoutNewline = lastLine?.withoutNewline ?? false;
-  // A deleted file has no live content to read. OpenCode emits its removed
-  // lines in the patch; preserve them so the diff remains useful after deletion.
+
   return compose(lines, !withoutNewline && lines.length > 0);
 }
 
-/** Converts SDK patches into the content pair consumed by Chorus's diff viewer. */
 export async function normalizeSessionDiff(
   entries: SnapshotFileDiff[],
   readFile: (path: string) => Promise<ReadFileResult>

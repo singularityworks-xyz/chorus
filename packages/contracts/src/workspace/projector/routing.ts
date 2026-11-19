@@ -42,7 +42,6 @@ export function resolveTaskId(
   return board.session.currentTaskId ?? null;
 }
 
-// Makes each board-event switch fail to compile when a new variant is unhandled.
 export function unhandledBoardEvent(
   _event: never,
   board: WorkspaceBoard

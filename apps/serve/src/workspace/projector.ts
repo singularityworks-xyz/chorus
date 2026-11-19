@@ -7,20 +7,6 @@ import {
 } from "@chorus/contracts";
 import type { NormalizedAgentEvent } from "@chorus/oc-adapter";
 
-/**
- * Boundary adapter: opencode `NormalizedAgentEvent` → Chorus `WorkspaceEvent`.
- *
- * This is the *only* place that knows what a tool call, a thinking block, or a
- * permission request looks like on the wire. Everything downstream of it — the
- * store, the event log, the WS hub, the UI — speaks `WorkspaceEvent` only
- * (spec §2 rule 5: external shapes never reach UI or storage directly).
- *
- * Reduction itself lives in `@chorus/contracts` as the pure `applyEventToBoard`.
- * The two duplicate copies that used to exist here and in
- * `apps/web/src/features/workspace/state.ts` had already drifted apart; both are
- * gone.
- */
-
 const SUMMARY_MAX = 72;
 
 function summaryOr(text: string | undefined, fallback: string): string {
@@ -117,14 +103,6 @@ function buildStep(event: NormalizedAgentEvent): AgentStep | null {
   return null;
 }
 
-/**
- * Translates one agent event into the ordered domain events it implies.
- *
- * A single agent event can mean several things at once — "the tool finished"
- * both appends a step *and* may move the card — so agent events are not held
- * to the 1-mutation-to-1-event rule that client mutations follow. Ordering
- * matters: the step lands before any lane move, matching prior behaviour.
- */
 export function toWorkspaceEvents(
   event: NormalizedAgentEvent,
   scope: { boardId: string; taskId: string }
@@ -142,11 +120,6 @@ export function toWorkspaceEvents(
       delta: event.delta,
     });
   } else if (event.delta) {
-    // A delta with no part scope cannot target a part-identified step. Route it
-    // to a stable synthetic id keyed on the message so consecutive orphans
-    // collapse into one step instead of fragmenting, and so replaying the log
-    // reconstructs the same steps. `step.delta_appended` opens the step when it
-    // is missing, so the first orphan delta is not lost.
     events.push({
       type: "step.delta_appended",
       boardId: scope.boardId,
@@ -212,8 +185,6 @@ export function toWorkspaceEvents(
       break;
 
     case "idle":
-      // `session.idle` carries no taskId by design — the projector resolves it
-      // from `board.session.currentTaskId`.
       events.push({
         type: "session.idle",
         boardId: scope.boardId,
@@ -248,13 +219,6 @@ export function toWorkspaceEvents(
   return events;
 }
 
-/**
- * Applies one normalized agent event to a board.
- *
- * The guard is deliberately kept here: correlating an adapter event to a board
- * requires the session binding, which is adapter knowledge, not projector
- * knowledge.
- */
 export function applyAgentEventToBoard(
   board: WorkspaceBoard,
   event: NormalizedAgentEvent
@@ -279,10 +243,6 @@ export function applyAgentEventToBoard(
   return next;
 }
 
-/**
- * Binds a session using the local clock. The reduction itself is the shared
- * one in `@chorus/contracts` — only the clock choice is per-app.
- */
 export function attachSessionToBoard(
   board: WorkspaceBoard,
   sessionId: string

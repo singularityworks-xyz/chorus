@@ -7,8 +7,6 @@ import {
 } from "@chorus/contracts";
 import type { WorkspaceHistoryEntry } from "./types";
 
-// Server events use the shared projector; local position guesses expire quickly.
-
 export interface PendingDrag {
   expiresAt: number;
   mutationId: string;
@@ -17,10 +15,10 @@ export interface PendingDrag {
 
 export interface WorkspaceState {
   boards: WorkspaceBoard[];
-  /** One in-flight optimistic position per board, keyed by board id. */
+
   pendingDrags: Map<string, PendingDrag>;
   preferences: WorkspacePreferences;
-  /** Snapshots omit this list, so board lifecycle events maintain it locally. */
+
   previousWorkspaces: WorkspaceHistoryEntry[];
   selectedBoardId: string | null;
 }
@@ -104,7 +102,6 @@ function noteHistory(
   return [entry, ...without].slice(0, MAX_PREVIOUS_WORKSPACES);
 }
 
-// Board lifecycle changes update the list; workspace events return null here.
 function applyBoardListEvent(
   input: BoardListInput,
   event: WorkspaceEvent
@@ -120,7 +117,6 @@ function applyBoardListEvent(
 
   let { boards, pendingDrags, previousWorkspaces } = input;
 
-  // Ordered events before `board.moved` cannot confirm a drag position.
   if (event.type === "board.moved" || event.type === "board.removed") {
     pendingDrags = withoutPending(pendingDrags, boardId) ?? pendingDrags;
   }
@@ -177,7 +173,6 @@ function applyEvents(
       previousWorkspaces = boardList.previousWorkspaces;
     }
 
-    // Selection and preferences use the same shared projector as board state.
     const scope = applyEventToWorkspace(
       { boards, preferences, selectedBoardId },
       event
@@ -265,7 +260,6 @@ export function workspaceReducer(
   }
 }
 
-/** A live optimistic position takes precedence over the last server position. */
 export function displayedPosition(
   board: WorkspaceBoard,
   pendingDrags: Map<string, PendingDrag>,

@@ -5,14 +5,6 @@ import {
   UnknownSessionError,
 } from "./session-directory";
 
-/**
- * Follow-up commands — approve, reject, abort, redirect, revert — arrive with a
- * session id and nothing else. Before worktree-per-board every board shared the
- * repo's primary checkout, so the bridge's default directory happened to be
- * right. A board can own a worktree now, and a command routed to the default
- * lands in the wrong tree.
- */
-
 const UNKNOWN_SESSION = /no board owns session/;
 
 function storeWith(
@@ -65,8 +57,6 @@ describe("resolveSessionDirectory", () => {
   });
 
   test("an unknown session is refused rather than defaulted", () => {
-    // The whole point: no safe directory exists, and guessing is how a command is
-    // applied somewhere the user never intended.
     const store = storeWith([]);
     expect(() => resolveSessionDirectory(store, "sess-ghost")).toThrow(
       UnknownSessionError

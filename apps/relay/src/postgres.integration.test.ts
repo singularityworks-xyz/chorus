@@ -12,7 +12,7 @@ import { RelayRegistry, RelayRegistryError } from "./registry";
 import { createPostgresFixture } from "./testing/postgres";
 
 const databaseUrl = process.env.CHORUS_TEST_POSTGRES_URL;
-// Normal unit runs must never discover/use an operator database automatically.
+
 describe.skipIf(!databaseUrl)("relay real PostgreSQL integration", () => {
   let fixture: Awaited<ReturnType<typeof createPostgresFixture>> | undefined;
   function database() {

@@ -41,7 +41,6 @@ export function MobileMenuDrawer({
   createBoardFromProject,
   setBoardViewMode,
 }: MobileMenuDrawerProps) {
-  // Lock body scroll while drawer is open
   useEffect(() => {
     if (open) {
       document.body.style.overflow = "hidden";

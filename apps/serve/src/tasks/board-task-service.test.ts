@@ -37,12 +37,6 @@ function makeMockBridge() {
 
 const REPO = { directory: "/tmp/repo", sandboxes: [], worktree: "/tmp/repo" };
 
-/**
- * Board ids are server-generated (the client sends a seed and the store mints
- * the board), so fixtures read the id back off the commit instead of assuming
- * one. An earlier version of this file hard-coded "board-1" and the
- * session patch silently no-oped against a board that did not exist.
- */
 async function seedBoard(
   workspaceStore: WorkspaceStore,
   session?: Partial<WorkspaceBoard["session"]>,
@@ -876,8 +870,6 @@ describe("BoardTaskService", () => {
       reviewMode: "auto",
     });
 
-    // The session binding has to be durable, not just in-memory: a restart
-    // mid-session must find it again.
     expect(workspaceStore.getBoard(boardId)?.session.sessionId).toBe(
       "sess-123"
     );
@@ -910,8 +902,7 @@ describe("BoardTaskService", () => {
 
     expect(card).toBeDefined();
     expect(card?.title).toBe("build the feature");
-    // The load-bearing part: without this the store has no task id to attach
-    // agent events to, and every task-scoped event is dropped.
+
     expect(board?.session.currentTaskId).toBe(card?.id);
 
     await workspaceStore.close();
@@ -980,15 +971,6 @@ describe("BoardTaskService", () => {
     rmSync(dir, { force: true, recursive: true });
   });
   describe("session reuse is scoped to a directory (plan P6 task 3)", () => {
-    /**
-     * A session belongs to the tree it was opened in.
-     *
-     * The trigger is the *board's* directory changing — it gets reprovisioned onto
-     * a new worktree — not the client asking for a different one. The service
-     * resolves the working directory itself now, so a client cannot aim a prompt
-     * anywhere; the registry's recorded directory is compared against the board's
-     * current one.
-     */
     test("same directory reuses the session", async () => {
       const bridge = makeMockBridge();
       const dir = mkdtempSync(join(tmpdir(), "chorus-reuse-same-"));
@@ -1016,9 +998,6 @@ describe("BoardTaskService", () => {
     });
 
     test("a persisted session the engine places elsewhere forks", async () => {
-      // The realistic shape: serve restarted, so the registry is empty, and the
-      // stored session id turns out to belong to a different board's checkout.
-      // Only the engine can answer that, so it is asked.
       const bridge = makeMockBridge();
       bridge.getSession.mockResolvedValue({
         directory: "/tmp/repo/.chorus-worktrees/some-other-board",
@@ -1137,8 +1116,7 @@ describe("BoardTaskService", () => {
           },
         ]);
       }
-      // The registry recorded `/tmp/repo`; the board now resolves through a
-      // trailing separator. Same tree, so no fork.
+
       bridge.getSession.mockResolvedValue({
         directory: "/tmp/repo/",
         id: "sess-123",
@@ -1176,7 +1154,6 @@ describe("BoardTaskService", () => {
         reviewMode: "auto",
       });
 
-      // The board's own checkout wins over whatever the caller asked for.
       expect(bridge.subscribeDirectory).toHaveBeenCalledWith("/tmp/repo");
       expect(bridge.forkSession).not.toHaveBeenCalled();
 
@@ -1213,19 +1190,12 @@ describe("BoardTaskService", () => {
   });
 
   describe("the agent runs in the board's own worktree", () => {
-    /**
-     * Regression: worktrees were created and recorded on the board but never used.
-     * The client sends `repo.directory` with every prompt and the service passed it
-     * straight through, so every agent ran in the primary checkout and two boards
-     * on one repo shared an index — the exact collision worktree-per-board exists
-     * to prevent. The service resolves the directory itself now.
-     */
     test("a board with a worktree runs there, not in the primary checkout", async () => {
       const bridge = makeMockBridge();
       const dir = mkdtempSync(join(tmpdir(), "chorus-worktree-bind-"));
       const workspaceStore = new WorkspaceStore(dir);
       await workspaceStore.load();
-      // What the store produces for the second board on a repo.
+
       const worktree = "/repos/app/.chorus-worktrees/board-7";
       const boardId = await seedBoard(
         workspaceStore,
@@ -1236,7 +1206,7 @@ describe("BoardTaskService", () => {
       const service = new BoardTaskService(bridge as never, workspaceStore);
       await service.queuePrompt({
         boardId,
-        // What the client sends: the primary checkout.
+
         directory: "/repos/app",
         text: "do the work",
         reviewMode: "auto",
@@ -1282,8 +1252,6 @@ describe("BoardTaskService", () => {
     });
   });
   test("two prompts queued at once dispatch only the first and reject the second", async () => {
-    // Per-board operations serialize so a double submit cannot dispatch two
-    // prompts into one session or pretend the second was queued.
     const bridge = makeMockBridge();
     const dir = mkdtempSync(join(tmpdir(), "chorus-card-race-"));
     const workspaceStore = new WorkspaceStore(dir);
@@ -1322,9 +1290,6 @@ describe("BoardTaskService", () => {
     rmSync(dir, { force: true, recursive: true });
   });
   test("a prompt for an unknown board is refused", async () => {
-    // Previously the working directory fell back to whatever the caller sent, so a
-    // token-holder could skip board creation entirely and point the engine at any
-    // path on the host.
     const bridge = makeMockBridge();
     const dir = mkdtempSync(join(tmpdir(), "chorus-unknown-board-"));
     const workspaceStore = new WorkspaceStore(dir);
@@ -1347,10 +1312,6 @@ describe("BoardTaskService", () => {
     rmSync(dir, { force: true, recursive: true });
   });
   test("a prompt after a timed-out card creates a new one", async () => {
-    // The failure this guards: `session.timeout` moves the card to `done` but used
-    // to leave `currentTaskId` pointing at it, so the next prompt skipped card
-    // creation and every new agent event attached to a finished card. A timeout is
-    // the common way in, because no later `session.idle` arrives to release it.
     const bridge = makeMockBridge();
     const dir = mkdtempSync(join(tmpdir(), "chorus-after-timeout-"));
     const workspaceStore = new WorkspaceStore(dir);
@@ -1369,7 +1330,6 @@ describe("BoardTaskService", () => {
     });
     const firstTaskId = workspaceStore.getBoard(boardId)?.session.currentTaskId;
 
-    // The run dies without an idle.
     await workspaceStore.applyAgentEvent({
       activity: "error",
       error: "session timed out",

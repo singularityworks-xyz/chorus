@@ -19,7 +19,6 @@ let initialRss = process.memoryUsage().rss;
 let peakRss = initialRss;
 let startedAt = Date.now();
 try {
-  // Warm normalization, SQLite, crypto/auth and socket paths before measuring RSS.
   harness.appendBatch(200);
   await new Promise((done) => setTimeout(done, 500));
   const startingSeq = harness.store.headSeq();
@@ -69,9 +68,6 @@ try {
   await harness.close();
 }
 
-// Bun can retain a closed server's native references in a standalone load run
-// even after the harness reports no active handles. The qualification owns all
-// of those servers, so flush the report and exit after the awaited cleanup.
 await new Promise<void>((resolve, reject) =>
   process.stdout.write("", (error) => (error ? reject(error) : resolve()))
 );

@@ -2,7 +2,6 @@ import { z } from "zod";
 
 const DRIVE_PATH_PATTERN = /^[A-Za-z]:/;
 
-/** A file change returned by an agent session in the shape the web client renders. */
 export const sessionFileDiffSchema = z
   .object({
     additions: z.number().int().nonnegative(),

@@ -527,6 +527,4 @@ if (cleanupFailures.length > 0) {
   );
 }
 
-// The SDK keeps a few idle handles alive after their owning servers close.
-// Cleanup above is awaited first so an explicit exit cannot skip resource cleanup.
 process.exit(0);

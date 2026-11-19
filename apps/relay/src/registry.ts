@@ -65,7 +65,6 @@ export class RelayRegistryError extends Error {
   }
 }
 
-/** Durable relay metadata only: no task state, repositories, or handoff journal. */
 export class RelayRegistry {
   readonly pool: Pool;
   readonly #hostsDomain: string;
@@ -126,7 +125,6 @@ export class RelayRegistry {
       publicKey: HostPublicKey;
     }
   ): Promise<string> {
-    // Serialize quota decisions across all processes, not only this JS instance.
     await client.query(
       "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
       [input.accountId]
@@ -218,7 +216,6 @@ export class RelayRegistry {
   }
 
   async connection(runId: string, touch = false): Promise<TunnelHost | null> {
-    // A revoked registration invalidates an existing signed JWT immediately.
     const result = await this.pool.query(
       `SELECT h.* FROM relay_connections c JOIN relay_hosts h USING(host_id)
       WHERE c.run_id=$1 AND NOT h.revoked AND c.last_seen > now() - interval '45 seconds'`,

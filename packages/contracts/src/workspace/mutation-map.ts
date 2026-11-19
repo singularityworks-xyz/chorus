@@ -1,6 +1,5 @@
 import type { WorkspaceEventType } from "./events";
 
-/** Exhaustive mapping from client mutations to persisted events. */
 export const MUTATION_EVENT_MAP = {
   "board.create": "board.created",
   "board.remove": "board.removed",
@@ -27,7 +26,6 @@ export function eventTypeForMutation(
   return MUTATION_EVENT_MAP[mutationType];
 }
 
-/** Persisted events produced by the OpenCode adapter. */
 export const AGENT_EVENT_TYPES = [
   "card.created",
   "card.queued",

@@ -72,7 +72,6 @@ export function useProjectActions({
   }, [reportUnauthorized]);
 
   useEffect(() => {
-    // Wait until the socket confirms the session before calling protected routes.
     if (sessionStatus !== "live" || recentProjectsState.hasLoaded) {
       return;
     }

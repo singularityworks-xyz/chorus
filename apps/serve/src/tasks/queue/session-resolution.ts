@@ -25,7 +25,6 @@ async function candidateDirectory(
   }
 
   try {
-    // Select the engine by board path, then trust the session's reported path.
     const session = await context.bridge.getSession({
       sessionID: candidate,
       engineDirectory: input.directory,

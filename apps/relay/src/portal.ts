@@ -10,7 +10,6 @@ function html(value: string): string {
     .replaceAll(">", "&gt;");
 }
 
-/** Account/connection UI only. The workspace frontend is served by its host. */
 export async function renderPortal(config: RelayConfig): Promise<Response> {
   const nonce = crypto.randomUUID();
   return new Response(

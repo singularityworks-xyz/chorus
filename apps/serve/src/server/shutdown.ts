@@ -29,7 +29,7 @@ export function createGracefulShutdown(
       return;
     }
     isShuttingDown = true;
-    // Disable restarts before draining so exiting engines are not respawned.
+
     resources.beginEngineShutdown();
     phase = "stopping-dispatcher";
     resources.logger.info("server-shutdown", { signal });

@@ -39,14 +39,14 @@ describe("loadConfig", () => {
     expect(config.hostname).toBe("localhost");
     expect(config.opencodeBaseUrl).toBe("http://127.0.0.1:4096");
     expect(config.opencodeDirectory).toBe(process.cwd());
-    // Parity with where the pre-Phase-2 JSON store kept its state.
+
     expect(config.dataDir).toBe(join(homedir(), ".chorus"));
     expect(config.retentionDays).toBe(30);
     expect(config.dbSizeCapMb).toBe(512);
     expect(config.snapshotInterval).toBe(1000);
     expect(config.coalesceMs).toBe(100);
     expect(config.opencodePerWorktree).toBe(false);
-    // Off by default so the legacy import path can be deleted once migrated.
+
     expect(config.enableLegacyWorkspaceImport).toBe(false);
   });
 
@@ -189,8 +189,6 @@ describe("loadConfig", () => {
   });
 
   test("rejects a non-positive or non-numeric retention window", () => {
-    // Each setting is checked on its own: setting all three at once would just
-    // surface whichever happens to be validated first.
     process.env.RETENTION_DAYS = "0";
     expect(() => loadConfig()).toThrow('Invalid RETENTION_DAYS "0"');
 

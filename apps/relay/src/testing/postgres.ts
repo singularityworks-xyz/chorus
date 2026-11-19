@@ -7,7 +7,6 @@ import { RelayEnrollment } from "../enrollment";
 import { RELAY_SCHEMA, RelayRegistry } from "../registry";
 import { testConfig } from "./config";
 
-/** Opt-in, loopback-only fixture; each run owns one random schema, never public tables. */
 export async function createPostgresFixture(connectionString: string) {
   const url = new URL(connectionString);
   if (

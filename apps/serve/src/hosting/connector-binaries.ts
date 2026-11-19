@@ -11,7 +11,6 @@ const manifestSchema = z.strictObject({
   frpc: z.strictObject({ version: z.literal("0.71.1"), sha256: sha256Schema }),
 });
 
-/** The installer supplies this manifest and the exact reviewed native releases. */
 export async function verifiedConnectorBinaries(directory: string) {
   const manifestFile = join(directory, "manifest.json");
   const metadata = await lstat(manifestFile);

@@ -30,7 +30,6 @@ export function useWorkspaceSession() {
         type: "server/snapshot",
       });
 
-      // The sync hook filters buffered frames against the snapshot sequence.
       if (buffered.length > 0) {
         dispatch({ events: buffered, type: "server/events" });
       }
@@ -71,7 +70,6 @@ export function useWorkspaceSession() {
   const pendingDragsRef = useRef(hasPendingDrags);
   pendingDragsRef.current = hasPendingDrags;
 
-  // Keep one interval so new drags do not restart the expiry sweep.
   useEffect(() => {
     const timer = setInterval(
       () => {
@@ -91,7 +89,6 @@ export function useWorkspaceSession() {
         return false;
       }
 
-      // HTTP auth failures must stop the socket's reconnect loop as well.
       reportSyncUnauthorized();
       setAuthExpired(true);
       return true;

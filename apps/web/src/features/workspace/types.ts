@@ -48,34 +48,29 @@ export interface PromptPart {
 
 export interface WorkspaceContextValue {
   addRecentModel: (model: ModelSelection) => void;
-  /** True once the session died; the shell renders the login screen. */
+
   authExpired: boolean;
   boardLayoutVersion: number;
   boards: WorkspaceBoard[];
   clearSelection: () => void;
-  /** Last transport or protocol error, for the status strip. */
+
   connectionError: string | null;
   createBoardFromHistory: (entry: WorkspaceHistoryEntry) => void;
   createBoardFromProject: (project: RepoProject) => void;
   dismissComposerHint: () => void;
   dismissWorkspaceActionError: () => void;
-  /** Focus a board on this device without changing the shared board selection. */
+
   focusBoardLocally: (boardId: string) => void;
-  /**
-   * Whether workspace state is loaded yet.
-   *
-   * `false` means "nothing here yet", which is otherwise indistinguishable from
-   * "connected, and the workspace really is empty".
-   */
+
   hydrated: boolean;
   isLoadingRecentProjects: boolean;
   isOpeningFolder: boolean;
   isQueueingPrompt: boolean;
-  /** Highest contiguously applied sequence, for diagnostics and e2e assertions. */
+
   lastSeq: number;
   loadProjects: () => Promise<void>;
   openFolder: () => Promise<void>;
-  /** In-flight optimistic board positions, keyed by board id. */
+
   pendingDrags: Map<string, PendingDrag>;
   preferences: WorkspacePreferences;
   previousWorkspaces: WorkspaceHistoryEntry[];
@@ -108,7 +103,7 @@ export interface WorkspaceContextValue {
     command: BoardSessionHistoryCommand
   ) => Promise<SessionHistoryCommandResult>;
   sessionHistoryChange: { boardId: string; revision: number } | null;
-  /** Socket status, so the UI can show a reconnecting strip. */
+
   sessionStatus: WorkspaceSessionStatus;
   setBoardModel: (boardId: string, model: ModelSelection | null) => void;
   setBoardViewMode: (mode: WorkspacePreferences["boardViewMode"]) => void;

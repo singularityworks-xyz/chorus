@@ -17,7 +17,7 @@ export function createKanbanCardNode(
   selected: boolean,
   onRemove: (id: string) => void,
   removingBoardId: string | null,
-  // Keep the optimistic position until the server confirms the move.
+
   position: { x: number; y: number }
 ): Node<KanbanCardNodeData> {
   const layoutItem = layout.get(board.boardId);

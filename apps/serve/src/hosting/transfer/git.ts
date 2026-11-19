@@ -48,7 +48,6 @@ export async function readGitIndex(directory: string, importing = false) {
   return modes;
 }
 
-/** No shell, prompts, hooks, filesystem monitor or external diff execution. */
 export function transferGit(
   directory: string,
   args: string[],

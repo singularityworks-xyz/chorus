@@ -1,4 +1,3 @@
-/** Bound every asynchronous delivery stage, including DNS and encryption. */
 export function withDeliverySignal<T>(
   promise: Promise<T>,
   signal: AbortSignal

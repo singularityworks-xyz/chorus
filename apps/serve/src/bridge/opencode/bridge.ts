@@ -112,7 +112,6 @@ export class OpenCodeBridge {
   }
 
   async start(): Promise<void> {
-    // Pooled engines own their directory streams.
     if (this.#engineProvider) {
       return;
     }
@@ -260,7 +259,6 @@ export class OpenCodeBridge {
     return this.#sessionCommands.createSession(input);
   }
 
-  // Session ownership is verified by the engine for the requested directory.
   getSession(input: Parameters<OpenCodeSessionCommands["getSession"]>[0]) {
     return this.#sessionCommands.getSession(input);
   }

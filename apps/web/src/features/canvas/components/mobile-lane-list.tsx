@@ -6,8 +6,6 @@ import { Kanban } from "@/features/kanban/components/kanban";
 import { useKanbanCardActions } from "@/features/kanban/task-actions/use-kanban-card-actions";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 
-// Reuse desktop lanes in a vertical layout for phone screens.
-
 const LANES = ["queue", "in_progress", "approve", "done"] as const;
 
 export function MobileLaneList() {
@@ -95,7 +93,6 @@ export function MobileLaneList() {
   );
 }
 
-// Remount per board so optimistic task state cannot leak across selection.
 function MobileBoardBody({
   boardId,
   columns,

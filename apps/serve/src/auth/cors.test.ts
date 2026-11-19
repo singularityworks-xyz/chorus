@@ -11,8 +11,7 @@ describe("CORS policy (spec §6.3, plan P4.5)", () => {
     const policy = resolveCorsPolicy({ isProduction: true });
 
     expect(policy.allowedOrigins).toEqual([]);
-    // The plugin is not mounted: absence of `Access-Control-Allow-Origin` is what
-    // makes a browser refuse, and there is no header for "only my own origin".
+
     expect(corsOptionsFor(policy)).toBeUndefined();
   });
 
@@ -40,8 +39,6 @@ describe("CORS policy (spec §6.3, plan P4.5)", () => {
   });
 
   test("a hard failure beats silently ignoring the variable", () => {
-    // An operator who set the var and got silence would conclude cross-origin
-    // access was broken and "fix" it by widening the policy.
     expect(() =>
       resolveCorsPolicy({
         corsAllowedOrigins: "http://localhost:3000",
@@ -59,12 +56,10 @@ describe("CORS policy (spec §6.3, plan P4.5)", () => {
     const options = corsOptionsFor(policy);
 
     expect(options).toBeDefined();
-    // `origin` is the real option name; `allow` is silently ignored and the
-    // plugin reflects any caller-supplied Origin instead.
+
     expect(options).not.toHaveProperty("allow");
     expect(options?.origin).toEqual(["http://localhost:3000"]);
-    // The session cookie is the credential, so it must travel for the dev
-    // frontend on :3000 talking to serve on :2000.
+
     expect(options?.credentials).toBe(true);
   });
 

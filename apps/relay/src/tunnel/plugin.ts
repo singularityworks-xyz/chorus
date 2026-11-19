@@ -48,7 +48,6 @@ export function createTunnelVerifier(config: RelayConfig) {
   };
 }
 
-/** Dedicated loopback listener. Never expose through the public proxy. */
 export function createFrpPlugin(
   registry: Pick<RelayRegistry, "findHost" | "admit" | "connection">,
   verifyToken: ReturnType<typeof createTunnelVerifier>
@@ -131,8 +130,6 @@ export function createFrpPlugin(
           ? login(content)
           : connected(query.op ?? "", content));
       } catch {
-        // Signature, schema, dependency, and database failures all fail closed.
-        // Never expose JWTs or arbitrary plugin payloads in error diagnostics.
         return deny("authorization unavailable");
       }
     }

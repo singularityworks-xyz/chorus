@@ -20,8 +20,6 @@ describe("login brute-force guard (spec §6.6, plan P4.8)", () => {
       clock += 1000;
     }
 
-    // The limit is checked *after* recording, so the eleventh is the one
-    // refused rather than the twelfth.
     expect(limiter.recordFailure("1.2.3.4")).toBe("rate-limited");
   });
 
@@ -36,8 +34,6 @@ describe("login brute-force guard (spec §6.6, plan P4.8)", () => {
     limiter.recordFailure("ip");
     limiter.recordFailure("ip");
 
-    // A refused attempt still consumes window budget, so a flood cannot be
-    // staggered into passing.
     clock += LOGIN_WINDOW_MS;
     expect(limiter.recordFailure("ip")).toBe("allow");
   });
@@ -46,17 +42,12 @@ describe("login brute-force guard (spec §6.6, plan P4.8)", () => {
     let clock = 1_700_000_000_000;
     const limiter = new LoginRateLimiter({ now: () => clock });
 
-    // Ten attempts a second apart: all inside one window.
     for (let attempt = 0; attempt < MAX_LOGIN_ATTEMPTS; attempt += 1) {
       limiter.recordFailure("ip");
       clock += 1000;
     }
     expect(limiter.recordFailure("ip")).toBe("rate-limited");
 
-    // Past the window every one of those attempts has aged out, so a full
-    // budget is available again. A fixed bucket would hand out a fresh budget at
-    // the boundary on top of the tail of the previous one — twice the intended
-    // rate.
     clock += LOGIN_WINDOW_MS;
     expect(limiter.recordFailure("ip")).toBe("allow");
   });
@@ -84,7 +75,6 @@ describe("login brute-force guard (spec §6.6, plan P4.8)", () => {
 
     expect(limiter.isBlocked("ip")).toBe("rate-limited");
 
-    // Still ten recorded, not eleven.
     clock += 1;
     expect(limiter.isBlocked("ip")).toBe("rate-limited");
   });
@@ -97,8 +87,7 @@ describe("login brute-force guard (spec §6.6, plan P4.8)", () => {
     }
 
     expect(limiter.isBlocked("attacker")).toBe("rate-limited");
-    // One operator behind the same NAT must not be locked out by another's
-    // typos, and a distributed attempt is still capped per source.
+
     expect(limiter.isBlocked("operator")).toBe("allow");
   });
 
@@ -112,8 +101,6 @@ describe("login brute-force guard (spec §6.6, plan P4.8)", () => {
 
     limiter.reset("ip");
 
-    // An operator who fumbled the token ten times is not locked out for the
-    // next ten minutes after finally getting it right.
     expect(limiter.isBlocked("ip")).toBe("allow");
   });
 

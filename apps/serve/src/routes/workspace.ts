@@ -42,11 +42,6 @@ export function createWorkspaceRoutes(
           };
         }
 
-        // The store's own commit hook publishes to the hub, so this route does
-        // not broadcast: there is exactly one emit path and it is not here.
-        // Returns null when the mutationId was already applied or the
-        // mutation addressed nothing — both no-ops the client already has the
-        // answer for.
         if (parsed.data.type === "board.remove" && boardTasks) {
           await boardTasks.removeBoard(parsed.data);
         } else {

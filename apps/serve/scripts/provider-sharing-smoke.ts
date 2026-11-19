@@ -83,8 +83,6 @@ try {
     mkdirSync(directory, { recursive: true });
   }
 
-  // Prevent this disposable smoke from inheriting provider credentials or
-  // configuration and ensure no user data can be read or written.
   for (const key of Object.keys(process.env)) {
     if (/^OPENCODE_|(_API_KEY|_TOKEN|_SECRET|PASSWORD)$/i.test(key)) {
       Reflect.deleteProperty(process.env, key);
@@ -198,9 +196,6 @@ try {
     );
   }
 
-  // Board engines are disposable and can be restarted independently from the
-  // shared OpenCode database. Verify persisted auth remains visible after both
-  // processes have exited, rather than relying on either process's memory.
   await Promise.all([firstManager.stop(), secondManager.stop()]);
   await Promise.all([firstManager.start(), secondManager.start()]);
 

@@ -18,8 +18,6 @@ export function createBoardTaskRoutes({ boardTasks }: HttpRouteDependencies) {
           };
         }
 
-        // No broadcast here: the session write inside the task service commits
-        // to the store, and the store's commit hook feeds the hub.
         return boardTasks.queuePrompt(parsed.data);
       },
       {

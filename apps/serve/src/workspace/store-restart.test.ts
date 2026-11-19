@@ -8,16 +8,6 @@ import { restoreDatabaseFile } from "./database/restore";
 import { ChorusDatabase } from "./db";
 import { WorkspaceStore } from "./store";
 
-/**
- * Integration tests for durability (plan Phase 2).
- *
- * These drive real processes and a real SQLite file rather than mocking: the
- * properties under test — "no acknowledged write is lost across a kill -9",
- * "dedup survives restart", "committed WAL data survives a restore cycle",
- * "shutdown finishes inside its budget" — are exactly the ones a mock cannot
- * speak to.
- */
-
 const dirs: string[] = [];
 
 function tempDir(): string {
@@ -40,10 +30,6 @@ const SEED = {
   title: "Repo",
 };
 
-/**
- * A child process that opens a store, applies mutations, prints the seqs it
- * committed, and (optionally) hard-exits without a graceful shutdown.
- */
 const WORKER = `
 import { WorkspaceStore } from ${JSON.stringify(join(import.meta.dir, "store.ts"))};
 
@@ -86,7 +72,6 @@ describe("crash recovery", () => {
     const workerPath = join(dataDir, "worker.ts");
     await Bun.write(workerPath, WORKER);
 
-    // First run: commits 5 mutations, then dies without draining.
     const killer = Bun.spawn(["bun", "run", workerPath, dataDir, "kill", "5"], {
       stdout: "pipe",
       stderr: "pipe",
@@ -95,8 +80,6 @@ describe("crash recovery", () => {
     const killerOut = await new Response(killer.stdout).text();
     await killer.exited;
 
-    // The worker died before printing, so reconstruct the acknowledged set from
-    // the log itself and assert it is intact and replayable.
     expect(killerOut.trim()).toBe("");
 
     const store = new WorkspaceStore(dataDir);
@@ -105,8 +88,7 @@ describe("crash recovery", () => {
     const snapshot = store.getSnapshot();
     expect(snapshot.boards).toHaveLength(1);
     expect(store.headSeq()).toBe(6);
-    // Replay reconstructed every committed mutation: the last position is the
-    // final one the dead process acknowledged.
+
     expect(snapshot.boards[0]?.position).toEqual({ x: 4, y: 4 });
 
     await store.close();
@@ -136,10 +118,6 @@ describe("crash recovery", () => {
     };
     expect(parsed.headSeq).toBe(4);
 
-    // checkpointTruncate ran, so a cold copy of chorus.db alone is a complete
-    // backup — no sidecar needed. close() folds the event tail into a snapshot
-    // first, so the copy carries state in `snapshots` and only the final event
-    // row survives; the sequence head lives in `meta`.
     const copyPath = join(dataDir, "cold-copy.db");
     copyFileSync(join(dataDir, "chorus.db"), copyPath);
 
@@ -150,14 +128,12 @@ describe("crash recovery", () => {
     expect(
       probe.query("SELECT value FROM meta WHERE key = 'head_seq'").get()
     ).toEqual({ value: "4" });
-    // load() snapshots once at boot and close() again, so the newest row is the
-    // one that matters: it must sit at the final sequence.
+
     expect(
       probe.query("SELECT seq FROM snapshots ORDER BY seq DESC LIMIT 1").get()
     ).toEqual({ seq: 4 });
     probe.close();
 
-    // And the cold copy boots into identical state.
     const fromCopy = tempDir();
     restoreDatabaseFile(fromCopy, copyPath);
     const reopened = new WorkspaceStore(fromCopy);
@@ -187,7 +163,6 @@ describe("crash recovery", () => {
         ? created.events[0].board.boardId
         : "";
 
-    // Fire a burst without awaiting, then close: drain() must wait for all of it.
     const pending = Array.from({ length: 100 }, (_unused, index) =>
       store.applyMutation({
         baseRevision: null,
@@ -204,9 +179,6 @@ describe("crash recovery", () => {
 
     expect(elapsed).toBeLessThan(5000);
 
-    // Every mutation was already committed before close() was called, so none
-    // of these reject; the head is read from a fresh handle because the store's
-    // connection is closed.
     await Promise.all(pending);
 
     const probe = new Database(join(dataDir, "chorus.db"));
@@ -322,7 +294,6 @@ describe("restore and export cycle", () => {
       type: "board.move",
     });
 
-    // Deliberately no checkpoint before the export: the data lives in the WAL.
     const exportPath = join(sourceDir, "export.db");
     store.exportTo(exportPath);
     await store.close();
@@ -356,7 +327,6 @@ describe("restore and export cycle", () => {
       expect(statSync(result.path).mode & 0o777).toBe(0o600);
     }
 
-    // A restored database must accept new writes, not just reads.
     const reopened = new WorkspaceStore(restoreDir);
     await reopened.load();
     await reopened.applyMutation({

@@ -104,7 +104,6 @@ export function KeyboardShortcuts({
         break;
 
       case "Escape":
-        // React Flow handles Escape selection.
         break;
 
       case "?":

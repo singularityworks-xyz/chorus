@@ -9,13 +9,6 @@ import {
   ticketMetaKey,
 } from "./ticket";
 
-/**
- * In-memory stand-in for the store's `meta` table.
- *
- * The plan allows a real database, but the point of these tests is the ticket
- * state machine — consume-before-decide, TTL, pruning — and a map exercises it
- * without SQLite transaction timing in the way.
- */
 const HEX_32 = /^[0-9a-f]{32}$/;
 
 function makeStore(): TicketStore & { rows: Map<string, string> } {
@@ -54,8 +47,6 @@ describe("WebSocket upgrade tickets (spec §6.2, plan P4.3)", () => {
 
     expect(consumeTicket(ticket, options)).toBe("consumed");
 
-    // Single-use is the whole point: a replayable ticket is a bearer credential
-    // with no bound other than its TTL.
     expect(consumeTicket(ticket, options)).toBe("unknown");
   });
 
@@ -108,7 +99,7 @@ describe("WebSocket upgrade tickets (spec §6.2, plan P4.3)", () => {
     clock += TICKET_TTL_MS;
 
     expect(consumeTicket(ticket, options)).toBe("expired");
-    // Deleted even though it was refused, so it cannot be re-decided forever.
+
     expect(store.rows.size).toBe(0);
   });
 
@@ -139,7 +130,6 @@ describe("WebSocket upgrade tickets (spec §6.2, plan P4.3)", () => {
     expect(consumeTicket("../../etc/passwd", options)).toBe("unknown");
     expect(consumeTicket("NOTHEX", options)).toBe("unknown");
 
-    // The unrelated valid row survived all of that.
     expect(store.rows.size).toBe(1);
   });
 
@@ -157,8 +147,7 @@ describe("WebSocket upgrade tickets (spec §6.2, plan P4.3)", () => {
     const options = { now: () => clock, store };
 
     issueTicket(options);
-    // Age the first ticket out, then issue a second with a long TTL so exactly
-    // one row is due for pruning.
+
     clock += TICKET_TTL_MS + 1;
     const live = issueTicket({ ...options, ttlMs: TICKET_TTL_MS * 10 });
     clock += TICKET_TTL_MS;
@@ -184,8 +173,6 @@ describe("WebSocket upgrade tickets (spec §6.2, plan P4.3)", () => {
     const store = makeStore();
     const issued = issueTicket({ now: () => 1000, store });
 
-    // Storing an absolute expiry means consumption does not depend on when the
-    // ticket was issued or on the TTL constant having stayed the same.
     expect(
       consumeTicket(issued, { now: () => 1000 + TICKET_TTL_MS - 1, store })
     ).toBe("consumed");

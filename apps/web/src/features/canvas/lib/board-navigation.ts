@@ -13,7 +13,6 @@ interface BoardViewportController {
   ) => unknown;
 }
 
-/** Move the canvas to the selected board when that node is available. */
 export function focusBoardOnCanvas(
   instance: BoardViewportController,
   boardId: string | null
