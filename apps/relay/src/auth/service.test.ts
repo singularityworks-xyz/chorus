@@ -4,8 +4,8 @@ import { createHmac } from "node:crypto";
 import { getMigrations } from "better-auth/db/migration";
 import { createLocalJWKSet, jwtVerify } from "jose";
 import { z } from "zod";
-import { createRelayAuth } from "./auth";
-import { testConfig } from "./testing/config";
+import { testConfig } from "../testing/config";
+import { createRelayAuth } from "./service";
 
 describe("relay account authentication", () => {
   test("an approved account creates a scoped machine grant with verifiable host claims", async () => {

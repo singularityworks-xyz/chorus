@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { loadRelayConfig } from "./config";
-import { testEnvironment } from "./testing/config";
+import { testEnvironment } from "../testing/config";
+import { loadRelayConfig } from "./relay-config";
 
 describe("relay configuration", () => {
   test("requires secure isolated origins and bounded launch capacity", () => {

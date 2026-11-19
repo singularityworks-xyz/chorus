@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { RelayRateLimiter } from "./rate-limit";
+import { RelayRateLimiter } from "./limiter";
 
 describe("relay ingress limits", () => {
   test("bounds both request frequency and identities without clearing active limits", () => {

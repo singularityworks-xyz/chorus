@@ -2,7 +2,7 @@ import type { HostPublicKey } from "@chorus/contracts";
 import { hostPublicKeySchema } from "@chorus/contracts";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
-import type { TunnelHost } from "./tunnel/policy";
+import type { TunnelHost } from "../tunnel/policy";
 
 export const RELAY_SCHEMA = `
 CREATE TABLE IF NOT EXISTS relay_hosts (

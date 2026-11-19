@@ -7,9 +7,9 @@ import {
 } from "@chorus/contracts";
 import { SecretEnvelope } from "@chorus/security";
 import { z } from "zod";
-import type { RelayAuth } from "./auth";
-import type { RelayConfig } from "./config";
-import { type RelayRegistry, RelayRegistryError } from "./registry";
+import type { RelayAuth } from "../auth/service";
+import type { RelayConfig } from "../config/relay-config";
+import { type RelayRegistry, RelayRegistryError } from "../registry/service";
 
 const enrollmentSchema = relayEnrollmentRequestSchema.extend({
   enrollmentId: z.uuid(),

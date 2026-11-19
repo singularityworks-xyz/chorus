@@ -2,9 +2,9 @@ import { createHmac, generateKeyPairSync } from "node:crypto";
 import { hostPublicKeySchema } from "@chorus/contracts";
 import { getMigrations } from "better-auth/db/migration";
 import { Pool } from "pg";
-import { createRelayAuth } from "../auth";
-import { RelayEnrollment } from "../enrollment";
-import { RELAY_SCHEMA, RelayRegistry } from "../registry";
+import { createRelayAuth } from "../auth/service";
+import { RelayEnrollment } from "../enrollment/service";
+import { RELAY_SCHEMA, RelayRegistry } from "../registry/service";
 import { testConfig } from "./config";
 
 export async function createPostgresFixture(connectionString: string) {

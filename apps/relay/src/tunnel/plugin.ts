@@ -2,8 +2,8 @@ import { randomBytes } from "node:crypto";
 import { Elysia } from "elysia";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { z } from "zod";
-import type { RelayConfig } from "../config";
-import type { RelayRegistry } from "../registry";
+import type { RelayConfig } from "../config/relay-config";
+import type { RelayRegistry } from "../registry/service";
 import {
   authorizeProxy,
   authorizeTunnelGrant,

@@ -8,8 +8,8 @@ import {
 } from "bun:test";
 import { createLocalJWKSet, jwtVerify } from "jose";
 import { z } from "zod";
-import { RelayRegistry, RelayRegistryError } from "./registry";
-import { createPostgresFixture } from "./testing/postgres";
+import { RelayRegistry, RelayRegistryError } from "../registry/service";
+import { createPostgresFixture } from "./postgres";
 
 const databaseUrl = process.env.CHORUS_TEST_POSTGRES_URL;
 

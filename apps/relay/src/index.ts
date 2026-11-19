@@ -1,9 +1,9 @@
 import { Pool } from "pg";
 import { createRelayApp } from "./app";
-import { createRelayAuth } from "./auth";
-import { loadRelayConfig } from "./config";
-import { RelayEnrollment } from "./enrollment";
-import { RelayRegistry } from "./registry";
+import { createRelayAuth } from "./auth/service";
+import { loadRelayConfig } from "./config/relay-config";
+import { RelayEnrollment } from "./enrollment/service";
+import { RelayRegistry } from "./registry/service";
 import { createFrpPlugin, createTunnelVerifier } from "./tunnel/plugin";
 
 const config = loadRelayConfig();

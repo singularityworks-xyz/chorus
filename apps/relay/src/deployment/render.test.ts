@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { renderRelayDeployment } from "./deployment";
-import { testConfig } from "./testing/config";
+import { testConfig } from "../testing/config";
+import { renderRelayDeployment } from "./render";
 
 describe("central relay isolation", () => {
   test("keeps backend listeners private and authorizes every tunnel operation", () => {

@@ -3,9 +3,9 @@ import { describe, expect, test } from "bun:test";
 import { getMigrations } from "better-auth/db/migration";
 import { Pool } from "pg";
 import { createRelayApp } from "./app";
-import { createRelayAuth, INTERNAL_AUTH_HEADER } from "./auth";
-import { RelayEnrollment } from "./enrollment";
-import { RelayRegistry } from "./registry";
+import { createRelayAuth, INTERNAL_AUTH_HEADER } from "./auth/service";
+import { RelayEnrollment } from "./enrollment/service";
+import { RelayRegistry } from "./registry/service";
 import { testConfig } from "./testing/config";
 import { createFrpPlugin, createTunnelVerifier } from "./tunnel/plugin";
 

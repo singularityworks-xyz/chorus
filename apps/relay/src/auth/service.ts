@@ -3,7 +3,7 @@ import { oauthProvider } from "@better-auth/oauth-provider";
 import { type BetterAuthOptions, betterAuth } from "better-auth";
 import { captcha, jwt } from "better-auth/plugins";
 import { z } from "zod";
-import type { RelayConfig } from "./config";
+import type { RelayConfig } from "../config/relay-config";
 
 export const INTERNAL_AUTH_HEADER = "x-chorus-relay-internal";
 

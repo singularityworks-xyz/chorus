@@ -1,6 +1,6 @@
-import type { RelayConfig } from "./config";
+import type { RelayConfig } from "../config/relay-config";
 
-const styles = Bun.file(new URL("./portal/style.css", import.meta.url)).text();
+const styles = Bun.file(new URL("./style.css", import.meta.url)).text();
 
 function html(value: string): string {
   return value
