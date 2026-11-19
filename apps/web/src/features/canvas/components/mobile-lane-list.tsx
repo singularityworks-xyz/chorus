@@ -3,7 +3,7 @@
 import type { Columns } from "@chorus/contracts";
 import { KanbanColumnBody } from "@/features/kanban/components/board-columns";
 import { Kanban } from "@/features/kanban/components/kanban";
-import { useKanbanCardActions } from "@/features/kanban/hooks/use-kanban-card-actions";
+import { useKanbanCardActions } from "@/features/kanban/task-actions/use-kanban-card-actions";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 
 // Reuse desktop lanes in a vertical layout for phone screens.

@@ -3,7 +3,7 @@
 import type { Task } from "@chorus/contracts";
 import { LoaderIcon, PlayIcon, RotateCcwIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { KanbanTaskActionState } from "../hooks/use-kanban-card-actions";
+import type { KanbanTaskActionState } from "../task-actions/types";
 import { FilePill } from "./diff-summary";
 
 interface TaskCardQueueControlsProps {

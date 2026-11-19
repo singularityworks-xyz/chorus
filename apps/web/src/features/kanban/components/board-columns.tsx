@@ -12,7 +12,7 @@ import {
   SearchCheckIcon,
 } from "lucide-react";
 import { ResizablePanel } from "@/components/ui/resizable";
-import type { KanbanTaskActionState } from "@/features/kanban/hooks/use-kanban-card-actions";
+import type { KanbanTaskActionState } from "@/features/kanban/task-actions/types";
 import { cn } from "@/lib/utils";
 import { computeDiffTotals } from "../task-card/diff-summary";
 import { TaskCard } from "../task-card/task-card";

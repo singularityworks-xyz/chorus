@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 import { AgentOutputCard } from "../agent-output/agent-output-card";
 import { KanbanItem, KanbanItemHandle } from "../components/kanban";
 import { QuestionCard } from "../components/question-card";
-import type { KanbanTaskActionState } from "../hooks/use-kanban-card-actions";
+import type { KanbanTaskActionState } from "../task-actions/types";
 import { getBoardTaskCommandButtonState } from "../utils/board-task-state";
 import {
   getPendingQuestionApprovals,

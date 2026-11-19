@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Columns, Task } from "@chorus/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { KanbanTaskActionState } from "../hooks/use-kanban-card-actions";
+import type { KanbanTaskActionState } from "../task-actions/types";
 import { KanbanColumnBody } from "./board-columns";
 import { Kanban } from "./kanban";
 

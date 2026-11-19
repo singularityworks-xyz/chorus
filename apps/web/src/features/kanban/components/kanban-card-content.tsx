@@ -6,7 +6,7 @@ import {
   ResizableHandle,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
-import type { KanbanTaskActionState } from "@/features/kanban/hooks/use-kanban-card-actions";
+import type { KanbanTaskActionState } from "@/features/kanban/task-actions/types";
 import type { KanbanCardData } from "../types";
 import { KanbanColumnRenderer } from "./board-columns";
 import { Kanban, KanbanBoard } from "./kanban";
