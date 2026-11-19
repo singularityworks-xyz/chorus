@@ -25,10 +25,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  createModelKey,
-  ModelPicker,
-} from "@/features/models/components/model-picker";
+import { createModelKey } from "@/features/models/components/model-picker/lib/model-key";
+import { ModelPicker } from "@/features/models/components/model-picker/model-picker";
 import { providerCatalogInvalidator } from "@/features/settings/provider-catalog-invalidator";
 import { isWorkspaceSessionLive } from "@/features/workspace/session-status";
 import type { WorkspaceBoard } from "@/features/workspace/types";
