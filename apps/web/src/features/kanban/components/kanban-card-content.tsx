@@ -1,14 +1,17 @@
 "use client";
 
-import type { WorkspaceColumnId } from "@chorus/contracts";
+import {
+  WORKSPACE_COLUMN_IDS,
+  type WorkspaceColumnId,
+} from "@chorus/contracts";
 import { Fragment } from "react";
 import {
   ResizableHandle,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import type { KanbanTaskActionState } from "@/features/kanban/task-actions/types";
+import { KanbanColumnRenderer } from "../columns/column-renderer";
 import type { KanbanCardData } from "../types";
-import { KanbanColumnRenderer } from "./board-columns";
 import { Kanban, KanbanBoard } from "./kanban";
 
 export function KanbanCardContent({
@@ -51,6 +54,10 @@ export function KanbanCardContent({
   onQuestionsAnswered: (taskId: string, answers: string[]) => void;
 }) {
   const reviewMode = data.reviewMode ?? "auto";
+  const columns = Object.entries(data.columns).flatMap(([key, tasks]) => {
+    const columnId = WORKSPACE_COLUMN_IDS.find((id) => id === key);
+    return columnId ? [{ columnId, tasks }] : [];
+  });
 
   return (
     <Kanban
@@ -64,7 +71,7 @@ export function KanbanCardContent({
           className="relative w-full flex-1"
           direction="horizontal"
         >
-          {Object.entries(data.columns).map(([columnId, tasks], index, arr) => (
+          {columns.map(({ columnId, tasks }, index, arr) => (
             <Fragment key={columnId}>
               <KanbanColumnRenderer
                 actionStates={actionStates}

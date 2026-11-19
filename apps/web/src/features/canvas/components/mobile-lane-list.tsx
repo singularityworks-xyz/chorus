@@ -1,7 +1,7 @@
 "use client";
 
 import type { Columns } from "@chorus/contracts";
-import { KanbanColumnBody } from "@/features/kanban/components/board-columns";
+import { KanbanColumnBody } from "@/features/kanban/columns/column-body";
 import { Kanban } from "@/features/kanban/components/kanban";
 import { useKanbanCardActions } from "@/features/kanban/task-actions/use-kanban-card-actions";
 import { useWorkspace } from "@/features/workspace/workspace-context";
