@@ -4,12 +4,10 @@ import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2";
 import { createClient as createAdapterClient } from "./features/client/client";
 import { ConfigManager } from "./features/config/config-manager";
 import { EventStream } from "./features/events/event-stream";
-import type { SessionMessageWithParts } from "./features/events/normalizer";
-import {
-  normalizeEvent,
-  normalizeSessionHistory,
-  resetMessageTracking,
-} from "./features/events/normalizer";
+import { normalizeEvent } from "./features/events/normalizer";
+import { normalizeSessionHistory } from "./features/events/normalizer/history";
+import { resetMessageTracking } from "./features/events/normalizer/message-tracking";
+import type { SessionMessageWithParts } from "./features/events/normalizer/types";
 import { InstanceManager } from "./features/instance/instance-manager";
 import { PermissionHandler } from "./features/permissions/permission-handler";
 import { ProjectManager } from "./features/projects/project-manager";
@@ -39,11 +37,6 @@ export type {
   EventStreamOptions,
   EventStreamStatus,
 } from "./features/events/event-stream";
-export type {
-  NormalizedActivity,
-  NormalizedAgentEvent,
-  SessionMessageWithParts,
-} from "./features/events/normalizer";
 /**
  * The normalizer and its reset, exported so a server-side replay test can drive
  * the boundary without standing up an engine. Reaching into the package's
@@ -51,11 +44,14 @@ export type {
  * hold.
  */
 // biome-ignore lint/performance/noBarrelFile: package entry point from package.json `exports` — serve imports `@chorus/oc-adapter` as one specifier by design.
-export {
-  normalizeEvent,
-  normalizeSessionHistory,
-  resetMessageTracking,
-} from "./features/events/normalizer";
+export { normalizeEvent } from "./features/events/normalizer";
+export { normalizeSessionHistory } from "./features/events/normalizer/history";
+export { resetMessageTracking } from "./features/events/normalizer/message-tracking";
+export type {
+  NormalizedActivity,
+  NormalizedAgentEvent,
+  SessionMessageWithParts,
+} from "./features/events/normalizer/types";
 export type {
   PermissionHandlerInput,
   PermissionReply,

@@ -1,5 +1,5 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
-import type { QuestionInfo } from "../events/normalizer";
+import type { QuestionInfo } from "../events/normalizer/types";
 
 export interface QuestionRequest {
   id: string;

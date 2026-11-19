@@ -1,11 +1,9 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { Event as OpencodeEvent } from "@opencode-ai/sdk/v2";
-import {
-  normalizeEvent,
-  normalizeSessionHistory,
-  resetMessageTracking,
-  type SessionMessageWithParts,
-} from "./normalizer";
+import { normalizeEvent } from "./normalizer";
+import { normalizeSessionHistory } from "./normalizer/history";
+import { resetMessageTracking } from "./normalizer/message-tracking";
+import type { SessionMessageWithParts } from "./normalizer/types";
 
 // Real opencode streams deliver message.updated (role=assistant) before any
 // of that message's part events; the normalizer relies on it to classify
@@ -117,6 +115,82 @@ describe("normalizeEvent", () => {
     expect(result.activity).toBe("writing");
     expect(result.toolName).toBe("read");
     expect(result.toolState).toBe("completed");
+  });
+
+  test("normalizes running and completed edit diffs", () => {
+    normalizeEvent(assistantMessageUpdated("sess-1", "msg-1"));
+
+    const running = normalizeEvent({
+      id: "evt-running-edit",
+      type: "message.part.updated",
+      properties: {
+        sessionID: "sess-1",
+        part: {
+          id: "part-running-edit",
+          sessionID: "sess-1",
+          messageID: "msg-1",
+          type: "tool",
+          callID: "call-running-edit",
+          tool: "edit",
+          state: {
+            status: "running",
+            input: {
+              filePath: "src/example.ts",
+              oldString: "before",
+              newString: "after",
+            },
+            time: { start: Date.now() },
+          },
+        },
+        time: Date.now(),
+      },
+    } as OpencodeEvent);
+
+    const completed = normalizeEvent({
+      id: "evt-completed-edit",
+      type: "message.part.updated",
+      properties: {
+        sessionID: "sess-1",
+        part: {
+          id: "part-completed-edit",
+          sessionID: "sess-1",
+          messageID: "msg-1",
+          type: "tool",
+          callID: "call-completed-edit",
+          tool: "edit",
+          state: {
+            status: "completed",
+            input: {},
+            output: "updated",
+            title: "Edit src/example.ts",
+            metadata: {
+              filediff: {
+                file: "src/example.ts",
+                before: "before",
+                after: "after",
+                additions: 1,
+                deletions: 1,
+              },
+            },
+            time: { start: Date.now(), end: Date.now() },
+          },
+        },
+        time: Date.now(),
+      },
+    } as OpencodeEvent);
+
+    expect(running.fileDiff).toEqual({
+      filePath: "src/example.ts",
+      before: "before",
+      after: "after",
+    });
+    expect(completed.fileDiff).toEqual({
+      filePath: "src/example.ts",
+      before: "before",
+      after: "after",
+      additions: 1,
+      deletions: 1,
+    });
   });
 
   test("normalizes reasoning part as thinking", () => {
