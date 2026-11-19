@@ -131,9 +131,6 @@ jobs:
     needs: [lint, typecheck, unit-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      CHORUS_E2E_DATA_DIR: ${{ runner.temp }}/chorus-e2e
-      CHORUS_E2E_REPO_DIR: ${{ runner.temp }}/chorus-e2e-repo
     steps:
       - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2
@@ -155,6 +152,8 @@ jobs:
         run: bun run e2e
         env:
           HOME: ${{ runner.temp }}/chorus-e2e-home
+          CHORUS_E2E_DATA_DIR: ${{ runner.temp }}/chorus-e2e
+          CHORUS_E2E_REPO_DIR: ${{ runner.temp }}/chorus-e2e-repo
       - name: Upload browser traces and server logs
         if: always()
         uses: actions/upload-artifact@v5
