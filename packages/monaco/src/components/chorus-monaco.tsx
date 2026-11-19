@@ -40,7 +40,7 @@ const CHORUS_THEME = {
     "list.activeSelectionBackground": "#264f78",
     "list.hoverBackground": "#1a1a1a",
   },
-};
+} satisfies Parameters<Parameters<OnMount>[1]["editor"]["defineTheme"]>[1];
 
 let themeInitialized = false;
 
@@ -122,7 +122,7 @@ export function ChorusMonaco({
     if (themeInitialized) {
       monacoInstance.editor.setTheme("chorus-dark");
     } else {
-      monacoInstance.editor.defineTheme("chorus-dark", CHORUS_THEME as never);
+      monacoInstance.editor.defineTheme("chorus-dark", CHORUS_THEME);
       monacoInstance.editor.setTheme("chorus-dark");
       themeInitialized = true;
     }
