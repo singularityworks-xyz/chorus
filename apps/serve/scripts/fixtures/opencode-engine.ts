@@ -34,12 +34,7 @@ const createSchema = z.object({ title: z.string().optional() });
 const promptSchema = z.object({ agent: z.string().optional() });
 const replySchema = z.object({ reply: z.enum(["once", "always", "reject"]) });
 const questionReplySchema = z.object({
-  answers: z.array(
-    z.object({
-      customAnswer: z.string().optional(),
-      optionIndices: z.array(z.number()).optional(),
-    })
-  ),
+  answers: z.array(z.array(z.string())),
 });
 const revertSchema = z.object({
   messageID: z.string(),
@@ -371,15 +366,7 @@ export function startScriptedEngine({
         );
       }
       const body = questionReplySchema.parse(await request.json());
-      const firstAnswer = body.answers[0];
-      const selectedOption = firstAnswer?.optionIndices?.[0];
-      let answer = firstAnswer?.customAnswer;
-      if (answer === undefined && selectedOption === 0) {
-        answer = "Preserve current behavior";
-      } else if (answer === undefined && selectedOption === 1) {
-        answer = "Apply the requested change";
-      }
-      answer ??= "Answer recorded";
+      const answer = body.answers[0]?.[0] ?? "Answer recorded";
       entry.pendingQuestions.delete(requestID);
       const delta = ` The user chose: ${answer}.`;
       entry.text += delta;
