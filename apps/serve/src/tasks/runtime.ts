@@ -4,16 +4,16 @@ import {
   type Task,
   type WorkspaceBoard,
 } from "@chorus/contracts";
-import type { OpenCodeBridge } from "../bridge/opencode/bridge";
 import type { RepositoryRegistry } from "../projects/repository-registry";
 import type { StoreCommit, WorkspaceStore } from "../workspace/store";
 import type { BoardSessionRegistry } from "./board-session-registry";
+import type { BoardTaskBridge } from "./bridge";
 import { BoardLifecycleError, BoardTaskCommandError } from "./errors";
 import type { SessionWatchdog } from "./session-watchdog";
 
 export interface BoardTaskRuntime {
   boardOperations: Map<string, Promise<void>>;
-  bridge: OpenCodeBridge;
+  bridge: BoardTaskBridge;
   closingBoards: Set<string>;
   registry: BoardSessionRegistry;
   removals: Map<string, Promise<StoreCommit | null>>;

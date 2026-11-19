@@ -4,10 +4,10 @@ import type {
   QueueBoardPromptInput,
   WorkspaceMutation,
 } from "@chorus/contracts";
-import type { OpenCodeBridge } from "../bridge/opencode/bridge";
 import type { RepositoryRegistry } from "../projects/repository-registry";
 import type { StoreCommit, WorkspaceStore } from "../workspace/store";
 import { BoardSessionRegistry } from "./board-session-registry";
+import type { BoardTaskBridge } from "./bridge";
 import { BoardSessionHistory } from "./history/service";
 import { BoardTaskLifecycle } from "./lifecycle/service";
 import { BoardTaskQueue } from "./queue/service";
@@ -23,7 +23,7 @@ export class BoardTaskService {
   readonly #review: BoardTaskReview;
 
   constructor(
-    bridge: OpenCodeBridge,
+    bridge: BoardTaskBridge,
     workspaceStore: WorkspaceStore,
     registry = new BoardSessionRegistry(),
     watchdog: SessionWatchdog | null = null,
