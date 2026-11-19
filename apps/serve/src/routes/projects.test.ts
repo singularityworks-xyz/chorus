@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { Elysia } from "elysia";
 import { createProjectRoutes } from "./projects";
+import { createProviderRoutes } from "./providers";
 
 function makeProjectService() {
   return {
@@ -108,10 +109,19 @@ function makeProjectService() {
   };
 }
 
-describe("project routes", () => {
+function makeApp(
+  service: ReturnType<typeof makeProjectService>,
+  isProduction = false
+) {
+  return new Elysia()
+    .use(createProjectRoutes(service as never, isProduction))
+    .use(createProviderRoutes(service as never));
+}
+
+describe("project and provider routes", () => {
   test("lists provider status", async () => {
     const projectService = makeProjectService();
-    const app = new Elysia().use(createProjectRoutes(projectService as never));
+    const app = makeApp(projectService);
 
     const response = await app.handle(
       new Request("http://localhost/providers")
@@ -133,7 +143,7 @@ describe("project routes", () => {
 
   test("configures the global provider without a board directory", async () => {
     const projectService = makeProjectService();
-    const app = new Elysia().use(createProjectRoutes(projectService as never));
+    const app = makeApp(projectService);
 
     const response = await app.handle(
       new Request("http://localhost/opencode/configure-provider", {
@@ -152,7 +162,7 @@ describe("project routes", () => {
 
   test("opens host-wide model and auth actions without a board directory", async () => {
     const projectService = makeProjectService();
-    const app = new Elysia().use(createProjectRoutes(projectService as never));
+    const app = makeApp(projectService);
 
     const modelResponse = await app.handle(
       new Request("http://localhost/opencode/models", {
@@ -177,7 +187,7 @@ describe("project routes", () => {
 
   test("lists stored auth credentials", async () => {
     const projectService = makeProjectService();
-    const app = new Elysia().use(createProjectRoutes(projectService as never));
+    const app = makeApp(projectService);
 
     const response = await app.handle(
       new Request("http://localhost/opencode/auth-credentials")
@@ -196,7 +206,7 @@ describe("project routes", () => {
 
   test("lists provider status for a specific directory", async () => {
     const projectService = makeProjectService();
-    const app = new Elysia().use(createProjectRoutes(projectService as never));
+    const app = makeApp(projectService);
 
     const response = await app.handle(
       new Request("http://localhost/providers?directory=/tmp/repo")
@@ -210,7 +220,7 @@ describe("project routes", () => {
 
   test("lists available models", async () => {
     const projectService = makeProjectService();
-    const app = new Elysia().use(createProjectRoutes(projectService as never));
+    const app = makeApp(projectService);
 
     const response = await app.handle(new Request("http://localhost/models"));
     expect(response.status).toBe(200);
@@ -238,7 +248,7 @@ describe("project routes", () => {
 
   test("lists available models for a specific directory", async () => {
     const projectService = makeProjectService();
-    const app = new Elysia().use(createProjectRoutes(projectService as never));
+    const app = makeApp(projectService);
 
     const response = await app.handle(
       new Request("http://localhost/models?directory=/tmp/repo")
@@ -252,7 +262,7 @@ describe("project routes", () => {
 
   test("lists known projects", async () => {
     const projectService = makeProjectService();
-    const app = new Elysia().use(createProjectRoutes(projectService as never));
+    const app = makeApp(projectService);
 
     const response = await app.handle(new Request("http://localhost/projects"));
     expect(response.status).toBe(200);
@@ -271,7 +281,7 @@ describe("project routes", () => {
 
   test("opens a folder and returns a board seed", async () => {
     const projectService = makeProjectService();
-    const app = new Elysia().use(createProjectRoutes(projectService as never));
+    const app = makeApp(projectService);
 
     const response = await app.handle(
       new Request("http://localhost/projects/open-folder", {
@@ -295,9 +305,7 @@ describe("project routes", () => {
 
   test("disables the host folder picker in production", async () => {
     const projectService = makeProjectService();
-    const app = new Elysia().use(
-      createProjectRoutes(projectService as never, true)
-    );
+    const app = makeApp(projectService, true);
 
     const response = await app.handle(
       new Request("http://localhost/projects/open-folder", { method: "POST" })
@@ -314,7 +322,7 @@ describe("project routes", () => {
 
   test("opens the OpenCode model dialog", async () => {
     const projectService = makeProjectService();
-    const app = new Elysia().use(createProjectRoutes(projectService as never));
+    const app = makeApp(projectService);
 
     const response = await app.handle(
       new Request("http://localhost/opencode/models", {
@@ -337,7 +345,7 @@ describe("project routes", () => {
 
   test("runs the OpenCode connect flow", async () => {
     const projectService = makeProjectService();
-    const app = new Elysia().use(createProjectRoutes(projectService as never));
+    const app = makeApp(projectService);
 
     const response = await app.handle(
       new Request("http://localhost/opencode/connect", {
@@ -360,7 +368,7 @@ describe("project routes", () => {
 
   test("configures a provider for chorus", async () => {
     const projectService = makeProjectService();
-    const app = new Elysia().use(createProjectRoutes(projectService as never));
+    const app = makeApp(projectService);
 
     const response = await app.handle(
       new Request("http://localhost/opencode/configure-provider", {
@@ -388,7 +396,7 @@ describe("project routes", () => {
 
   test("launches auth login in a terminal", async () => {
     const projectService = makeProjectService();
-    const app = new Elysia().use(createProjectRoutes(projectService as never));
+    const app = makeApp(projectService);
 
     const response = await app.handle(
       new Request("http://localhost/opencode/auth-login", {

@@ -26,7 +26,9 @@ import {
   OpenCodeProcessManager,
 } from "./opencode/process-manager";
 import { assertEngineLockstep } from "./paths/engine-lockstep";
+import { ProjectEngineContext } from "./projects/engine-context";
 import { NativeFolderPicker } from "./projects/folder-picker";
+import { ProviderService } from "./projects/providers/service";
 import { RepositoryRegistry } from "./projects/repository-registry";
 import { ProjectService } from "./projects/service";
 import { WorktreeManager } from "./projects/worktree-manager";
@@ -35,6 +37,8 @@ import { PushDispatcher } from "./push/dispatcher";
 import { createPushRoutes } from "./push/routes";
 import { createHttpRoutes } from "./routes";
 import { createProjectRoutes } from "./routes/projects";
+import { createProviderRoutes } from "./routes/providers";
+import { mapRepositoryRegistryError } from "./routes/shared/repository-errors";
 import { voiceRoutes } from "./routes/voice";
 import { createWorkspaceRoutes } from "./routes/workspace";
 import { applySecurityHeaders } from "./security-headers";
@@ -331,23 +335,26 @@ const boardTasks = new BoardTaskService(
   watchdog,
   repositoryRegistry
 );
-const projectService = new ProjectService(
-  config.opencodeBaseUrl,
-  config.opencodeDirectory,
-  new NativeFolderPicker(),
-  (directory) => workspaceStore.registerPickedRepository(directory),
-  config.opencodeUsername && config.opencodePassword
-    ? {
-        password: config.opencodePassword,
-        username: config.opencodeUsername,
-      }
-    : undefined,
-  repositoryRegistry,
-  engineRegistry
+const projectEngineContext = new ProjectEngineContext({
+  auth: engineAuth,
+  baseUrl: config.opencodeBaseUrl,
+  engineAdapterForDirectory: engineRegistry
     ? (directory) => engineRegistry.adapterForDirectory(directory)
     : undefined,
-  (directory) => bridge.subscribeDirectory(directory)
-);
+  prepareEngineDirectory: (directory) => bridge.subscribeDirectory(directory),
+  repositoryRegistry,
+});
+const projectService = new ProjectService({
+  defaultDirectory: config.opencodeDirectory,
+  engine: projectEngineContext,
+  folderPicker: new NativeFolderPicker(),
+  registerPickedRepository: (directory) =>
+    workspaceStore.registerPickedRepository(directory),
+});
+const providerService = new ProviderService({
+  defaultDirectory: config.opencodeDirectory,
+  engine: projectEngineContext,
+});
 
 let lastLoggedWorkspaceCommitSeq = 0;
 bridge.subscribe(async (event) => {
@@ -421,6 +428,14 @@ const securedApp = new Elysia()
       set.status = 403;
       return { code: "unregistered_directory", message: error.message };
     }
+    const repositoryError = mapRepositoryRegistryError(error);
+    if (repositoryError) {
+      set.status = repositoryError.status;
+      return {
+        code: repositoryError.code,
+        message: repositoryError.message,
+      };
+    }
 
     logger.error(
       `server-error: ${code}`,
@@ -473,6 +488,7 @@ const securedApp = new Elysia()
 
   .use(createHttpRoutes(bridge, boardTasks, workspaceStore))
   .use(createProjectRoutes(projectService, isProduction))
+  .use(createProviderRoutes(providerService))
   .use(createWorkspaceRoutes(workspaceStore, boardTasks))
   .use(voiceRoutes)
   .use(

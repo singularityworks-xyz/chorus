@@ -1,6 +1,7 @@
 import { expect, mock, test } from "bun:test";
 import { OpenCodeAdapter } from "@chorus/oc-adapter";
-import { ProjectService } from "./service";
+import { ProjectEngineContext } from "../engine-context";
+import { ProviderService } from "./service";
 
 function createService() {
   let globalConfig: { provider?: Record<string, unknown> } = {
@@ -56,20 +57,18 @@ function createService() {
       auth: providerAuth,
     },
   } as never);
-  const service = new ProjectService(
-    "http://127.0.0.1:4096",
-    "/host-default",
-    { pickFolder: () => Promise.resolve(null) },
-    () => Promise.resolve("/unused"),
-    undefined,
-    undefined,
-    (directory) => {
+  const engine = new ProjectEngineContext({
+    baseUrl: "http://127.0.0.1:4096",
+    engineAdapterForDirectory: (directory) => {
       configuredDirectory = directory;
       return Promise.resolve(adapter);
     },
-    () => Promise.resolve(),
-    adapter
-  );
+    globalAdapter: adapter,
+  });
+  const service = new ProviderService({
+    defaultDirectory: "/host-default",
+    engine,
+  });
 
   return {
     getConfig,

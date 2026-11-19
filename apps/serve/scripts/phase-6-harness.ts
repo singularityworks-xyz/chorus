@@ -31,11 +31,14 @@ import { DevicePairingTokenStore } from "../src/auth/pairing";
 import { createAuthRoutes } from "../src/auth/routes";
 import { SessionRegistry } from "../src/auth/session-registry";
 import { OpenCodeBridge } from "../src/bridge/opencode/bridge";
+import { ProjectEngineContext } from "../src/projects/engine-context";
+import { ProviderService } from "../src/projects/providers/service";
 import { RepositoryRegistry } from "../src/projects/repository-registry";
 import { ProjectService } from "../src/projects/service";
 import { WorktreeManager } from "../src/projects/worktree-manager";
 import { createHttpRoutes } from "../src/routes";
 import { createProjectRoutes } from "../src/routes/projects";
+import { createProviderRoutes } from "../src/routes/providers";
 import { createWorkspaceRoutes } from "../src/routes/workspace";
 import { BoardTaskService } from "../src/tasks/board-task-service";
 import { boardDirectory } from "../src/tasks/session-directory";
@@ -617,21 +620,28 @@ export async function startPhase6Harness({
       registry
     );
     const globalAdapter = OpenCodeAdapter.from({ baseUrl: engine.baseUrl });
-    const projectService = new ProjectService(
-      engine.baseUrl,
-      repositories[0] ?? root,
-      { pickFolder: async () => null },
-      (directory) => workspace.registerPickedRepository(directory),
-      undefined,
-      registry,
-      async (directory) =>
+    const projectEngine = new ProjectEngineContext({
+      baseUrl: engine.baseUrl,
+      globalAdapter,
+      repositoryRegistry: registry,
+      engineAdapterForDirectory: async (directory) =>
         OpenCodeAdapter.from({ baseUrl: engine.baseUrl, directory }),
-      async (directory) => {
+      prepareEngineDirectory: async (directory) => {
         await engineBridge.subscribeDirectory(directory);
       },
-      globalAdapter,
-      { listCredentials: async () => ({ credentials: [] }) }
-    );
+    });
+    const projectService = new ProjectService({
+      defaultDirectory: repositories[0] ?? root,
+      engine: projectEngine,
+      folderPicker: { pickFolder: async () => null },
+      registerPickedRepository: (directory) =>
+        workspace.registerPickedRepository(directory),
+    });
+    const providerService = new ProviderService({
+      defaultDirectory: repositories[0] ?? root,
+      engine: projectEngine,
+      credentialStore: { listCredentials: async () => ({ credentials: [] }) },
+    });
     const token = crypto.randomUUID();
     const ticketOptions = { store: workspace.meta, now: Date.now };
     const sessionRegistry = new SessionRegistry(workspace.meta, token);
@@ -664,6 +674,7 @@ export async function startPhase6Harness({
       .use(createWorkspaceRoutes(workspace, boardTasks))
       .use(createHttpRoutes(engineBridge, boardTasks, workspace))
       .use(createProjectRoutes(projectService))
+      .use(createProviderRoutes(providerService))
       .use(
         createWsHandler({
           sessionRegistry,
