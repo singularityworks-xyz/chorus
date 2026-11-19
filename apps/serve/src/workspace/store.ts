@@ -36,6 +36,10 @@ import {
   WorkspaceMutationProcessor,
   worktreeCleanupKey,
 } from "./store/mutations";
+import {
+  type PendingApprovalActionResult,
+  PendingApprovalController,
+} from "./store/pending-approvals";
 import { WorkspacePersistence } from "./store/persistence";
 import {
   boardIdOf,
@@ -51,7 +55,6 @@ const logger = createLogger(
   "STORE"
 );
 
-/** A decoded event log entry. */
 export interface SequencedRecord {
   boardId: string | null;
   event: WorkspaceEvent;
@@ -60,27 +63,11 @@ export interface SequencedRecord {
 
 export interface StoreCommit {
   boardId: string | null;
-  /** Appended events, oldest first. Length 1 for every client mutation. */
   events: WorkspaceEvent[];
   firstSeq: number;
   lastSeq: number;
 }
 
-export type PendingApprovalActionResult<T> =
-  | { status: "accepted"; value: T }
-  | { status: "already_resolving" }
-  | { status: "not_pending" }
-  | { status: "rejected" };
-
-export function pendingApprovalConflictMessage(
-  status: "already_resolving" | "not_pending"
-): string {
-  return status === "already_resolving"
-    ? "Another client is already responding to this request. Wait for the board to sync before trying again."
-    : "This request is no longer waiting for a response. Refresh the board to see the current task state.";
-}
-
-/** Provisions board worktrees without coupling the store to git commands. */
 export interface WorktreeProvisioner {
   assertRemovable?(repoDirectory: string, boardId: string): Promise<void>;
   ensureWorktree(
@@ -95,7 +82,6 @@ export interface WorktreeProvisioner {
   removeWorktree?(repoDirectory: string, boardId: string): Promise<void>;
 }
 
-/** Owns workspace state, durable event writes, replay, and commit ordering. */
 export class WorkspaceStore {
   readonly workspaceId: string;
 
@@ -104,12 +90,12 @@ export class WorkspaceStore {
   readonly #queue: { promise: Promise<void> } = { promise: Promise.resolve() };
   readonly #agentEvents: WorkspaceAgentEventProcessor<StoreCommit>;
   readonly #mutations: WorkspaceMutationProcessor;
+  readonly #approvals: PendingApprovalController;
   readonly #persistence: WorkspacePersistence;
   readonly #repositoryRegistry: RepositoryRegistry | undefined;
   readonly #restorePersistedRepositoryRoots: boolean;
 
   readonly #commitListeners = new Set<(commit: StoreCommit) => void>();
-  readonly #pendingApprovalActions = new Set<string>();
   #closing = false;
   #closePromise: Promise<void> | null = null;
 
@@ -139,6 +125,13 @@ export class WorkspaceStore {
       this.#db,
       this.#repositoryRegistry
     );
+    this.#approvals = new PendingApprovalController({
+      commit: (events, boardId) => {
+        this.#commit(events, boardId, null);
+      },
+      enqueue: (work) => this.#enqueue(async () => work()),
+      getBoardBySessionId: (sessionId) => this.getBoardBySessionId(sessionId),
+    });
     this.#mutations = new WorkspaceMutationProcessor({
       database: this.#db,
       getSnapshot: () => this.#snapshot,
@@ -178,16 +171,6 @@ export class WorkspaceStore {
     };
   }
 
-  // ── lifecycle ─────────────────────────────────────────────────────────────
-
-  /**
-   * Rehydrates from the newest snapshot plus the tail of the log, then prunes
-   * stale idempotency keys.
-   *
-   * `legacySnapshotPath` triggers the one-shot `workspace.json` import. Corrupt
-   * legacy JSON throws with the path rather than falling back to an empty
-   * workspace — silently starting empty would look identical to data loss.
-   */
   async load(legacySnapshotPath?: string): Promise<void> {
     this.#db.pruneMutationIds(Date.now() - MUTATION_ID_RETENTION_MS);
     this.#db.pruneAgentReceipts(
@@ -235,11 +218,6 @@ export class WorkspaceStore {
     await this.#migrateLegacyGlobalModelSelection();
   }
 
-  /**
-   * Promote one unambiguous historical board model to the application default.
-   * Conflicting legacy selections stay unset so Settings can ask for one choice;
-   * no board is allowed to keep controlling future runs independently.
-   */
   async #migrateLegacyGlobalModelSelection(): Promise<void> {
     if (this.#snapshot.preferences.defaultModelSelection) {
       return;
@@ -275,18 +253,12 @@ export class WorkspaceStore {
     });
   }
 
-  /** Resolves when every queued state change has committed. */
   async drain(): Promise<void> {
     this.#agentEvents.flushPendingDeltas();
     await this.#agentEvents.waitForIdle();
     await this.#enqueue(async () => undefined);
   }
 
-  /**
-   * Order matters (spec §5): drain the queue, write a final snapshot so boot
-   * does not replay a long tail, then fold the WAL back so a cold copy of
-   * `chorus.db` is a complete backup.
-   */
   async close(): Promise<void> {
     if (this.#closePromise) {
       return this.#closePromise;
@@ -306,8 +278,6 @@ export class WorkspaceStore {
     return closePromise;
   }
 
-  // ── reads ─────────────────────────────────────────────────────────────────
-
   getSnapshot(): WorkspaceSnapshot {
     return structuredClone(this.#snapshot);
   }
@@ -316,7 +286,6 @@ export class WorkspaceStore {
     return this.#snapshot.boards.find((board) => board.boardId === boardId);
   }
 
-  /** Register a checkout selected by the trusted host folder picker. */
   async registerPickedRepository(directory: string): Promise<string> {
     return this.#enqueue(async () => {
       const registry = this.#repositoryRegistry;
@@ -335,14 +304,6 @@ export class WorkspaceStore {
     });
   }
 
-  /**
-   * The board a session belongs to, by the session id the engine issued.
-   *
-   * Reverse of the lookup `applyAgentEvent` does. Used to resolve the working
-   * directory for follow-up commands — an approval reply, an abort, a redirect —
-   * which otherwise fall back to the directory serve was started in rather than
-   * the board's own checkout.
-   */
   getBoardBySessionId(sessionId: string): WorkspaceBoard | undefined {
     if (!sessionId) {
       return undefined;
@@ -356,25 +317,10 @@ export class WorkspaceStore {
     return this.#db.headSeq();
   }
 
-  /**
-   * Oldest sequence that can still be replayed — the sequence of the newest
-   * snapshot. Events at or below it have been pruned, so a client resuming from
-   * before this point cannot be served a complete gap and must get a snapshot
-   * instead.
-   */
   replayFloorSeq(): number {
     return this.#db.latestSnapshot()?.seq ?? 0;
   }
 
-  /**
-   * Decoded events strictly after `seq`, oldest first.
-   *
-   * This is the read side of the resume path: a reconnecting client sends the
-   * last sequence it saw and gets back exactly the gap, so it never has to
-   * re-fetch a whole snapshot for a one-event miss. Decoding failures throw
-   * rather than yielding a partial list — a client must not be handed a
-   * silently truncated replay.
-   */
   eventsSince(seq: number, limit?: number): SequencedRecord[] {
     const rows = this.#db.readEventsSince(
       seq,
@@ -388,7 +334,6 @@ export class WorkspaceStore {
     }));
   }
 
-  /** Path of the SQLite file, for the restore/export runbook. */
   get databasePath(): string {
     return this.#db.path;
   }
@@ -448,62 +393,9 @@ export class WorkspaceStore {
     requestId: string,
     resume = false
   ): Promise<boolean> {
-    return this.#enqueue(async () => {
-      const board = this.#snapshot.boards.find(
-        (entry) => entry.session.sessionId === sessionId
-      );
-      if (!board) {
-        return false;
-      }
-      const task = Object.values(board.columns)
-        .flat()
-        .find(
-          (entry) =>
-            entry.pendingApprovals?.some(
-              (request) => request.requestId === requestId
-            ) || entry.pendingApproval?.requestId === requestId
-        );
-      if (!task) {
-        return false;
-      }
-      const ts = Date.now();
-      const events: WorkspaceEvent[] = [
-        {
-          boardId: board.boardId,
-          requestId,
-          taskId: task.id,
-          ts,
-          type: "card.approval_resolved",
-        },
-      ];
-      const pendingApprovals =
-        task.pendingApprovals ??
-        (task.pendingApproval ? [task.pendingApproval] : []);
-      const hasOtherPendingApprovals = pendingApprovals.some(
-        (request) => request.requestId !== requestId
-      );
-      if (resume && !hasOtherPendingApprovals) {
-        events.push({
-          boardId: board.boardId,
-          taskId: task.id,
-          ts,
-          type: "card.started",
-        });
-      }
-      this.#commit(events, board.boardId, null);
-      return true;
-    });
+    return this.#approvals.resolve(sessionId, requestId, resume);
   }
 
-  /**
-   * Runs one provider response for a pending approval/question request.
-   *
-   * The reservation is made inside the workspace write queue so requests from
-   * separate HTTP and WebSocket clients cannot both pass a stale-state check.
-   * Provider I/O happens outside the queue; other board events keep flowing
-   * while the engine processes the answer. Failed or declined provider calls
-   * release the reservation and leave the request available for a retry.
-   */
   async runPendingApprovalAction<T>(
     sessionId: string,
     requestId: string,
@@ -513,62 +405,9 @@ export class WorkspaceStore {
       resume?: boolean;
     } = {}
   ): Promise<PendingApprovalActionResult<T>> {
-    const actionKey = JSON.stringify([sessionId, requestId]);
-    const claim = await this.#enqueue(async () => {
-      if (this.#pendingApprovalActions.has(actionKey)) {
-        return "already_resolving" as const;
-      }
-
-      const board = this.#snapshot.boards.find(
-        (entry) => entry.session.sessionId === sessionId
-      );
-      const isPending = board
-        ? Object.values(board.columns)
-            .flat()
-            .some((task) =>
-              (
-                task.pendingApprovals ??
-                (task.pendingApproval ? [task.pendingApproval] : [])
-              ).some((request) => request.requestId === requestId)
-            )
-        : false;
-      if (!isPending) {
-        return "not_pending" as const;
-      }
-
-      this.#pendingApprovalActions.add(actionKey);
-      return "claimed" as const;
-    });
-
-    if (claim !== "claimed") {
-      return { status: claim };
-    }
-
-    try {
-      const value = await action();
-      if (options.accepts && !options.accepts(value)) {
-        return { status: "rejected" };
-      }
-
-      await this.resolvePendingApproval(
-        sessionId,
-        requestId,
-        options.resume ?? false
-      );
-      return { status: "accepted", value };
-    } finally {
-      this.#pendingApprovalActions.delete(actionKey);
-    }
+    return this.#approvals.run(sessionId, requestId, action, options);
   }
 
-  /**
-   * The `meta` key/value table.
-   *
-   * Exposed so the auth layer can persist single-use WebSocket tickets (spec
-   * §6.2) without reaching into SQLite itself. The store owns the connection and
-   * stays the only writer; these are the same operations `mut:` idempotency keys
-   * use, so ticket rows and mutation rows share one durability story.
-   */
   get meta(): {
     deleteMeta(key: string): void;
     entriesWithPrefix(prefix: string): [string, string][];
@@ -587,15 +426,6 @@ export class WorkspaceStore {
     this.#db.exportTo(destination);
   }
 
-  // ── writes ────────────────────────────────────────────────────────────────
-
-  /**
-   * Applies one client mutation as exactly one event.
-   *
-   * Returns null when the mutation was already applied (idempotent replay of a
-   * retried request) or when it addressed nothing. Callers read `getSnapshot()`
-   * in that case — there is no new state to broadcast.
-   */
   async applyMutation(
     mutation: WorkspaceMutation
   ): Promise<StoreCommit | null> {
@@ -647,17 +477,12 @@ export class WorkspaceStore {
     return commit;
   }
 
-  /** Applies one normalized provider event to the shared workspace log. */
   applyAgentEvent(
     agentEvent: NormalizedAgentEvent
   ): Promise<StoreCommit | null> {
     return this.#agentEvents.apply(agentEvent);
   }
 
-  /**
-   * Commits `card.created` before later agent events need the task binding.
-   * Events still use the regular commit path and hub notification.
-   */
   async applyBoardEvents(
     boardId: string,
     events: WorkspaceEvent[]
@@ -665,15 +490,6 @@ export class WorkspaceStore {
     return this.applyBoardEventsIf(boardId, events, () => true);
   }
 
-  /**
-   * `applyBoardEvents`, but the decision to commit is made inside the queue.
-   *
-   * A caller that reads board state and then calls `applyBoardEvents` is doing a
-   * check-then-act across the queue boundary, so two concurrent callers can both
-   * see the same "not set yet" and both commit. Passing the condition down moves
-   * the read and the write into the same queue entry, which is the same rule the
-   * rest of the store follows.
-   */
   async applyBoardEventsIf(
     boardId: string,
     events: WorkspaceEvent[],
@@ -689,10 +505,6 @@ export class WorkspaceStore {
         return null;
       }
 
-      // Board-scoped events have to address the board named here. `#commit` and
-      // the projector both read `event.boardId`, so a mismatch would emit against
-      // a board the caller did not name. Workspace-scoped events (preferences)
-      // carry no board id and are passed through.
       if (
         events.some((event) => "boardId" in event && event.boardId !== boardId)
       ) {
@@ -709,11 +521,6 @@ export class WorkspaceStore {
     });
   }
 
-  /**
-   * Session bookkeeping (attach, state transitions) is state-mutating work and
-   * goes through the same queue as mutations — plan risk #5. A single unguarded
-   * direct write here would reintroduce lost-update races.
-   */
   async updateBoardSession(
     boardId: string,
     update: Partial<WorkspaceBoard["session"]>
@@ -776,20 +583,12 @@ export class WorkspaceStore {
     });
   }
 
-  /**
-   * Writes a full-state snapshot and folds the covered events away. Also the
-   * only place retention is applied, so both paths cannot diverge.
-   */
   async writeSnapshot(): Promise<void> {
     await this.#enqueue(async () => {
       this.#writeSnapshotNow();
     });
   }
 
-  /**
-   * Boot-and-hourly retention pass: prune terminal-run detail, then snapshot so
-   * the pruning is durable and the event tail stops growing.
-   */
   async runRetention(): Promise<void> {
     await this.writeSnapshot();
     logger.info("workspace-retention-ran", {
@@ -798,7 +597,6 @@ export class WorkspaceStore {
     });
   }
 
-  /** Compacts the log if the file outgrew its cap. Safe to call on a timer. */
   async compactIfOversized(): Promise<boolean> {
     const oversized = isOverSizeCap(
       this.#db.dbSizeBytes(),
@@ -815,20 +613,6 @@ export class WorkspaceStore {
     return oversized;
   }
 
-  // ── internals ─────────────────────────────────────────────────────────────
-
-  /**
-   * Registers the single downstream emit path (spec §3: "Exactly one emit path
-   * from store → WS hub").
-   *
-   * Every writer already funnels through `#commit`, so subscribing here covers
-   * HTTP routes, the opencode bridge, the session watchdog, and the task
-   * service without any of them knowing a hub exists — and without any of them
-   * being able to forget to broadcast. Fires only after a successful write, so
-   * a subscriber never sees a commit that was rolled back.
-   *
-   * Returns an unsubscribe function.
-   */
   onCommit(listener: (commit: StoreCommit) => void): () => void {
     this.#commitListeners.add(listener);
     return () => {
@@ -843,9 +627,7 @@ export class WorkspaceStore {
 
     this.#agentEvents.flushPendingDeltas();
     return this.#agentEvents.waitForIdle().then(() =>
-      // Once accepted above, preserve this operation through close. close()
-      // waits for the event tail and then the queue; rejecting here would drop
-      // a pre-close write that was waiting behind a buffered stream batch.
+      // An operation accepted before close must remain queued through shutdown.
       this.#enqueueNow(work, true)
     );
   }
@@ -863,11 +645,6 @@ export class WorkspaceStore {
     return result;
   }
 
-  /**
-   * Appends events, then swaps memory. Order is the whole point: if the
-   * transaction throws, `this.#snapshot` is never assigned and the in-memory
-   * state still matches the last durable commit.
-   */
   #commit(
     events: WorkspaceEvent[],
     boardId: string | null,
@@ -877,6 +654,7 @@ export class WorkspaceStore {
       | { id: string; ts: number }
       | Array<{ id: string; ts: number }>
   ): StoreCommit {
+    // Persist first so a failed append leaves the in-memory snapshot unchanged.
     let candidate = this.#snapshot;
     for (const event of events) {
       candidate = projectWorkspaceEvent(candidate, event);
@@ -903,13 +681,7 @@ export class WorkspaceStore {
 
     const commit = { boardId, events, firstSeq, lastSeq };
 
-    // Post-commit, so a subscriber can never observe state the log rejected.
-    //
-    // Isolated on purpose. This runs inside the serial commit queue, and a
-    // subscriber here is the websocket hub, which writes to sockets. A throw
-    // would propagate out of a commit that is already durable and already
-    // applied, so the caller would see `workspace-projection-failed` for a write
-    // that in fact succeeded — a lie about the log, and the worst kind.
+    // Subscribers run after persistence and cannot invalidate a committed write.
     for (const listener of this.#commitListeners) {
       try {
         listener(commit);
@@ -924,9 +696,6 @@ export class WorkspaceStore {
       try {
         this.#writeSnapshotNow();
       } catch (error) {
-        // The append above is already durable. A maintenance failure must not
-        // report that committed mutation as failed; keep the event tail intact
-        // and try the snapshot again after more events arrive.
         logger.error(
           "workspace-snapshot-failed",
           error instanceof Error ? error : undefined

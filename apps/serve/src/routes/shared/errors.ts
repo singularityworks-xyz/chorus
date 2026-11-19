@@ -9,7 +9,7 @@ import {
   SessionOwnershipError,
 } from "../../tasks/errors";
 import { UnknownSessionError } from "../../tasks/session-directory";
-import { pendingApprovalConflictMessage } from "../../workspace/store";
+import { pendingApprovalConflictMessage } from "../../workspace/store/pending-approvals";
 
 function boardTaskCommandStatus(error: BoardTaskCommandError): number {
   switch (error.code) {
