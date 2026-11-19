@@ -10,8 +10,8 @@ import { z } from "zod";
 import type { RepositoryRegistry } from "../../projects/repository-registry";
 import type { MetaChange } from "../database/types";
 import type { ChorusDatabase } from "../db";
-import type { WorktreeProvisioner } from "../store";
 import { createBoardFromSeed } from "./projection";
+import type { WorktreeProvisioner } from "./types";
 
 const logger = createLogger(
   {

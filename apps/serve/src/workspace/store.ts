@@ -19,7 +19,6 @@ import type {
   StoredPushSubscription,
 } from "./database/types";
 import { ChorusDatabase } from "./db";
-import { attachSessionToBoard } from "./projector";
 import {
   DEFAULT_RETENTION_DAYS,
   isOverSizeCap,
@@ -32,10 +31,7 @@ import {
   AGENT_RECEIPT_RETENTION_MS,
   WorkspaceAgentEventProcessor,
 } from "./store/agent-events";
-import {
-  WorkspaceMutationProcessor,
-  worktreeCleanupKey,
-} from "./store/mutations";
+import { WorkspaceCommandService } from "./store/commands";
 import {
   type PendingApprovalActionResult,
   PendingApprovalController,
@@ -43,10 +39,20 @@ import {
 import { WorkspacePersistence } from "./store/persistence";
 import {
   boardIdOf,
-  diffSessionEvent,
   EMPTY_PREFERENCES,
   projectWorkspaceEvent,
 } from "./store/projection";
+import type {
+  SequencedRecord,
+  StoreCommit,
+  WorktreeProvisioner,
+} from "./store/types";
+
+export type {
+  SequencedRecord,
+  StoreCommit,
+  WorktreeProvisioner,
+} from "./store/types";
 
 const logger = createLogger(
   {
@@ -55,33 +61,6 @@ const logger = createLogger(
   "STORE"
 );
 
-export interface SequencedRecord {
-  boardId: string | null;
-  event: WorkspaceEvent;
-  seq: number;
-}
-
-export interface StoreCommit {
-  boardId: string | null;
-  events: WorkspaceEvent[];
-  firstSeq: number;
-  lastSeq: number;
-}
-
-export interface WorktreeProvisioner {
-  assertRemovable?(repoDirectory: string, boardId: string): Promise<void>;
-  ensureWorktree(
-    repoDirectory: string,
-    boardId: string,
-    branch?: string
-  ): Promise<string>;
-  needsWorktree(
-    boards: ReadonlyArray<{ repo: { directory: string } }>,
-    repoDirectory: string
-  ): boolean;
-  removeWorktree?(repoDirectory: string, boardId: string): Promise<void>;
-}
-
 export class WorkspaceStore {
   readonly workspaceId: string;
 
@@ -89,7 +68,7 @@ export class WorkspaceStore {
   readonly #options: Required<RetentionOptions>;
   readonly #queue: { promise: Promise<void> } = { promise: Promise.resolve() };
   readonly #agentEvents: WorkspaceAgentEventProcessor<StoreCommit>;
-  readonly #mutations: WorkspaceMutationProcessor;
+  readonly #commands: WorkspaceCommandService;
   readonly #approvals: PendingApprovalController;
   readonly #persistence: WorkspacePersistence;
   readonly #repositoryRegistry: RepositoryRegistry | undefined;
@@ -132,9 +111,13 @@ export class WorkspaceStore {
       enqueue: (work) => this.#enqueue(async () => work()),
       getBoardBySessionId: (sessionId) => this.getBoardBySessionId(sessionId),
     });
-    this.#mutations = new WorkspaceMutationProcessor({
+    this.#commands = new WorkspaceCommandService({
       database: this.#db,
       getSnapshot: () => this.#snapshot,
+      getBoard: (boardId) => this.getBoard(boardId),
+      enqueue: (work) => this.#enqueue(work),
+      commit: (events, boardId, mutationKey, metaChanges) =>
+        this.#commit(events, boardId, mutationKey, metaChanges),
       repositoryRegistry: this.#repositoryRegistry,
       worktreeProvisioner: options.worktreeProvisioner,
     });
@@ -194,7 +177,7 @@ export class WorkspaceStore {
         replayed: loaded.replayed,
         headSeq: this.#db.headSeq(),
       });
-      await this.#mutations.reconcileWorktreeIntents();
+      await this.#commands.reconcileWorktreeIntents();
       await this.#migrateLegacyGlobalModelSelection();
       return;
     }
@@ -214,7 +197,7 @@ export class WorkspaceStore {
     if (imported && legacySnapshotPath) {
       await this.#persistence.parkLegacySnapshot(legacySnapshotPath);
     }
-    await this.#mutations.reconcileWorktreeIntents();
+    await this.#commands.reconcileWorktreeIntents();
     await this.#migrateLegacyGlobalModelSelection();
   }
 
@@ -426,55 +409,8 @@ export class WorkspaceStore {
     this.#db.exportTo(destination);
   }
 
-  async applyMutation(
-    mutation: WorkspaceMutation
-  ): Promise<StoreCommit | null> {
-    return this.#enqueue(() => this.#applyMutationInQueue(mutation));
-  }
-
-  async #applyMutationInQueue(
-    mutation: WorkspaceMutation
-  ): Promise<StoreCommit | null> {
-    if (this.#db.mutationIdSeen(mutation.mutationId)) {
-      return null;
-    }
-
-    const now = Date.now();
-    const produced = await this.#mutations.produce(mutation, now);
-    if (!produced) {
-      return null;
-    }
-    if (produced.events.length !== 1) {
-      throw new Error(
-        `mutation ${mutation.type} produced ${produced.events.length} events; the 1-mutation-to-1-event contract requires exactly 1`
-      );
-    }
-
-    const metaChanges = [...(produced.metaChanges ?? [])];
-    if (produced.cleanup) {
-      metaChanges.push({
-        key: worktreeCleanupKey(produced.cleanup.boardId),
-        value: JSON.stringify(produced.cleanup),
-      });
-    }
-
-    let commit: StoreCommit;
-    try {
-      commit = this.#commit(
-        produced.events,
-        produced.boardId,
-        { id: mutation.mutationId, ts: now },
-        metaChanges
-      );
-    } catch (error) {
-      await this.#mutations.compensateProvisionedBoard(produced.events);
-      throw error;
-    }
-
-    if (produced.cleanup) {
-      await this.#mutations.finishCommittedCleanup(produced.cleanup);
-    }
-    return commit;
+  applyMutation(mutation: WorkspaceMutation): Promise<StoreCommit | null> {
+    return this.#commands.applyMutation(mutation);
   }
 
   applyAgentEvent(
@@ -483,104 +419,33 @@ export class WorkspaceStore {
     return this.#agentEvents.apply(agentEvent);
   }
 
-  async applyBoardEvents(
+  applyBoardEvents(
     boardId: string,
     events: WorkspaceEvent[]
   ): Promise<StoreCommit | null> {
-    return this.applyBoardEventsIf(boardId, events, () => true);
+    return this.#commands.applyBoardEvents(boardId, events);
   }
 
-  async applyBoardEventsIf(
+  applyBoardEventsIf(
     boardId: string,
     events: WorkspaceEvent[],
     shouldCommit: (board: WorkspaceBoard) => boolean
   ): Promise<StoreCommit | null> {
-    if (events.length === 0) {
-      return null;
-    }
-
-    return this.#enqueue(async () => {
-      const board = this.getBoard(boardId);
-      if (!board) {
-        return null;
-      }
-
-      if (
-        events.some((event) => "boardId" in event && event.boardId !== boardId)
-      ) {
-        throw new Error(
-          `applyBoardEvents received an event for a different board than ${boardId}`
-        );
-      }
-
-      if (!shouldCommit(board)) {
-        return null;
-      }
-
-      return this.#commit(events, boardId, null);
-    });
+    return this.#commands.applyBoardEventsIf(boardId, events, shouldCommit);
   }
 
-  async updateBoardSession(
+  updateBoardSession(
     boardId: string,
     update: Partial<WorkspaceBoard["session"]>
   ): Promise<StoreCommit | null> {
-    return this.#enqueue(async () => {
-      const board = this.getBoard(boardId);
-      if (!board) {
-        return null;
-      }
-
-      const events: WorkspaceEvent[] = [];
-
-      if (update.sessionId) {
-        const attached = attachSessionToBoard(board, update.sessionId);
-        const sessionEvent = diffSessionEvent(board, attached);
-        if (sessionEvent) {
-          events.push(sessionEvent);
-        }
-      }
-
-      const patch = withoutKeys(update, ["sessionId"]);
-      if (Object.keys(patch).length > 0) {
-        events.push({
-          type: "board.session_patched",
-          boardId,
-          ts: Date.now(),
-          session: patch,
-        });
-      }
-
-      if (events.length === 0) {
-        return null;
-      }
-
-      return this.#commit(events, boardId, null);
-    });
+    return this.#commands.updateBoardSession(boardId, update);
   }
 
-  async updateBoardReviewMode(
+  updateBoardReviewMode(
     boardId: string,
     reviewMode: "manual" | "auto"
   ): Promise<StoreCommit | null> {
-    return this.#enqueue(async () => {
-      if (!this.getBoard(boardId)) {
-        return null;
-      }
-
-      return this.#commit(
-        [
-          {
-            type: "board.review_mode_set",
-            boardId,
-            ts: Date.now(),
-            reviewMode,
-          },
-        ],
-        boardId,
-        null
-      );
-    });
+    return this.#commands.updateBoardReviewMode(boardId, reviewMode);
   }
 
   async writeSnapshot(): Promise<void> {
@@ -715,15 +580,4 @@ export class WorkspaceStore {
     this.#persistence.pruneEventsBefore(saved.head);
     this.#eventsSinceSnapshot = 0;
   }
-}
-
-function withoutKeys<T extends object>(
-  value: T,
-  keys: readonly (keyof T)[]
-): Partial<T> {
-  const copy: Partial<T> = { ...value };
-  for (const key of keys) {
-    delete copy[key];
-  }
-  return copy;
 }
