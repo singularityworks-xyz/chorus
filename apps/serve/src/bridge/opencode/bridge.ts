@@ -1,7 +1,6 @@
 import { createLogger } from "@chorus/logger";
 import type {
   EventStreamHandle,
-  EventStreamStatus,
   NormalizedAgentEvent,
   PermissionHandlerInput,
   QuestionReplyInput,
@@ -12,10 +11,7 @@ import type {
 } from "@chorus/oc-adapter";
 import { OpenCodeAdapter } from "@chorus/oc-adapter";
 import { EngineUnavailableError } from "../../opencode/process-manager";
-
-const MAX_RECONCILIATION_RETRIES = 5;
-const RECONCILIATION_RETRY_BASE_MS = 250;
-const RECONCILIATION_RETRY_MAX_MS = 5000;
+import { EventStreamReconciler } from "./reconciliation";
 
 export interface DirectoryEngineProvider {
   adapterForDirectory(directory: string): Promise<OpenCodeAdapter>;
@@ -47,22 +43,16 @@ export class OpenCodeBridge {
   readonly #defaultDirectory: string;
   readonly #ensureEngineReady: () => Promise<void>;
   readonly #engineProvider: DirectoryEngineProvider | undefined;
+  readonly #reconciler: EventStreamReconciler;
   #eventHandle: EventStreamHandle | null = null;
   readonly #directoryHandles = new Map<string, EventStreamHandle>();
-  readonly #streamStates = new Map<string, EventStreamStatus>();
   readonly #subscribers = new Set<EventSubscriber>();
   readonly #activeSessions = new Map<
     string,
     { activity: string; directory: string; sessionID: string }
   >();
-  readonly #reconciliations = new Map<string, Promise<void>>();
-  readonly #reconciliationRetryAttempts = new Map<string, number>();
-  readonly #reconciliationRetryTimers = new Map<
-    string,
-    ReturnType<typeof setTimeout>
-  >();
   #recoverySessions: (directory: string) => string[] = () => [];
-  readonly #startTime = Date.now();
+  readonly #startTime: number;
   readonly #logger = createLogger(
     {
       env: process.env.NODE_ENV === "production" ? "production" : "development",
@@ -84,6 +74,20 @@ export class OpenCodeBridge {
     this.#ensureEngineReady =
       options.ensureEngineReady ?? (() => Promise.resolve());
     this.#engineProvider = options.engineProvider;
+    this.#reconciler = new EventStreamReconciler({
+      activeSessionIds: (target) =>
+        [...this.#activeSessions.values()]
+          .filter((session) => session.directory === target)
+          .map((session) => session.sessionID),
+      adapterFor: (target) => this.#adapterFor(target),
+      markReconciled: (target) => this.#engineProvider?.markReconciled(target),
+      onExhausted: (target) => this.#detachExhaustedStream(target),
+      publish: async (target, event) => {
+        this.#trackSession(event, target);
+        await this.#broadcastAndWait(event);
+      },
+      recoverySessionIds: (target) => this.#recoverySessions(target),
+    });
     this.#engineProvider?.setEvictionHandler((evictedDirectory) => {
       this.#removeDirectorySubscription(evictedDirectory);
     });
@@ -107,8 +111,7 @@ export class OpenCodeBridge {
   }
 
   async start(): Promise<void> {
-    // Pool engines are started lazily for a board's canonical checkout. There
-    // is no default shared stream in that mode.
+    // Pooled engines own their directory streams.
     if (this.#engineProvider) {
       return;
     }
@@ -125,7 +128,7 @@ export class OpenCodeBridge {
       },
       {
         onStatus: (status) =>
-          this.#onStreamStatus(this.#defaultDirectory, status),
+          this.#reconciler.onStatus(this.#defaultDirectory, status),
       }
     );
 
@@ -160,7 +163,7 @@ export class OpenCodeBridge {
         },
         {
           directory,
-          onStatus: (status) => this.#onStreamStatus(directory, status),
+          onStatus: (status) => this.#reconciler.onStatus(directory, status),
         }
       );
     } catch (error) {
@@ -250,229 +253,6 @@ export class OpenCodeBridge {
     }
   }
 
-  #onStreamStatus(directory: string, status: EventStreamStatus): void {
-    this.#streamStates.set(directory, status);
-    if (status === "connected") {
-      this.#startReconciliation(directory);
-      return;
-    }
-    if (status === "exhausted") {
-      this.#detachExhaustedStream(directory);
-      this.#failDirectorySessions(directory).catch((error: unknown) => {
-        this.#logger.error(
-          "event-stream-exhaustion-state-failed",
-          error instanceof Error ? error : undefined,
-          { directory }
-        );
-      });
-    }
-  }
-
-  #startReconciliation(directory: string): void {
-    const timer = this.#reconciliationRetryTimers.get(directory);
-    if (timer) {
-      clearTimeout(timer);
-      this.#reconciliationRetryTimers.delete(directory);
-    }
-    if (this.#reconciliations.has(directory)) {
-      return;
-    }
-
-    const reconciliation = this.#reconcileDirectory(directory).finally(() => {
-      if (this.#reconciliations.get(directory) === reconciliation) {
-        this.#reconciliations.delete(directory);
-      }
-    });
-    this.#reconciliations.set(directory, reconciliation);
-    reconciliation.catch((error: unknown) => {
-      this.#scheduleReconciliationRetry(directory, error);
-    });
-  }
-
-  #scheduleReconciliationRetry(directory: string, error: unknown): void {
-    if (this.#streamStates.get(directory) !== "connected") {
-      return;
-    }
-    if (this.#reconciliationRetryTimers.has(directory)) {
-      return;
-    }
-
-    const attempts =
-      (this.#reconciliationRetryAttempts.get(directory) ?? 0) + 1;
-    this.#reconciliationRetryAttempts.set(directory, attempts);
-    if (attempts > MAX_RECONCILIATION_RETRIES) {
-      this.#logger.error(
-        "event-stream-reconciliation-retries-exhausted",
-        error instanceof Error ? error : undefined,
-        { attempts, directory }
-      );
-      return;
-    }
-
-    const delay = Math.min(
-      RECONCILIATION_RETRY_BASE_MS * 2 ** (attempts - 1),
-      RECONCILIATION_RETRY_MAX_MS
-    );
-    const timer = setTimeout(() => {
-      this.#reconciliationRetryTimers.delete(directory);
-      if (this.#streamStates.get(directory) === "connected") {
-        this.#startReconciliation(directory);
-      }
-    }, delay);
-    this.#reconciliationRetryTimers.set(directory, timer);
-  }
-
-  #clearReconciliationRetry(directory: string): void {
-    const timer = this.#reconciliationRetryTimers.get(directory);
-    if (timer) {
-      clearTimeout(timer);
-      this.#reconciliationRetryTimers.delete(directory);
-    }
-    this.#reconciliationRetryAttempts.delete(directory);
-  }
-
-  #detachExhaustedStream(directory: string): void {
-    this.#directoryHandles.get(directory)?.stop();
-    this.#directoryHandles.delete(directory);
-    if (!this.#engineProvider && directory === this.#defaultDirectory) {
-      this.#eventHandle?.stop();
-      this.#eventHandle = null;
-    }
-    this.#engineProvider?.markSubscribed(directory, false);
-    this.#clearReconciliationRetry(directory);
-    this.#streamStates.set(directory, "exhausted");
-  }
-
-  async #failDirectorySessions(directory: string): Promise<void> {
-    const sessionIDs = new Set(this.#recoverySessions(directory));
-    for (const session of this.#activeSessions.values()) {
-      if (session.directory === directory) {
-        sessionIDs.add(session.sessionID);
-      }
-    }
-
-    const timestamp = Date.now();
-    for (const sessionID of sessionIDs) {
-      const event: NormalizedAgentEvent = {
-        activity: "error",
-        error: "The OpenCode event stream could not reconnect.",
-        sessionID,
-        sourceEventId: `stream-exhausted:${sessionID}`,
-        timestamp,
-        type: "session.error",
-      };
-      this.#trackSession(event, directory);
-      await this.#broadcastAndWait(event);
-    }
-    this.#engineProvider?.markReconciled(directory);
-  }
-
-  async #reconcileDirectory(directory: string): Promise<void> {
-    try {
-      const adapter = await this.#adapterFor(directory);
-      const recoverySessions = this.#recoverySessions(directory);
-      const recoverableSessionIds = new Set(recoverySessions);
-      const [statuses, permissions, questions, histories] = await Promise.all([
-        adapter.sessions.status(directory),
-        adapter.permissions.list(directory),
-        adapter.questions.list(directory),
-        Promise.all(
-          recoverySessions.map(async (sessionID) => {
-            try {
-              const messages = await adapter.sessions.messages(sessionID, {
-                directory,
-                limit: 200,
-              });
-              return adapter.normalizeHistory(sessionID, messages);
-            } catch (error) {
-              this.#logger.warn("session-history-reconciliation-failed", {
-                directory,
-                errorName: error instanceof Error ? error.name : "unknown",
-                sessionID,
-              });
-              throw error;
-            }
-          })
-        ),
-      ]);
-
-      for (const history of histories) {
-        for (const event of history) {
-          this.#trackSession(event, directory);
-          await this.#broadcastAndWait(event);
-        }
-      }
-
-      const timestamp = Date.now();
-      for (const [sessionID, status] of Object.entries(statuses)) {
-        if (!recoverableSessionIds.has(sessionID)) {
-          continue;
-        }
-        const normalized: NormalizedAgentEvent = {
-          activity: status.type === "idle" ? "idle" : "thinking",
-          sessionID,
-          timestamp,
-          type: "session.status",
-        };
-        this.#trackSession(normalized, directory);
-        await this.#broadcastAndWait(normalized);
-      }
-
-      for (const sessionID of recoverySessions) {
-        if (Object.hasOwn(statuses, sessionID)) {
-          continue;
-        }
-        const normalized: NormalizedAgentEvent = {
-          activity: "idle",
-          sessionID,
-          timestamp,
-          type: "session.status",
-        };
-        this.#trackSession(normalized, directory);
-        await this.#broadcastAndWait(normalized);
-      }
-
-      for (const permission of permissions) {
-        if (!recoverableSessionIds.has(permission.sessionID)) {
-          continue;
-        }
-        await this.#broadcastAndWait({
-          activity: "waiting_for_approval",
-          permissionID: permission.id,
-          permission: permission.permission,
-          sessionID: permission.sessionID,
-          sourceEventId: `permission.asked:${permission.id}`,
-          timestamp,
-          type: "permission.asked",
-        });
-      }
-
-      for (const question of questions) {
-        if (!recoverableSessionIds.has(question.sessionID)) {
-          continue;
-        }
-        await this.#broadcastAndWait({
-          activity: "waiting_for_question",
-          questionID: question.id,
-          questions: question.questions,
-          sessionID: question.sessionID,
-          sourceEventId: `question.asked:${question.id}`,
-          timestamp,
-          type: "question.asked",
-        });
-      }
-      this.#engineProvider?.markReconciled(directory);
-      this.#clearReconciliationRetry(directory);
-    } catch (error) {
-      this.#logger.error(
-        "event-stream-reconciliation-failed",
-        error instanceof Error ? error : undefined,
-        { directory }
-      );
-      throw error;
-    }
-  }
-
   async createSession(input: SessionCreateInput) {
     const adapter = await this.#adapterFor(
       input.directory ?? this.#defaultDirectory
@@ -480,13 +260,7 @@ export class OpenCodeBridge {
     return adapter.sessions.create(input);
   }
 
-  /**
-   * Reads a session back from the engine.
-   *
-   * Used to check that a session we are about to reuse really belongs to the
-   * directory we are about to work in. The engine is the only authority on that;
-   * the store holds a session id and a path but no link between them.
-   */
+  // Session ownership is verified by the engine for the requested directory.
   async getSession(input: {
     directory?: string;
     engineDirectory?: string;
@@ -672,10 +446,8 @@ export class OpenCodeBridge {
     return {
       connected:
         (this.#eventHandle !== null || this.#directoryHandles.size > 0) &&
-        this.#streamStates.size > 0 &&
-        [...this.#streamStates.values()].every(
-          (status) => status === "connected"
-        ),
+        this.#reconciler.hasStatus &&
+        this.#reconciler.allConnected,
       opencodeUrl: this.#baseUrl,
       activeSessions: this.#activeSessions.size,
       subscribedDirectories: [
@@ -709,15 +481,24 @@ export class OpenCodeBridge {
     return this.adapter;
   }
 
+  #detachExhaustedStream(directory: string): void {
+    this.#directoryHandles.get(directory)?.stop();
+    this.#directoryHandles.delete(directory);
+    if (!this.#engineProvider && directory === this.#defaultDirectory) {
+      this.#eventHandle?.stop();
+      this.#eventHandle = null;
+    }
+    this.#engineProvider?.markSubscribed(directory, false);
+  }
+
   #removeDirectorySubscription(directory: string): void {
-    this.#clearReconciliationRetry(directory);
+    this.#reconciler.removeDirectory(directory);
     const handle = this.#directoryHandles.get(directory);
     if (!handle) {
       return;
     }
     handle.stop();
     this.#directoryHandles.delete(directory);
-    this.#streamStates.delete(directory);
     this.#engineProvider?.markSubscribed(directory, false);
   }
 
@@ -731,12 +512,7 @@ export class OpenCodeBridge {
       this.#engineProvider?.markSubscribed(directory, false);
     }
     this.#directoryHandles.clear();
-    for (const timer of this.#reconciliationRetryTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.#reconciliationRetryTimers.clear();
-    this.#reconciliationRetryAttempts.clear();
-    this.#streamStates.clear();
+    this.#reconciler.stop();
     this.#subscribers.clear();
     this.#activeSessions.clear();
   }
