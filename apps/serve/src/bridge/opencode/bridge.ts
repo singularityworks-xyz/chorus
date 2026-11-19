@@ -2,16 +2,11 @@ import { createLogger } from "@chorus/logger";
 import type {
   EventStreamHandle,
   NormalizedAgentEvent,
-  PermissionHandlerInput,
-  QuestionReplyInput,
-  QuestionRequest,
-  SessionCreateInput,
-  SessionForkInput,
-  SessionPromptInput,
 } from "@chorus/oc-adapter";
 import { OpenCodeAdapter } from "@chorus/oc-adapter";
 import { EngineUnavailableError } from "../../opencode/process-manager/errors";
 import { EventStreamReconciler } from "./reconciliation";
+import { OpenCodeSessionCommands } from "./sessions/commands";
 
 export interface DirectoryEngineProvider {
   adapterForDirectory(directory: string): Promise<OpenCodeAdapter>;
@@ -44,6 +39,7 @@ export class OpenCodeBridge {
   readonly #ensureEngineReady: () => Promise<void>;
   readonly #engineProvider: DirectoryEngineProvider | undefined;
   readonly #reconciler: EventStreamReconciler;
+  readonly #sessionCommands: OpenCodeSessionCommands;
   #eventHandle: EventStreamHandle | null = null;
   readonly #directoryHandles = new Map<string, EventStreamHandle>();
   readonly #subscribers = new Set<EventSubscriber>();
@@ -96,6 +92,11 @@ export class OpenCodeBridge {
       baseUrl,
       directory,
     });
+    this.#sessionCommands = new OpenCodeSessionCommands(
+      (target) => this.#adapterFor(target),
+      this.#defaultDirectory,
+      this.#logger
+    );
     this.#startTime = Date.now();
   }
 
@@ -253,193 +254,95 @@ export class OpenCodeBridge {
     }
   }
 
-  async createSession(input: SessionCreateInput) {
-    const adapter = await this.#adapterFor(
-      input.directory ?? this.#defaultDirectory
-    );
-    return adapter.sessions.create(input);
+  createSession(
+    input: Parameters<OpenCodeSessionCommands["createSession"]>[0]
+  ) {
+    return this.#sessionCommands.createSession(input);
   }
 
   // Session ownership is verified by the engine for the requested directory.
-  async getSession(input: {
-    directory?: string;
-    engineDirectory?: string;
-    sessionID: string;
-  }) {
-    const directory =
-      input.directory ?? input.engineDirectory ?? this.#defaultDirectory;
-    const adapter = await this.#adapterFor(directory);
-    return adapter.sessions.get(input.sessionID, directory);
+  getSession(input: Parameters<OpenCodeSessionCommands["getSession"]>[0]) {
+    return this.#sessionCommands.getSession(input);
   }
 
-  async sessionMessages(sessionID: string, directory: string) {
-    const adapter = await this.#adapterFor(directory);
-    return adapter.sessions.messages(sessionID, { directory, limit: 200 });
+  sessionMessages(sessionID: string, directory: string) {
+    return this.#sessionCommands.sessionMessages(sessionID, directory);
   }
 
-  async promptSession(input: SessionPromptInput) {
-    const adapter = await this.#adapterFor(
-      input.directory ?? this.#defaultDirectory
-    );
-    return adapter.sessions.prompt(input);
+  promptSession(
+    input: Parameters<OpenCodeSessionCommands["promptSession"]>[0]
+  ) {
+    return this.#sessionCommands.promptSession(input);
   }
 
-  async promptSessionAsync(input: SessionPromptInput) {
-    const adapter = await this.#adapterFor(
-      input.directory ?? this.#defaultDirectory
-    );
-    return adapter.sessions.promptAsync(input);
+  promptSessionAsync(
+    input: Parameters<OpenCodeSessionCommands["promptSessionAsync"]>[0]
+  ) {
+    return this.#sessionCommands.promptSessionAsync(input);
   }
 
-  async abortSession(sessionID: string, directory?: string) {
-    const adapter = await this.#adapterFor(directory ?? this.#defaultDirectory);
-    return adapter.sessions.abort(sessionID, directory);
+  abortSession(sessionID: string, directory?: string) {
+    return this.#sessionCommands.abortSession(sessionID, directory);
   }
 
-  async sessionDiff(sessionID: string, directory?: string) {
-    const target = directory ?? this.#defaultDirectory;
-    const adapter = await this.#adapterFor(target);
-    return adapter.sessions.diff(sessionID, target);
+  sessionDiff(sessionID: string, directory?: string) {
+    return this.#sessionCommands.sessionDiff(sessionID, directory);
   }
 
-  async listAutocompleteCommands(directory: string) {
-    const adapter = await this.#adapterFor(directory);
-    return adapter.references.listCommands(directory);
+  listAutocompleteCommands(directory: string) {
+    return this.#sessionCommands.listAutocompleteCommands(directory);
   }
 
-  async listAutocompleteSkills(directory: string) {
-    const adapter = await this.#adapterFor(directory);
-    return adapter.references.listSkills(directory);
+  listAutocompleteSkills(directory: string) {
+    return this.#sessionCommands.listAutocompleteSkills(directory);
   }
 
-  async findAutocompleteFiles(query: string, directory: string) {
-    const adapter = await this.#adapterFor(directory);
-    return adapter.references.findFiles(query, directory);
+  findAutocompleteFiles(query: string, directory: string) {
+    return this.#sessionCommands.findAutocompleteFiles(query, directory);
   }
 
-  async listAutocompleteDirectory(path: string, directory: string) {
-    const adapter = await this.#adapterFor(directory);
-    return adapter.references.listDirectory(path, directory);
+  listAutocompleteDirectory(path: string, directory: string) {
+    return this.#sessionCommands.listAutocompleteDirectory(path, directory);
   }
 
-  async waitForSessionIdle(
-    sessionID: string,
-    directory: string,
-    timeoutMs: number
-  ): Promise<boolean> {
-    const adapter = await this.#adapterFor(directory);
-    const deadline = Date.now() + Math.max(0, timeoutMs);
-    for (;;) {
-      const statuses = await adapter.sessions.status(directory);
-      const status = statuses[sessionID];
-      if (!status || status.type === "idle") {
-        return true;
-      }
-      if (Date.now() >= deadline) {
-        return false;
-      }
-      await new Promise((resolvePromise) => {
-        setTimeout(resolvePromise, Math.min(100, deadline - Date.now()));
-      });
-    }
-  }
-
-  async replyPermission(input: PermissionHandlerInput) {
-    const adapter = await this.#adapterFor(
-      input.directory ?? this.#defaultDirectory
-    );
-    return adapter.permissions.reply(input);
-  }
-
-  async listQuestions(directory?: string): Promise<QuestionRequest[]> {
-    const adapter = await this.#adapterFor(directory ?? this.#defaultDirectory);
-    return adapter.questions.list(directory);
-  }
-
-  async replyQuestion(input: QuestionReplyInput) {
-    const adapter = await this.#adapterFor(
-      input.directory ?? this.#defaultDirectory
-    );
-    return adapter.questions.reply(input);
-  }
-
-  async rejectQuestion(requestID: string, directory?: string) {
-    const adapter = await this.#adapterFor(directory ?? this.#defaultDirectory);
-    return adapter.questions.reject(requestID, directory);
-  }
-
-  async forkSession(input: SessionForkInput) {
-    const adapter = await this.#adapterFor(
-      input.directory ?? this.#defaultDirectory
-    );
-    return adapter.sessions.fork(input);
-  }
-
-  async revertSession(sessionID: string, directory?: string) {
-    const adapter = await this.#adapterFor(directory ?? this.#defaultDirectory);
-    const target = directory ?? this.#defaultDirectory;
-    this.#logger.debug("Reverting session", {
+  waitForSessionIdle(sessionID: string, directory: string, timeoutMs: number) {
+    return this.#sessionCommands.waitForSessionIdle(
       sessionID,
-      directory: target,
-    });
-    return adapter.sessions
-      .revert({ sessionID, directory: target })
-      .then((result) => {
-        this.#logger.info("Session reverted", {
-          sessionID,
-          messageID: result?.messageID,
-          messageIndex: result?.messageIndex,
-          totalMessages: result?.totalMessages,
-        });
-        return result;
-      })
-      .catch((error: unknown) => {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        const errorStack = error instanceof Error ? error.stack : undefined;
-        this.#logger.error(
-          "Failed to revert session",
-          error instanceof Error ? error : undefined,
-          {
-            sessionID,
-            directory: target,
-            errorMessage,
-            errorStack,
-          }
-        );
-        throw error;
-      });
+      directory,
+      timeoutMs
+    );
   }
 
-  async unrevertSession(sessionID: string, directory?: string) {
-    const adapter = await this.#adapterFor(directory ?? this.#defaultDirectory);
-    const target = directory ?? this.#defaultDirectory;
-    this.#logger.debug("Unreverting session", {
-      sessionID,
-      directory: target,
-    });
-    return adapter.sessions
-      .unrevert({ sessionID, directory: target })
-      .then((result) => {
-        this.#logger.info("Session unreverted", { sessionID });
-        return result;
-      })
-      .catch((error: unknown) => {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        const errorStack = error instanceof Error ? error.stack : undefined;
-        this.#logger.error(
-          "Failed to unrevert session",
-          error instanceof Error ? error : undefined,
-          {
-            sessionID,
-            directory: target,
-            errorMessage,
-            errorStack,
-          }
-        );
-        throw error;
-      });
+  replyPermission(
+    input: Parameters<OpenCodeSessionCommands["replyPermission"]>[0]
+  ) {
+    return this.#sessionCommands.replyPermission(input);
+  }
+
+  listQuestions(directory?: string) {
+    return this.#sessionCommands.listQuestions(directory);
+  }
+
+  replyQuestion(
+    input: Parameters<OpenCodeSessionCommands["replyQuestion"]>[0]
+  ) {
+    return this.#sessionCommands.replyQuestion(input);
+  }
+
+  rejectQuestion(requestID: string, directory?: string) {
+    return this.#sessionCommands.rejectQuestion(requestID, directory);
+  }
+
+  forkSession(input: Parameters<OpenCodeSessionCommands["forkSession"]>[0]) {
+    return this.#sessionCommands.forkSession(input);
+  }
+
+  revertSession(sessionID: string, directory?: string) {
+    return this.#sessionCommands.revertSession(sessionID, directory);
+  }
+
+  unrevertSession(sessionID: string, directory?: string) {
+    return this.#sessionCommands.unrevertSession(sessionID, directory);
   }
 
   getStatus(): BridgeStatus {
