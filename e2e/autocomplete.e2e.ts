@@ -1,13 +1,7 @@
 import type { Page } from "@playwright/test";
-import { expect, test } from "@playwright/test";
-import { E2E_REPO_DIR, TOKEN } from "./serve-env";
-
-async function signIn(page: Page): Promise<void> {
-  await page.goto("/login");
-  await page.getByLabel("Access token").fill(TOKEN);
-  await page.getByRole("button", { name: "Continue" }).click();
-  await page.waitForURL("/");
-}
+import { expect } from "@playwright/test";
+import { E2E_REPO_DIR } from "./serve-env";
+import { signIn, test } from "./workspace-fixture";
 
 async function createBoard(page: Page, title: string): Promise<void> {
   await page.evaluate(
@@ -84,9 +78,11 @@ test.describe("board autocomplete", () => {
 
     const composer = page.getByRole("textbox", { name: "Prompt Chorus" });
     await composer.fill("@main");
-    await expect(page.getByRole("alert")).toContainText(
-      "Check the provider connection and retry."
-    );
+    await expect(
+      page
+        .getByRole("alert")
+        .filter({ hasText: "Check the provider connection and retry." })
+    ).toBeVisible();
     await page.getByRole("button", { name: "Retry" }).click();
     await expect(
       page.getByRole("option").filter({ hasText: "main.ts" })

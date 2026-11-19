@@ -1,33 +1,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Page } from "@playwright/test";
-import { expect, test } from "@playwright/test";
-import { E2E_REPO_DIR, TOKEN } from "./serve-env";
+import { expect } from "@playwright/test";
+import { E2E_REPO_DIR } from "./serve-env";
+import { signIn, test } from "./workspace-fixture";
 
-/**
- * The human path, end to end (plan P6 verification).
- *
- * Until Phase 6 a queued prompt produced no card at all: nothing emitted
- * `card.created`, so `board.session.currentTaskId` stayed undefined and the store
- * discarded every task-scoped agent event. The agent worked — it wrote files, it
- * streamed hundreds of deltas — and the board stayed empty, so the UI showed
- * nothing while work completed behind it. That is the regression these exist to
- * hold shut.
- *
- * No model provider is required. Creating a session needs a running engine, but
- * running one needs credentials this suite must not assume, so the assertion is
- * that the card exists and leaves the queue. Deeper lifecycle assertions are
- * gated on `CHORUS_E2E_AGENT=1` for a machine that has a provider configured.
- */
-
+// CI uses the scripted engine through Serve's real adapter. The opt-in case
+// below uses the pinned engine with a configured external model.
 const HAS_PROVIDER = process.env.CHORUS_E2E_AGENT === "1";
-
-async function signIn(page: Page): Promise<void> {
-  await page.goto("/login");
-  await page.getByLabel("Access token").fill(TOKEN);
-  await page.getByRole("button", { name: "Continue" }).click();
-  await page.waitForURL("/");
-}
 
 /** Creates a board bound to the throwaway fixture repo and returns its title. */
 async function createBoard(page: Page, title: string): Promise<string> {
@@ -104,7 +84,7 @@ test.describe("agent lifecycle", () => {
       .not.toBeNull();
   });
 
-  test("a queued prompt produces a card that leaves the queue", async ({
+  test("a submitted prompt reaches the engine and requests approval", async ({
     page,
   }, testInfo) => {
     test.skip(
@@ -115,49 +95,34 @@ test.describe("agent lifecycle", () => {
     const board = `E2E agent ${crypto.randomUUID().slice(0, 8)}`;
     await createBoard(page, board);
 
+    if (!HAS_PROVIDER) {
+      const response = await page.request.post("/api/workspace", {
+        headers: { origin: new URL(page.url()).origin },
+        data: {
+          baseRevision: null,
+          clientId: "playwright",
+          mutationId: crypto.randomUUID(),
+          type: "preference.default_model.set",
+          payload: { model: { providerID: "fixture", modelID: "scripted" } },
+        },
+      });
+      expect(response.ok()).toBe(true);
+    }
     const prompt = "Summarise the README in one sentence.";
     await selectBoard(page, board);
     await submitPrompt(page, prompt);
-
-    // The card exists at all. This is the assertion that failed before Phase 6:
-    // the prompt was accepted, the agent ran, and the board had nothing on it.
-    const card = page.getByText(prompt).filter({ visible: true }).first();
-    await expect(card).toBeVisible({ timeout: 60_000 });
-
-    // And it is not sitting in the queue — either the engine started it or it
-    // failed, both of which mean the lifecycle is live rather than inert.
-    await expect
-      .poll(
-        () =>
-          // Read the live snapshot rather than localStorage: the persisted
-          // cursor and blob only move when the server sends a snapshot, so
-          // localStorage legitimately lags a freshly created card. Matched by
-          // title, because `boards[0]` may be a board from an earlier test whose
-          // card — or empty column — decides this assertion instead.
-          page.evaluate(async (boardTitle) => {
-            const response = await fetch("/api/workspace");
-            if (!response.ok) {
-              return null;
-            }
-            const snapshot = (await response.json()) as {
-              boards?: {
-                columns: Record<string, unknown[]>[];
-                title: string;
-              }[];
-            };
-            const columns = snapshot.boards?.find(
-              (entry) => entry.title === boardTitle
-            )?.columns;
-            if (!columns) {
-              return null;
-            }
-            return (
-              (columns.in_progress?.length ?? 0) + (columns.done?.length ?? 0)
-            );
-          }, board),
-        { timeout: 60_000 }
-      )
-      .toBeGreaterThan(0);
+    await page.getByRole("button", { name: "Fit view" }).click();
+    await expect(
+      page.getByText(prompt).filter({ visible: true }).first()
+    ).toBeVisible();
+    if (!HAS_PROVIDER) {
+      await expect(
+        page.getByRole("button", { name: "Approve", exact: true })
+      ).toBeVisible();
+      await expect(
+        page.getByText("Thinking", { exact: true }).first()
+      ).toBeVisible();
+    }
   });
 
   test("a prompt runs to completion and the agent changes the repository", async ({

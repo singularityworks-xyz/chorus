@@ -50,8 +50,10 @@ const FIXTURE_CHANGE_CONTENT = "Scripted fixture change\n";
 
 /** Scripted external engine: every event crosses the actual SDK HTTP/SSE path. */
 export function startScriptedEngine({
+  port = 0,
   questionReplyDelayMs = 0,
 }: {
+  port?: number;
   questionReplyDelayMs?: number;
 } = {}) {
   const sessions = new Map<string, FixtureSession>();
@@ -506,7 +508,7 @@ export function startScriptedEngine({
   }
   const server = Bun.serve({
     hostname: "127.0.0.1",
-    port: 0,
+    port,
     async fetch(request) {
       const url = new URL(request.url);
       const directory = url.searchParams.get("directory") ?? "";

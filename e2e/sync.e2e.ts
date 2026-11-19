@@ -1,5 +1,5 @@
 import type { Page, WebSocket } from "@playwright/test";
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
 
 /**
  * Client sync e2e (plan P5 integration list).
@@ -23,26 +23,7 @@ import {
 } from "./serve-env";
 import { start, stop } from "./serve-process";
 
-/**
- * Signs in through the real login screen.
- *
- * Deliberately the UI path rather than a cookie injection: the exchange is the
- * thing under test in one of the cases, and a hand-set cookie would skip it.
- */
-async function signIn(page: Page): Promise<void> {
-  await page.goto("/login");
-  await page.getByLabel("Access token").fill(TOKEN);
-  const loginResponse = page.waitForResponse((response) =>
-    response.url().endsWith("/api/auth/login")
-  );
-  await page.getByRole("button", { name: "Continue" }).click();
-  const response = await loginResponse;
-  expect(
-    response.ok(),
-    `login request returned ${String(response.status())}`
-  ).toBe(true);
-  await page.waitForURL("/");
-}
+import { signIn, test } from "./workspace-fixture";
 
 /**
  * Creates a board from inside the page.

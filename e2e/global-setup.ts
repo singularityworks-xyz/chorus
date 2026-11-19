@@ -3,26 +3,17 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   E2E_REPO_DIR,
-  E2E_SERVE_ENV,
   ENGINE_LOG_FILE,
   ENGINE_PID_FILE,
   OPENCODE_PORT,
   repoRoot,
   SERVE_DATA_DIR,
-  SERVE_LOG_FILE,
   SERVE_PID_FILE,
   SERVE_PORT,
-  TOKEN,
 } from "./serve-env";
-import { start, startEngine, stop } from "./serve-process";
+import { startEngine, stop } from "./serve-process";
 
-/**
- * Starts serve for the whole run.
- *
- * The spec needs to stop and restart it mid-test, which Playwright's own
- * `webServer` supervision cannot allow, so the process is owned here and its pid
- * published for the specs to read.
- */
+/** Prepare the repository and engine shared by the isolated workspaces. */
 export default async function globalSetup(): Promise<void> {
   // A leftover serve on the port would be reused and silently inherit a stale
   // event log, which is exactly the kind of cross-run state that makes a sync
@@ -42,18 +33,6 @@ export default async function globalSetup(): Promise<void> {
     logFile: ENGINE_LOG_FILE,
     pidFile: ENGINE_PID_FILE,
     port: OPENCODE_PORT,
-  });
-
-  await start({
-    dataDir: SERVE_DATA_DIR,
-    // Adopt the engine the Playwright config started, so serve does not spawn a
-    // second one on its own port.
-    env: E2E_SERVE_ENV,
-    logFile: SERVE_LOG_FILE,
-    pidFile: SERVE_PID_FILE,
-    port: SERVE_PORT,
-    repoRoot,
-    token: TOKEN,
   });
 }
 

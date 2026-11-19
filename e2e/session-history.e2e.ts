@@ -1,18 +1,7 @@
 import type { Page } from "@playwright/test";
-import { expect, test } from "@playwright/test";
-import { E2E_REPO_DIR, TOKEN } from "./serve-env";
-
-async function signIn(page: Page): Promise<void> {
-  await page.goto("/login");
-  await page.getByLabel("Access token").fill(TOKEN);
-  await page.getByRole("button", { name: "Continue" }).click();
-  await page.waitForURL("/");
-  await expect
-    .poll(() =>
-      page.evaluate(() => window.localStorage.getItem("chorus:lastSeq"))
-    )
-    .not.toBeNull();
-}
+import { expect } from "@playwright/test";
+import { E2E_REPO_DIR } from "./serve-env";
+import { signIn, test } from "./workspace-fixture";
 
 async function createBoard(page: Page, title: string): Promise<void> {
   await page.evaluate(
@@ -124,6 +113,7 @@ test.describe("board repository history controls", () => {
     const boardTitle = `E2E history ${crypto.randomUUID().slice(0, 8)}`;
     await createBoard(page, boardTitle);
     await selectBoard(page, boardTitle);
+    await page.getByRole("button", { name: "Fit view" }).click();
     const undoButton = page.getByRole("button", {
       name: "Undo repository changes",
     });
@@ -204,13 +194,16 @@ test.describe("board repository history controls", () => {
     const boardTitle = `E2E history error ${crypto.randomUUID().slice(0, 8)}`;
     await createBoard(page, boardTitle);
     await selectBoard(page, boardTitle);
+    await page.getByRole("button", { name: "Fit view" }).click();
     const undoButton = page.getByRole("button", {
       name: "Undo repository changes",
     });
     await expect(undoButton).toBeEnabled();
 
     await undoButton.click();
-    const alert = page.getByRole("alert");
+    const alert = page
+      .getByRole("alert")
+      .filter({ hasText: "Wait for the board's current work to finish." });
     await expect(alert).toContainText(
       "Wait for the board's current work to finish."
     );

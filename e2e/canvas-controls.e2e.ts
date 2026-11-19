@@ -1,13 +1,7 @@
 import type { Page } from "@playwright/test";
-import { expect, test } from "@playwright/test";
-import { E2E_REPO_DIR, TOKEN } from "./serve-env";
-
-async function signIn(page: Page): Promise<void> {
-  await page.goto("/login");
-  await page.getByLabel("Access token").fill(TOKEN);
-  await page.getByRole("button", { name: "Continue" }).click();
-  await page.waitForURL("/");
-}
+import { expect } from "@playwright/test";
+import { E2E_REPO_DIR } from "./serve-env";
+import { signIn, test } from "./workspace-fixture";
 
 async function createBoard(page: Page, title: string): Promise<void> {
   await page.evaluate(
@@ -58,7 +52,6 @@ test.describe("desktop canvas controls", () => {
     const boardTitle = `E2E canvas new task ${crypto.randomUUID().slice(0, 8)}`;
     await createBoard(page, boardTitle);
     await selectBoard(page, boardTitle);
-    await page.locator(`[data-board-title="${boardTitle}"]`).first().click();
 
     await page.keyboard.press("n");
 
@@ -105,13 +98,14 @@ test.describe("desktop canvas controls", () => {
       });
     });
 
+    await page.getByRole("button", { name: "Fit view" }).click();
     await page
       .getByRole("button", { name: `Remove ${boardTitle} board` })
       .click();
 
-    await expect(page.getByRole("alert")).toContainText(
-      "It remains open; try again."
-    );
+    await expect(
+      page.getByRole("alert").filter({ hasText: "It remains open; try again." })
+    ).toBeVisible();
     await expect(
       page.locator(`[data-board-title="${boardTitle}"]`)
     ).toBeAttached();

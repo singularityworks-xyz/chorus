@@ -1,13 +1,7 @@
 import type { Page } from "@playwright/test";
-import { expect, test } from "@playwright/test";
-import { E2E_REPO_DIR, TOKEN } from "./serve-env";
-
-async function signIn(page: Page): Promise<void> {
-  await page.goto("/login");
-  await page.getByLabel("Access token").fill(TOKEN);
-  await page.getByRole("button", { name: "Continue" }).click();
-  await page.waitForURL("/");
-}
+import { expect } from "@playwright/test";
+import { E2E_REPO_DIR } from "./serve-env";
+import { signIn, test } from "./workspace-fixture";
 
 async function createBoard(page: Page, title: string): Promise<void> {
   await page.evaluate(
@@ -51,6 +45,7 @@ async function selectBoard(page: Page, title: string): Promise<void> {
 
   await page.getByRole("combobox").click();
   await page.getByRole("option", { name: title }).click();
+  await page.getByRole("button", { name: "Fit view" }).click();
 }
 
 test.describe("review mode control", () => {
@@ -101,9 +96,11 @@ test.describe("review mode control", () => {
 
     const saveButton = page.getByRole("button", { name: "Saving review mode" });
     await expect(saveButton).toBeDisabled();
-    await expect(page.getByRole("alert")).toContainText(
-      "Your previous setting was restored"
-    );
+    await expect(
+      page
+        .getByRole("alert")
+        .filter({ hasText: "Your previous setting was restored" })
+    ).toBeVisible();
     await expect(
       page.getByRole("button", { name: "Auto review mode" })
     ).toBeEnabled();
