@@ -1,11 +1,11 @@
 {
   "name": "@chorus/web",
-  "version": "0.0.82",
+  "version": "0.1.41",
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000 --turbopack",
     "dev:webpack": "next dev -p 3000",
-    "build": "next build",
+    "build": "next build --webpack && bun scripts/package-standalone.ts",
     "start": "next start",
     "check-types": "tsc --noEmit"
   },

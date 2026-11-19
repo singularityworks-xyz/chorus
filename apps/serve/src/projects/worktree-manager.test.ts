@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { SandboxEscapeError } from "../paths/sandbox";
@@ -34,7 +40,7 @@ function makeRepo(prefix: string): string {
     cwd: dir,
     windowsHide: true,
   });
-  return dir;
+  return realpathSync(dir);
 }
 
 function worktreeList(repo: string): string[] {
@@ -45,7 +51,7 @@ function worktreeList(repo: string): string[] {
     .toString()
     .split("\n")
     .filter((line) => line.startsWith("worktree "))
-    .map((line) => resolve(line.slice("worktree ".length)));
+    .map((line) => realpathSync(line.slice("worktree ".length)));
 }
 
 async function seedBoard(

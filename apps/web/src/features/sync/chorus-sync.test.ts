@@ -4,7 +4,12 @@ import {
   type ChorusSyncOptions,
   WS_CLOSE_UNAUTHORIZED,
 } from "./chorus-sync";
-import { LAST_SEQ_KEY, SNAPSHOT_KEY, writePersistedSnapshot } from "./last-seq";
+import {
+  LAST_SEQ_KEY,
+  readPersistedSnapshot,
+  SNAPSHOT_KEY,
+  writePersistedSnapshot,
+} from "./last-seq";
 import { SocketAuthenticationExpiredError } from "./socket-credentials";
 import {
   approvalEvent,
@@ -24,6 +29,9 @@ interface Harness {
   storage: FakeStorage | HostileStorage | null;
   sync: ChorusSync;
 }
+
+const TEST_WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
+const REPLACEMENT_WORKSPACE_ID = "22222222-2222-4222-8222-222222222222";
 
 function makeSync(
   storage?: FakeStorage | HostileStorage | null,
@@ -87,7 +95,11 @@ function openSocket(sync: ChorusSync): FakeSocket {
 /** Boots a sync and walks it to a live state at sequence zero. */
 function liveSocket(sync: ChorusSync): FakeSocket {
   const socket = openSocket(sync);
-  socket.emit({ head: 0, type: "ready" });
+  socket.emit({
+    head: 0,
+    type: "ready",
+    workspaceId: TEST_WORKSPACE_ID,
+  });
   socket.emit({ data: snapshotFixture(), seq: 0, type: "snapshot" });
   return socket;
 }
@@ -116,7 +128,12 @@ describe("handshake and resume (plan P5 task 1)", () => {
 
   test("a persisted cursor and snapshot are restored, then resumed from", () => {
     const storage = new FakeStorage();
-    writePersistedSnapshot(storage, snapshotFixture({ boards: [] }), 412);
+    writePersistedSnapshot(
+      storage,
+      snapshotFixture({ boards: [] }),
+      412,
+      TEST_WORKSPACE_ID
+    );
     const restored: { seq: number; snapshot: unknown }[] = [];
     const scheduler = new FakeScheduler();
 
@@ -147,7 +164,59 @@ describe("handshake and resume (plan P5 task 1)", () => {
     expect(JSON.parse(socket.sent[0] as string)).toEqual({
       since: 412,
       type: "hello",
+      workspaceId: TEST_WORKSPACE_ID,
     });
+  });
+
+  test("a changed workspace replaces a same-sequence cached snapshot", () => {
+    const storage = new FakeStorage();
+    const previous = snapshotFixture({ boards: [] });
+    writePersistedSnapshot(storage, previous, 9, TEST_WORKSPACE_ID);
+    const { sync } = makeSync(storage);
+    const socket = openSocket(sync);
+
+    expect(JSON.parse(socket.sent[0] as string)).toEqual({
+      since: 9,
+      type: "hello",
+      workspaceId: TEST_WORKSPACE_ID,
+    });
+
+    socket.emit({
+      head: 9,
+      type: "ready",
+      workspaceId: REPLACEMENT_WORKSPACE_ID,
+    });
+    const replacement = snapshotFixture({ boards: [] });
+    socket.emit({ data: replacement, seq: 9, type: "snapshot" });
+
+    expect(sync.state.workspaceId).toBe(REPLACEMENT_WORKSPACE_ID);
+    expect(sync.state.snapshot).toEqual(replacement);
+    expect(readPersistedSnapshot(storage)?.workspaceId).toBe(
+      REPLACEMENT_WORKSPACE_ID
+    );
+  });
+
+  test("an older server without workspace identity is explicitly resynced", () => {
+    const storage = new FakeStorage();
+    writePersistedSnapshot(
+      storage,
+      snapshotFixture({ boards: [] }),
+      9,
+      TEST_WORKSPACE_ID
+    );
+    const { sync } = makeSync(storage);
+    const socket = openSocket(sync);
+
+    socket.emit({ head: 9, type: "ready" });
+    expect(socket.sentTypes).toEqual(["hello", "resync"]);
+
+    socket.emit({
+      data: snapshotFixture({ boards: [] }),
+      seq: 9,
+      type: "snapshot",
+    });
+    expect(sync.state.workspaceId).toBeNull();
+    expect(readPersistedSnapshot(storage)?.workspaceId).toBeNull();
   });
 
   test("a cursor without its snapshot forces a snapshot instead of a gap", () => {
@@ -242,6 +311,7 @@ describe("handshake and resume (plan P5 task 1)", () => {
     expect(JSON.parse(second.sent[0] as string)).toEqual({
       since: 1,
       type: "hello",
+      workspaceId: TEST_WORKSPACE_ID,
     });
   });
 
@@ -253,7 +323,11 @@ describe("handshake and resume (plan P5 task 1)", () => {
 
     expect(sync.handshakeInFlight).toBe(true);
 
-    socket.emit({ head: 0, type: "ready" });
+    socket.emit({
+      head: 0,
+      type: "ready",
+      workspaceId: TEST_WORKSPACE_ID,
+    });
 
     expect(sync.handshakeInFlight).toBe(false);
   });
@@ -290,7 +364,11 @@ describe("handshake and resume (plan P5 task 1)", () => {
 
     // One healthy session: open, then `ready`.
     openSocket(sync);
-    FakeSocket.last.emit({ head: 0, type: "ready" });
+    FakeSocket.last.emit({
+      head: 0,
+      type: "ready",
+      workspaceId: TEST_WORKSPACE_ID,
+    });
     scheduler.pending.length = 0;
     FakeSocket.last.remoteClose(1006);
 
@@ -319,7 +397,11 @@ describe("handshake and resume (plan P5 task 1)", () => {
   test("a gap burst sends one resync, not one per frame", () => {
     const { sync } = makeSync();
     const socket = openSocket(sync);
-    socket.emit({ head: 0, type: "ready" });
+    socket.emit({
+      head: 0,
+      type: "ready",
+      workspaceId: TEST_WORKSPACE_ID,
+    });
     socket.emit({ data: snapshotFixture(), seq: 0, type: "snapshot" });
 
     socket.sent.length = 0;
@@ -356,7 +438,11 @@ describe("handshake and resume (plan P5 task 1)", () => {
       url: "ws://localhost:2000/ws",
     });
     const socket = openSocket(sync);
-    socket.emit({ head: 0, type: "ready" });
+    socket.emit({
+      head: 0,
+      type: "ready",
+      workspaceId: TEST_WORKSPACE_ID,
+    });
     socket.emit({ data: snapshotFixture(), seq: 0, type: "snapshot" });
 
     // Live events advance the applied cursor but not the persisted one, which is
@@ -387,7 +473,11 @@ describe("handshake and resume (plan P5 task 1)", () => {
       },
     });
     const socket = openSocket(sync);
-    socket.emit({ head: 0, type: "ready" });
+    socket.emit({
+      head: 0,
+      type: "ready",
+      workspaceId: TEST_WORKSPACE_ID,
+    });
     socket.emit({ data: snapshotFixture(), seq: 0, type: "snapshot" });
 
     socket.sent.length = 0;
@@ -408,7 +498,11 @@ describe("applying state", () => {
     const { snapshots, sync } = makeSync(storage);
     const socket = openSocket(sync);
 
-    socket.emit({ head: 7, type: "ready" });
+    socket.emit({
+      head: 7,
+      type: "ready",
+      workspaceId: TEST_WORKSPACE_ID,
+    });
     socket.emit({ data: snapshotFixture(), seq: 7, type: "snapshot" });
 
     expect(sync.state.lastSeq).toBe(7);
@@ -893,7 +987,11 @@ describe("subscribers", () => {
     sync.subscribe((state) => seen.push(state.status));
 
     const socket = openSocket(sync);
-    socket.emit({ head: 1, type: "ready" });
+    socket.emit({
+      head: 1,
+      type: "ready",
+      workspaceId: TEST_WORKSPACE_ID,
+    });
 
     expect(seen).toContain("connecting");
     expect(seen).toContain("live");

@@ -253,8 +253,10 @@ export async function startEngine(options: {
   port: number;
 }): Promise<number> {
   const child = spawn(
-    resolveOpenCodeBinary(),
-    ["serve", "--port", String(options.port), "--hostname", "127.0.0.1"],
+    process.env.CHORUS_E2E_AGENT === "1" ? resolveOpenCodeBinary() : "bun",
+    process.env.CHORUS_E2E_AGENT === "1"
+      ? ["serve", "--port", String(options.port), "--hostname", "127.0.0.1"]
+      : ["e2e/scripted-engine.ts", String(options.port)],
     {
       cwd: options.cwd,
       env: { ...process.env },

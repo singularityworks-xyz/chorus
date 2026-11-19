@@ -66,7 +66,7 @@ jobs:
       - name: Install Dependencies
         run: bun ci
       - name: Unit Tests
-        run: bun test
+        run: bun test --parallel=4
 
   relay-postgres:
     name: Relay PostgreSQL
@@ -125,6 +125,46 @@ jobs:
         run: bun run build
       - name: Production Local Entry HTTP Check
         run: bun apps/serve/src/auth/testing/production-entry-smoke.ts
+
+  browser-e2e:
+    name: Production Browser E2E
+    needs: [lint, typecheck, unit-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - uses: actions/cache/restore@v5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+      - name: Install Dependencies
+        run: bun ci
+      - name: Prepare isolated OpenCode home
+        run: mkdir -p "${{ runner.temp }}/chorus-e2e-home"
+      - name: Install Chromium and system dependencies
+        run: bunx playwright install --with-deps chromium
+        env:
+          HOME: ${{ runner.temp }}/chorus-e2e-home
+      - name: Run Production Browser E2E
+        run: bun run e2e
+        env:
+          HOME: ${{ runner.temp }}/chorus-e2e-home
+          CHORUS_E2E_DATA_DIR: ${{ runner.temp }}/chorus-e2e
+          CHORUS_E2E_REPO_DIR: ${{ runner.temp }}/chorus-e2e-repo
+      - name: Upload browser traces and server logs
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: production-browser-e2e-${{ github.run_id }}
+          path: |
+            test-results/
+            playwright-report/
+            ${{ runner.temp }}/chorus-e2e/
+          if-no-files-found: ignore
+          retention-days: 7
 
   integration-tests:
     name: Integration Tests
@@ -251,6 +291,7 @@ jobs:
       - unit-tests
       - relay-postgres
       - build
+      - browser-e2e
       - integration-tests
       - security
       - docker-build

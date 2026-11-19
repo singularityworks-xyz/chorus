@@ -76,6 +76,7 @@ export const INITIAL_WORKSPACE_STATE: WorkspaceState = {
   preferences: {
     boardViewMode: "relaxed",
     composerHintDismissed: false,
+    defaultModelSelection: null,
     recentlyUsedModels: [],
     speechVoiceId: null,
   },

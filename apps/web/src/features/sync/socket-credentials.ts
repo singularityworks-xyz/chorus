@@ -38,46 +38,20 @@ export async function prepareAuthenticatedSocketUrl(
 ): Promise<string> {
   const fetcher = options.fetcher ?? fetch;
   const socketUrl = new URL(baseUrl);
-
-  if (
-    options.allowLocalBootstrap &&
-    isLoopbackHostname(new URL(options.pageOrigin).hostname) &&
-    isLoopbackHostname(socketUrl.hostname)
-  ) {
-    const bootstrapUrl = new URL(
-      "/auth/local-session",
-      httpOriginForSocket(socketUrl)
-    );
-    if (options.localEntryPort !== undefined) {
-      bootstrapUrl.hostname = new URL(options.pageOrigin).hostname;
-      bootstrapUrl.port = String(options.localEntryPort);
-    }
-    const bootstrapResponse = await fetchCredentialEndpoint(
-      fetcher,
-      bootstrapUrl,
-      {
-        credentials: "include",
-        headers: { "x-chorus-local-bootstrap": "1" },
-        method: "POST",
-      }
-    ).catch((error: unknown) => {
-      if (options.localEntryPort !== undefined) {
-        return null;
-      }
-      throw error;
-    });
-    // Existing authenticated sessions still work on unmanaged production hosts
-    // where the optional private listener is absent. Remote browsers never try it.
-    if (bootstrapResponse && ![403, 404].includes(bootstrapResponse.status)) {
-      assertCredentialResponse(bootstrapResponse, "local sign-in");
-    }
-  }
-
-  const deviceResponse = await fetchCredentialEndpoint(
+  const localBootstrapSucceeded = await bootstrapLocalSession(
     fetcher,
-    "/api/auth/device",
-    { method: "POST" }
+    socketUrl,
+    options
   );
+
+  let deviceResponse = await registerDevice(fetcher);
+  if (
+    deviceResponse.status === 401 &&
+    localBootstrapSucceeded &&
+    (await bootstrapLocalSession(fetcher, socketUrl, options))
+  ) {
+    deviceResponse = await registerDevice(fetcher);
+  }
   assertCredentialResponse(deviceResponse, "device registration");
 
   if (httpOriginForSocket(socketUrl) === new URL(options.pageOrigin).origin) {
@@ -105,6 +79,55 @@ export async function prepareAuthenticatedSocketUrl(
 
   socketUrl.searchParams.set("ticket", parsed.data.ticket);
   return socketUrl.toString();
+}
+
+async function bootstrapLocalSession(
+  fetcher: SocketCredentialFetcher,
+  socketUrl: URL,
+  options: SocketCredentialOptions
+): Promise<boolean> {
+  if (
+    !(
+      options.allowLocalBootstrap &&
+      isLoopbackHostname(new URL(options.pageOrigin).hostname) &&
+      isLoopbackHostname(socketUrl.hostname)
+    )
+  ) {
+    return false;
+  }
+
+  const bootstrapUrl = new URL(
+    "/auth/local-session",
+    httpOriginForSocket(socketUrl)
+  );
+  if (options.localEntryPort !== undefined) {
+    bootstrapUrl.hostname = new URL(options.pageOrigin).hostname;
+    bootstrapUrl.port = String(options.localEntryPort);
+  }
+
+  const response = await fetchCredentialEndpoint(fetcher, bootstrapUrl, {
+    credentials: "include",
+    headers: { "x-chorus-local-bootstrap": "1" },
+    method: "POST",
+  }).catch((error: unknown) => {
+    if (options.localEntryPort !== undefined) {
+      return null;
+    }
+    throw error;
+  });
+  // Existing authenticated sessions still work on unmanaged production hosts
+  // where the optional private listener is absent. Remote browsers never try it.
+  if (!response || [403, 404].includes(response.status)) {
+    return false;
+  }
+  assertCredentialResponse(response, "local sign-in");
+  return response.ok;
+}
+
+function registerDevice(fetcher: SocketCredentialFetcher): Promise<Response> {
+  return fetchCredentialEndpoint(fetcher, "/api/auth/device", {
+    method: "POST",
+  });
 }
 
 async function fetchCredentialEndpoint(

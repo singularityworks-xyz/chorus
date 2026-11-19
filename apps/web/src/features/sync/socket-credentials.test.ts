@@ -81,6 +81,60 @@ describe("authenticated WebSocket URL preparation", () => {
     });
   });
 
+  test("retries device registration once after a fresh local session", async () => {
+    const paths: string[] = [];
+    let deviceAttempts = 0;
+    const url = await prepareAuthenticatedSocketUrl("ws://localhost:2000/ws", {
+      allowLocalBootstrap: true,
+      localEntryPort: 2001,
+      fetcher: (input) => {
+        const path = String(input);
+        paths.push(path);
+        if (path.endsWith("/auth/local-session")) {
+          return Promise.resolve(Response.json({ authenticated: true }));
+        }
+        if (path === "/api/auth/device") {
+          deviceAttempts += 1;
+          return Promise.resolve(
+            deviceAttempts === 1
+              ? new Response(null, { status: 401 })
+              : Response.json({ deviceId: "device-1" })
+          );
+        }
+        return Promise.resolve(Response.json({ ticket: "ab".repeat(16) }));
+      },
+      pageOrigin: "http://localhost:3000",
+    });
+
+    expect(paths).toEqual([
+      "http://localhost:2001/auth/local-session",
+      "/api/auth/device",
+      "http://localhost:2001/auth/local-session",
+      "/api/auth/device",
+      "/api/auth/ws-ticket",
+    ]);
+    expect(new URL(url).searchParams.get("ticket")).toBe("ab".repeat(16));
+  });
+
+  test("keeps an expired-session error when local device registration retry fails", async () => {
+    let deviceAttempts = 0;
+    await expect(
+      prepareAuthenticatedSocketUrl("ws://localhost:2000/ws", {
+        allowLocalBootstrap: true,
+        localEntryPort: 2001,
+        fetcher: (input) => {
+          if (String(input).endsWith("/auth/local-session")) {
+            return Promise.resolve(Response.json({ authenticated: true }));
+          }
+          deviceAttempts += 1;
+          return Promise.resolve(new Response(null, { status: 401 }));
+        },
+        pageOrigin: "http://localhost:3000",
+      })
+    ).rejects.toBeInstanceOf(SocketAuthenticationExpiredError);
+    expect(deviceAttempts).toBe(2);
+  });
+
   test("does not attempt local bootstrap from a LAN or remote browser", async () => {
     const paths: string[] = [];
     await prepareAuthenticatedSocketUrl("ws://192.168.1.8:2000/ws", {

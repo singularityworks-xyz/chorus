@@ -94,48 +94,42 @@ export function createProjectRoutes(
     .post(
       "/opencode/models",
       async ({ body }) => {
-        logger.info("route:open-models", {
-          directory: body.directory,
-        });
+        logger.info("route:open-models");
         return {
           opened: await projectService.openModels(body.directory),
         };
       },
       {
         body: t.Object({
-          directory: t.String(),
+          directory: t.Optional(t.String()),
         }),
       }
     )
     .post(
       "/opencode/connect",
       async ({ body }) => {
-        logger.info("route:run-connect", {
-          directory: body.directory,
-        });
+        logger.info("route:run-connect");
         return {
           opened: await projectService.runConnect(body.directory),
         };
       },
       {
         body: t.Object({
-          directory: t.String(),
+          directory: t.Optional(t.String()),
         }),
       }
     )
     .post(
       "/opencode/auth-login",
       async ({ body }) => {
-        logger.info("route:auth-login", {
-          directory: body.directory,
-        });
+        logger.info("route:auth-login");
         return {
           launched: await projectService.launchAuthLogin(body.directory),
         };
       },
       {
         body: t.Object({
-          directory: t.String(),
+          directory: t.Optional(t.String()),
         }),
       }
     )

@@ -3,9 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 import { safeNotificationReturnTo } from "./browser";
+import { notificationFocusDecision } from "./notification-focus-state";
 
 export function NotificationFocus() {
-  const { boards, focusBoardLocally, hydrated } = useWorkspace();
+  const { boards, focusBoardLocally, hydrated, sessionStatus } = useWorkspace();
   const handledTarget = useRef<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -20,17 +21,23 @@ export function NotificationFocus() {
     if (target === "/") {
       return;
     }
-    handledTarget.current = target;
     const params = new URLSearchParams(target.slice(2));
-    const boardId = params.get("board");
-    const cardId = params.get("card");
-    if (
-      !(boardId && cardId && boards.some((board) => board.boardId === boardId))
-    ) {
+    const decision = notificationFocusDecision({
+      boardId: params.get("board"),
+      boards,
+      cardId: params.get("card"),
+      sessionStatus,
+    });
+    if (decision.state === "wait") {
+      return;
+    }
+    handledTarget.current = target;
+    if (decision.state === "unavailable") {
       setMessage("This approval link is no longer available.");
       return;
     }
 
+    const { boardId, cardId } = decision;
     focusBoardLocally(boardId);
     let attempts = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -68,7 +75,7 @@ export function NotificationFocus() {
         clearTimeout(timer);
       }
     };
-  }, [boards, focusBoardLocally, hydrated]);
+  }, [boards, focusBoardLocally, hydrated, sessionStatus]);
 
   if (!message) {
     return null;

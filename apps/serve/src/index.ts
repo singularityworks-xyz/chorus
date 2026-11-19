@@ -103,6 +103,7 @@ const processManager = config.opencodePerWorktree
   ? null
   : new OpenCodeProcessManager({
       baseUrl: config.opencodeBaseUrl,
+      databasePath: path.resolve(config.dataDir, "opencode.db"),
       directory: config.opencodeDirectory,
       port: config.opencodePort,
       username: config.opencodeUsername,
@@ -111,6 +112,7 @@ const processManager = config.opencodePerWorktree
     });
 const engineRegistry = config.opencodePerWorktree
   ? new EngineRegistry({
+      databasePath: path.resolve(config.dataDir, "opencode.db"),
       expectedVersion: sdkVersion(),
       username: config.opencodeUsername,
       password: config.opencodePassword,
@@ -418,6 +420,7 @@ const projectService = new ProjectService(
   (directory) => bridge.subscribeDirectory(directory)
 );
 
+let lastLoggedWorkspaceCommitSeq = 0;
 bridge.subscribe(async (event) => {
   // No raw opencode event fan-out. Agent events reach clients as sequenced
   // Chorus events through the store, so external payload shapes never appear on
@@ -442,8 +445,18 @@ bridge.subscribe(async (event) => {
     return;
   }
 
-  if (event.activity === "error") {
+  if (event.activity === "error" || event.activity === "idle") {
     watchdog.stop(event.sessionID);
+  } else if (event.activity === "thinking" || event.activity === "writing") {
+    const board = workspaceStore.getBoardBySessionId(event.sessionID);
+    if (board?.session.currentTaskId) {
+      watchdog.observeActivity(event.sessionID, {
+        boardId: board.boardId,
+        directory: board.repo.worktree ?? board.repo.directory,
+      });
+    } else {
+      watchdog.reset(event.sessionID);
+    }
   } else {
     watchdog.reset(event.sessionID);
   }
@@ -453,11 +466,18 @@ bridge.subscribe(async (event) => {
     return;
   }
 
+  if (commit.lastSeq <= lastLoggedWorkspaceCommitSeq) {
+    return;
+  }
+  lastLoggedWorkspaceCommitSeq = commit.lastSeq;
+
   logger.info("workspace-commit", {
-    sessionID: event.sessionID,
     boardId: commit.boardId,
     seq: commit.lastSeq,
     events: commit.events.map((entry) => entry.type),
+    ...(commit.boardId && event.sessionID
+      ? { sessionID: event.sessionID }
+      : {}),
   });
 });
 
@@ -646,16 +666,23 @@ logger.info("server-running", {
 
 const SHUTDOWN_TIMEOUT_MS = 5000;
 let isShuttingDown = false;
+let shutdownPhase = "idle";
 
 async function gracefulShutdown(signal: string): Promise<void> {
   if (isShuttingDown) {
     return;
   }
   isShuttingDown = true;
+  // Disable engine restarts before asynchronous state flushing. Otherwise an
+  // engine that exits while the workspace is draining can be mistaken for a
+  // crash and restarted during graceful shutdown.
+  processManager?.beginShutdown();
+  engineRegistry?.beginShutdown();
+  shutdownPhase = "stopping-dispatcher";
   logger.info("server-shutdown", { signal });
 
   const shutdownTimeout = setTimeout(() => {
-    logger.warn("shutdown-timeout-force-kill");
+    logger.warn("shutdown-timeout-force-kill", { phase: shutdownPhase });
     remoteAccess.forceKill();
     forceKillOpencode();
     process.exit(1);
@@ -667,21 +694,33 @@ async function gracefulShutdown(signal: string): Promise<void> {
     // and later async flushes (snapshot/coalescer) slot in without
     // reordering.
     pushDispatcher.stop();
+    shutdownPhase = "closing-remote-access";
     await remoteAccess.close();
+    shutdownPhase = "closing-workspace-hub";
     hub.close();
+    shutdownPhase = "stopping-opencode-bridge";
     bridge.stop();
-    await app.server?.stop();
+    shutdownPhase = "stopping-http-server";
+    // Bun's default stop waits for every open WebSocket to close. The hub has
+    // already sent the 1001 shutdown frame to registered clients; close any
+    // remaining active requests and unregistered sockets so shutdown remains
+    // bounded even while browsers or health checks are reconnecting.
+    await app.server?.stop(true);
+    shutdownPhase = "stopping-local-entry";
     await localEntry?.stop(true);
     // Order matters: stop intake, then tear down state channels, then flush
     // durable state, then children. store.close() drains the serial queue,
     // writes a final snapshot, and folds the WAL so a cold copy of chorus.db is
     // a complete backup.
+    shutdownPhase = "flushing-workspace-store";
     await workspaceStore.close();
+    shutdownPhase = "stopping-managed-engines";
     await Promise.all([
       processManager?.stop() ?? Promise.resolve(),
       engineRegistry?.stop() ?? Promise.resolve(),
     ]);
     clearTimeout(shutdownTimeout);
+    shutdownPhase = "complete";
     logger.info("shutdown-complete");
     process.exit(0);
   } catch (error) {

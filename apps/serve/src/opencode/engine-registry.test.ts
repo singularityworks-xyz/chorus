@@ -24,9 +24,11 @@ function fixtureDirectory(): string {
 }
 
 function createHarness({
+  databasePath,
   limit = 8,
   now = () => Date.now(),
 }: {
+  databasePath?: string;
   limit?: number;
   now?: () => number;
 } = {}) {
@@ -40,12 +42,14 @@ function createHarness({
       nextPort += 1;
       return Promise.resolve(nextPort);
     },
+    databasePath,
     expectedVersion: "1.19.0",
     maxEngines: limit,
     now,
     managerFactory: (input) => {
       const manager: ManagedEngine = {
         assertReady: mock(async () => undefined),
+        beginShutdown: mock(() => undefined),
         start: mock(async () => undefined),
         stop: mock(async () => undefined),
       };
@@ -57,6 +61,23 @@ function createHarness({
 }
 
 describe("EngineRegistry", () => {
+  test("beginShutdown disables allocations and notifies owned managers", async () => {
+    const directory = fixtureDirectory();
+    const { managers, registry } = createHarness();
+    try {
+      await registry.adapterForDirectory(directory);
+
+      registry.beginShutdown();
+
+      expect(managers[0]?.manager.beginShutdown).toHaveBeenCalledTimes(1);
+      await expect(
+        registry.adapterForDirectory(fixtureDirectory())
+      ).rejects.toBeInstanceOf(EngineUnavailableError);
+    } finally {
+      await registry.stop();
+    }
+  });
+
   test("shutdown cancels startup and queued allocations without leaking an engine", async () => {
     let releaseStartup: () => void = () => undefined;
     let notifyStarted: () => void = () => undefined;
@@ -68,6 +89,7 @@ describe("EngineRegistry", () => {
     });
     const manager: ManagedEngine = {
       assertReady: mock(async () => undefined),
+      beginShutdown: mock(() => undefined),
       start: mock(() => {
         notifyStarted();
         return startup;
@@ -172,7 +194,8 @@ describe("EngineRegistry", () => {
   test("starts one engine per canonical directory with distinct allocated ports", async () => {
     const firstDirectory = fixtureDirectory();
     const secondDirectory = fixtureDirectory();
-    const { managers, registry } = createHarness();
+    const databasePath = join(fixtureRoot, ".chorus", "opencode.db");
+    const { managers, registry } = createHarness({ databasePath });
     try {
       await Promise.all([
         registry.adapterForDirectory(firstDirectory),
@@ -183,6 +206,10 @@ describe("EngineRegistry", () => {
       expect(managers.map(({ input }) => input.adoptExisting)).toEqual([
         false,
         false,
+      ]);
+      expect(managers.map(({ input }) => input.databasePath)).toEqual([
+        databasePath,
+        databasePath,
       ]);
       expect(managers.map(({ input }) => input.baseUrl)).toEqual(
         managers.map(({ input }) => `http://127.0.0.1:${input.port}`)

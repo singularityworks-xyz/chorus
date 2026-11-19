@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { loadConfig } from "../config";
 import {
+  createOpenCodeEnvironment,
   EngineUnavailableError,
   OpenCodeProcessManager,
   resolveOpenCodeBinary,
@@ -38,6 +41,18 @@ describe("opencode engine address", () => {
     const binary = resolveOpenCodeBinary();
     expect(binary).toContain("opencode-ai");
     expect(existsSync(binary)).toBe(true);
+  });
+
+  test("isolates managed OpenCode storage and preserves other environment values", () => {
+    const environment = createOpenCodeEnvironment("/chorus/opencode.db", {
+      OPENAI_API_KEY: "test-key",
+      OPENCODE_DB: "/operator/opencode.db",
+    });
+
+    expect(environment).toEqual({
+      OPENAI_API_KEY: "test-key",
+      OPENCODE_DB: "/chorus/opencode.db",
+    });
   });
 
   test("defaults the port and the base url to the same place", () => {
@@ -117,6 +132,106 @@ describe("opencode engine address", () => {
         // Not ours: serve adopted it, so a failed probe must never kill it.
         expect(manager.observedVersion).toBe("1.19.0");
         await manager.stop();
+      } finally {
+        server.stop(true);
+      }
+    });
+
+    test("restarts an owned engine after an unexpected child exit", async () => {
+      const directory = mkdtempSync(join(tmpdir(), "chorus-engine-restart-"));
+      const pidFile = join(directory, "engine-instance.txt");
+      const reservation = Bun.serve({
+        fetch: () => new Response(),
+        hostname: "127.0.0.1",
+        port: 0,
+      });
+      const port = reservation.port;
+      reservation.stop(true);
+      let spawnCount = 0;
+      const manager = new OpenCodeProcessManager({
+        baseUrl: `http://127.0.0.1:${String(port)}`,
+        directory,
+        expectedVersion: "1.19.0",
+        maxRestarts: 1,
+        port,
+        readinessTimeoutMs: 3000,
+        spawnEngine: (port, hostname) => {
+          spawnCount += 1;
+          const fixture = `
+            import { writeFileSync } from "node:fs";
+            const server = Bun.serve({
+              fetch: () => Response.json({ healthy: true, version: "1.19.0" }),
+              hostname: ${JSON.stringify(hostname)},
+              port: ${String(port)},
+            });
+            writeFileSync(${JSON.stringify(pidFile)}, "${String(spawnCount)}:" + String(process.pid));
+            setInterval(() => {}, 60_000);
+            void server;
+          `;
+          return Bun.spawn([process.execPath, "-e", fixture], {
+            cwd: directory,
+            stdin: "ignore",
+            stderr: "pipe",
+            stdout: "pipe",
+            windowsHide: true,
+          });
+        },
+      });
+
+      try {
+        await manager.start();
+        const initial = readFileSync(pidFile, "utf8").split(":");
+        const initialGeneration = Number(initial[0]);
+        const initialPid = Number(initial[1]);
+        expect(initialGeneration).toBe(1);
+        expect(Number.isInteger(initialPid)).toBe(true);
+
+        process.kill(initialPid, "SIGKILL");
+
+        const deadline = Date.now() + 10_000;
+        let restartedGeneration = 0;
+        while (Date.now() < deadline) {
+          const current = readFileSync(pidFile, "utf8").split(":");
+          restartedGeneration = Number(current[0]);
+          if (restartedGeneration > initialGeneration && manager.ready) {
+            break;
+          }
+          await Bun.sleep(25);
+        }
+
+        expect(restartedGeneration).toBe(2);
+        expect(spawnCount).toBe(2);
+        await manager.assertReady("1.19.0");
+        expect(manager.ready).toBe(true);
+      } finally {
+        await manager.stop();
+        rmSync(directory, { force: true, recursive: true });
+      }
+    });
+
+    test("beginShutdown immediately marks an adopted engine unavailable", async () => {
+      const server = Bun.serve({
+        fetch: () => Response.json({ healthy: true, version: "1.19.0" }),
+        hostname: "127.0.0.1",
+        port: 0,
+      });
+      const manager = new OpenCodeProcessManager({
+        directory: "/tmp",
+        port: server.port,
+      });
+
+      try {
+        await manager.start();
+        expect(manager.ready).toBe(true);
+
+        manager.beginShutdown();
+
+        expect(manager.ready).toBe(false);
+        await manager.stop();
+        expect(
+          (await fetch(`http://127.0.0.1:${String(server.port)}/global/health`))
+            .ok
+        ).toBe(true);
       } finally {
         server.stop(true);
       }

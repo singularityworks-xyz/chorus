@@ -1,17 +1,24 @@
 import {
+  boardAutocompleteRequestSchema,
+  boardAutocompleteResponseSchema,
+  boardSessionHistoryCommandSchema,
   queueBoardPromptInputSchema,
   sessionFileDiffsSchema,
 } from "@chorus/contracts";
 import { createLogger } from "@chorus/logger";
+import { ReferenceLookupError } from "@chorus/oc-adapter";
 import { Elysia, t } from "elysia";
 import { assertRegisteredRoot, UnregisteredRootError } from "../auth/roots";
 import type { OpenCodeBridge } from "../bridge/opencode/bridge";
 import { EngineUnavailableError } from "../opencode/process-manager";
+import { RepositoryRegistryError } from "../projects/repository-registry";
 import { getDiff, getGitStatus, restore, track } from "../snapshot";
 import { getRevertState } from "../snapshot/session-revert";
 import type { BoardTaskService } from "../tasks/board-task-service";
 import {
   BoardLifecycleError,
+  BoardTaskCommandError,
+  GlobalModelNotConfiguredError,
   SessionOwnershipError,
 } from "../tasks/board-task-service";
 import {
@@ -19,7 +26,10 @@ import {
   resolveSessionDirectory,
   UnknownSessionError,
 } from "../tasks/session-directory";
-import type { WorkspaceStore } from "../workspace/store";
+import {
+  pendingApprovalConflictMessage,
+  type WorkspaceStore,
+} from "../workspace/store";
 
 const logger = createLogger(
   {
@@ -27,6 +37,98 @@ const logger = createLogger(
   },
   "ROUTES"
 );
+const LEADING_SLASHES = /^\/+/;
+const LEADING_DOT_SEGMENTS = /^(\.\/)+/;
+const PATH_SEPARATORS = /[\\/]/;
+const WINDOWS_DRIVE_PREFIX = /^[A-Za-z]:/;
+
+function boardTaskCommandStatus(error: BoardTaskCommandError): number {
+  switch (error.code) {
+    case "board_not_found":
+    case "task_not_found":
+      return 404;
+    case "task_prompt_missing":
+    case "task_review_invalid":
+      return 422;
+    case "prompt_dispatch_failed":
+    case "session_command_failed":
+      return 502;
+    case "session_history_unavailable":
+      return 503;
+    default:
+      return 409;
+  }
+}
+
+function pendingApprovalConflict(
+  status: "already_resolving" | "not_pending",
+  set: { status?: number | string }
+): { code: string; message: string } {
+  set.status = 409;
+  return {
+    code: "pending_approval_conflict",
+    message: pendingApprovalConflictMessage(status),
+  };
+}
+
+function mapRouteError(error: unknown): {
+  code: string;
+  message: string;
+  status: number;
+} | null {
+  if (!(error instanceof Error)) {
+    return null;
+  }
+  if (error instanceof EngineUnavailableError) {
+    return { code: error.code, message: error.message, status: 503 };
+  }
+  if (error instanceof ReferenceLookupError) {
+    return {
+      code: "autocomplete_unavailable",
+      message:
+        "Could not load board suggestions. Check the provider connection and retry.",
+      status: 502,
+    };
+  }
+  if (error instanceof UnknownSessionError) {
+    return { code: "unknown_session", message: error.message, status: 404 };
+  }
+  if (error instanceof UnregisteredRootError) {
+    return { code: "unregistered_root", message: error.message, status: 400 };
+  }
+  if (error instanceof RepositoryRegistryError) {
+    return {
+      code: error.code,
+      message: error.message,
+      status: error.code === "unregistered_repository_root" ? 403 : 400,
+    };
+  }
+  if (error instanceof SessionOwnershipError) {
+    return {
+      code: error.code,
+      message: error.message,
+      status: error.code === "session_directory_unknown" ? 503 : 409,
+    };
+  }
+  if (error instanceof BoardLifecycleError) {
+    return {
+      code: error.code,
+      message: error.message,
+      status: error.code === "board_abort_failed" ? 504 : 409,
+    };
+  }
+  if (error instanceof GlobalModelNotConfiguredError) {
+    return { code: error.code, message: error.message, status: 409 };
+  }
+  if (error instanceof BoardTaskCommandError) {
+    return {
+      code: error.code,
+      message: error.message,
+      status: boardTaskCommandStatus(error),
+    };
+  }
+  return null;
+}
 
 /**
  * Validates a client-supplied `directory` against the boards the workspace
@@ -85,31 +187,12 @@ export function createHttpRoutes(
        * fault and hides the actionable message from anything keying on status.
        */
       .onError(({ error, set }) => {
-        if (error instanceof EngineUnavailableError) {
-          set.status = 503;
-          return { code: error.code, message: error.message };
+        const mappedError = mapRouteError(error);
+        if (!mappedError) {
+          return undefined;
         }
-        if (error instanceof UnknownSessionError) {
-          set.status = 404;
-          return { code: "unknown_session", message: error.message };
-        }
-
-        if (error instanceof UnregisteredRootError) {
-          set.status = 400;
-          return { code: "unregistered_root", message: error.message };
-        }
-
-        if (error instanceof SessionOwnershipError) {
-          set.status = error.code === "session_directory_unknown" ? 503 : 409;
-          return { code: error.code, message: error.message };
-        }
-
-        if (error instanceof BoardLifecycleError) {
-          set.status = error.code === "board_abort_failed" ? 504 : 409;
-          return { code: error.code, message: error.message };
-        }
-
-        return undefined;
+        set.status = mappedError.status;
+        return { code: mappedError.code, message: mappedError.message };
       })
       .get("/health", () => ({
         status: "ok",
@@ -117,6 +200,90 @@ export function createHttpRoutes(
       }))
 
       .get("/bridge/status", () => bridge.getStatus())
+
+      .get(
+        "/boards/:boardID/autocomplete",
+        async ({ params, query, set }) => {
+          const parsed = boardAutocompleteRequestSchema.safeParse(query);
+          if (!parsed.success) {
+            set.status = 422;
+            return {
+              code: "invalid_autocomplete_request",
+              message: "Choose a valid board suggestion lookup and try again.",
+            };
+          }
+
+          const board = workspaceStore.getBoard(params.boardID);
+          if (!board) {
+            throw new BoardTaskCommandError(
+              "board_not_found",
+              "This board is no longer available. Reopen it and try again."
+            );
+          }
+
+          boardTasks.assertBoardOpen(board.boardId);
+          const directory = board.repo.worktree ?? board.repo.directory;
+          await boardTasks.assertCheckoutAuthorized(directory);
+
+          const request = parsed.data;
+          switch (request.kind) {
+            case "commands":
+              return boardAutocompleteResponseSchema.parse({
+                kind: request.kind,
+                commands: await bridge.listAutocompleteCommands(directory),
+              });
+            case "skills":
+              return boardAutocompleteResponseSchema.parse({
+                kind: request.kind,
+                skills: await bridge.listAutocompleteSkills(directory),
+              });
+            case "files":
+              return boardAutocompleteResponseSchema.parse({
+                kind: request.kind,
+                files: (
+                  await bridge.findAutocompleteFiles(request.query, directory)
+                ).map((entry) => entry.path),
+              });
+            case "directory": {
+              const relativePath = normalizeAutocompletePath(request.path);
+              if (relativePath === null) {
+                set.status = 422;
+                return {
+                  code: "invalid_autocomplete_path",
+                  message: "Choose a folder inside this board and try again.",
+                };
+              }
+              return boardAutocompleteResponseSchema.parse({
+                kind: request.kind,
+                entries: await bridge.listAutocompleteDirectory(
+                  relativePath,
+                  directory
+                ),
+              });
+            }
+            default:
+              set.status = 422;
+              return {
+                code: "invalid_autocomplete_request",
+                message:
+                  "Choose a valid board suggestion lookup and try again.",
+              };
+          }
+        },
+        {
+          params: t.Object({ boardID: t.String() }),
+          query: t.Object({
+            kind: t.Union([
+              t.Literal("commands"),
+              t.Literal("skills"),
+              t.Literal("files"),
+              t.Literal("directory"),
+            ]),
+            query: t.Optional(t.String({ maxLength: 256 })),
+            path: t.Optional(t.String({ maxLength: 1024 })),
+          }),
+        }
+      )
 
       .post(
         "/tasks",
@@ -140,26 +307,121 @@ export function createHttpRoutes(
       )
 
       .post(
+        "/boards/:boardID/tasks/:taskID/run",
+        ({ params }) => boardTasks.runQueuedTask(params.boardID, params.taskID),
+        {
+          params: t.Object({ boardID: t.String(), taskID: t.String() }),
+        }
+      )
+
+      .post(
+        "/boards/:boardID/tasks/:taskID/retry",
+        ({ params }) => boardTasks.retryTask(params.boardID, params.taskID),
+        {
+          params: t.Object({ boardID: t.String(), taskID: t.String() }),
+        }
+      )
+
+      .post(
+        "/boards/:boardID/tasks/:taskID/abort",
+        async ({ params }) => ({
+          ...(await boardTasks.abortTask(params.boardID, params.taskID)),
+          accepted: true,
+        }),
+        {
+          params: t.Object({ boardID: t.String(), taskID: t.String() }),
+        }
+      )
+
+      .post(
+        "/boards/:boardID/tasks/:taskID/finalize-review",
+        async ({ params, body }) => ({
+          ...(await boardTasks.finalizeReview(
+            params.boardID,
+            params.taskID,
+            body
+          )),
+          accepted: true,
+        }),
+        {
+          params: t.Object({ boardID: t.String(), taskID: t.String() }),
+          body: t.Object({
+            plan: t.String(),
+            answers: t.Optional(t.Array(t.String())),
+          }),
+        }
+      )
+
+      .post(
+        "/boards/:boardID/tasks/:taskID/reject-review",
+        ({ params }) => boardTasks.rejectReview(params.boardID, params.taskID),
+        {
+          params: t.Object({ boardID: t.String(), taskID: t.String() }),
+        }
+      )
+
+      .get(
+        "/boards/:boardID/session/history",
+        ({ params }) => boardTasks.getSessionHistoryState(params.boardID),
+        {
+          params: t.Object({ boardID: t.String() }),
+        }
+      )
+
+      .post(
+        "/boards/:boardID/session/history/:command",
+        ({ params, set }) => {
+          const parsedCommand = boardSessionHistoryCommandSchema.safeParse(
+            params.command
+          );
+          if (!parsedCommand.success) {
+            set.status = 422;
+            return {
+              code: "invalid_session_history_command",
+              message: "Choose either undo or redo.",
+            };
+          }
+          return boardTasks.sessionHistoryCommand(
+            params.boardID,
+            parsedCommand.data
+          );
+        },
+        {
+          params: t.Object({
+            boardID: t.String(),
+            command: t.String(),
+          }),
+        }
+      )
+
+      .post(
         "/tasks/:sessionID/approve",
-        async ({ params, body }) => {
-          const result = await bridge.replyPermission({
-            directory: await directoryFor(params.sessionID),
-            requestID: body.requestID,
-            sessionID: params.sessionID,
-            reply: "once",
-            message: body.message,
-          });
-          if (result) {
-            await workspaceStore.resolvePendingApproval(
-              params.sessionID,
-              body.requestID
-            );
+        async ({ params, body, set }) => {
+          const directory = await directoryFor(params.sessionID);
+          const result = await workspaceStore.runPendingApprovalAction(
+            params.sessionID,
+            body.requestID,
+            () =>
+              bridge.replyPermission({
+                directory,
+                requestID: body.requestID,
+                sessionID: params.sessionID,
+                reply: "once",
+                message: body.message,
+              }),
+            { accepts: (accepted) => accepted, resume: true }
+          );
+          if (
+            result.status === "already_resolving" ||
+            result.status === "not_pending"
+          ) {
+            return pendingApprovalConflict(result.status, set);
           }
 
           return {
             sessionID: params.sessionID,
             requestID: body.requestID,
-            accepted: result,
+            accepted: result.status === "accepted",
             timestamp: Date.now(),
           };
         },
@@ -176,25 +438,32 @@ export function createHttpRoutes(
 
       .post(
         "/tasks/:sessionID/reject",
-        async ({ params, body }) => {
-          const result = await bridge.replyPermission({
-            directory: await directoryFor(params.sessionID),
-            requestID: body.requestID,
-            sessionID: params.sessionID,
-            reply: "reject",
-            message: body.message,
-          });
-          if (result) {
-            await workspaceStore.resolvePendingApproval(
-              params.sessionID,
-              body.requestID
-            );
+        async ({ params, body, set }) => {
+          const directory = await directoryFor(params.sessionID);
+          const result = await workspaceStore.runPendingApprovalAction(
+            params.sessionID,
+            body.requestID,
+            () =>
+              bridge.replyPermission({
+                directory,
+                requestID: body.requestID,
+                sessionID: params.sessionID,
+                reply: "reject",
+                message: body.message,
+              }),
+            { accepts: (accepted) => accepted }
+          );
+          if (
+            result.status === "already_resolving" ||
+            result.status === "not_pending"
+          ) {
+            return pendingApprovalConflict(result.status, set);
           }
 
           return {
             sessionID: params.sessionID,
             requestID: body.requestID,
-            accepted: result,
+            accepted: result.status === "accepted",
             timestamp: Date.now(),
           };
         },
@@ -210,54 +479,31 @@ export function createHttpRoutes(
       )
 
       .post(
-        "/tasks/:sessionID/finalize-review",
-        async ({ params, body }) => {
-          logger.info("finalize-review", {
-            sessionID: params.sessionID,
-            planPreview: body.plan?.slice(0, 100),
-          });
-
-          await bridge.promptSessionAsync({
-            directory: await directoryFor(params.sessionID),
-            sessionID: params.sessionID,
-            text: `The plan has been reviewed and finalized. Here is the final plan:\n\n${body.plan}\n\n${body.questions && body.questions.length > 0 ? `Answers to your questions:\n${body.questions.map((q: { question: string; answer: string }) => `- ${q.question}: ${q.answer}`).join("\n")}\n\n` : ""}Please proceed with implementing this plan.`,
-          });
-
-          return {
-            sessionID: params.sessionID,
-            accepted: true,
-            timestamp: Date.now(),
-          };
-        },
-        {
-          params: t.Object({
-            sessionID: t.String(),
-          }),
-          body: t.Object({
-            plan: t.String(),
-            questions: t.Optional(
-              t.Array(
-                t.Object({
-                  question: t.String(),
-                  answer: t.String(),
-                })
-              )
-            ),
-          }),
-        }
-      )
-
-      .post(
         "/tasks/:sessionID/abort",
         async ({ params }) => {
-          const result = await bridge.abortSession(
-            params.sessionID,
-            await directoryFor(params.sessionID)
-          );
+          const board = workspaceStore.getBoardBySessionId(params.sessionID);
+          if (!board) {
+            await directoryFor(params.sessionID);
+            return {
+              sessionID: params.sessionID,
+              accepted: false,
+              timestamp: Date.now(),
+            };
+          }
+          const taskId = board.session.currentTaskId;
+          if (!taskId) {
+            return {
+              sessionID: params.sessionID,
+              accepted: false,
+              timestamp: Date.now(),
+            };
+          }
+          const result = await boardTasks.abortTask(board.boardId, taskId);
 
           return {
             sessionID: params.sessionID,
-            accepted: result,
+            ...result,
+            accepted: true,
             timestamp: Date.now(),
           };
         },
@@ -296,20 +542,30 @@ export function createHttpRoutes(
 
       .post(
         "/tasks/:sessionID/questions/:requestID/reply",
-        async ({ params, body }) => {
-          await bridge.replyQuestion({
-            directory: await directoryFor(params.sessionID),
-            requestID: params.requestID,
-            answers: body.answers,
-          });
-          await workspaceStore.resolvePendingApproval(
+        async ({ params, body, set }) => {
+          const directory = await directoryFor(params.sessionID);
+          const result = await workspaceStore.runPendingApprovalAction(
             params.sessionID,
-            params.requestID
+            params.requestID,
+            () =>
+              bridge.replyQuestion({
+                directory,
+                requestID: params.requestID,
+                answers: body.answers,
+              }),
+            { resume: true }
           );
+          if (
+            result.status === "already_resolving" ||
+            result.status === "not_pending"
+          ) {
+            return pendingApprovalConflict(result.status, set);
+          }
 
           return {
             sessionID: params.sessionID,
             requestID: params.requestID,
+            accepted: result.status === "accepted",
             timestamp: Date.now(),
           };
         },
@@ -332,19 +588,24 @@ export function createHttpRoutes(
 
       .post(
         "/tasks/:sessionID/questions/:requestID/reject",
-        async ({ params }) => {
-          await bridge.rejectQuestion(
-            params.requestID,
-            await directoryFor(params.sessionID)
-          );
-          await workspaceStore.resolvePendingApproval(
+        async ({ params, set }) => {
+          const directory = await directoryFor(params.sessionID);
+          const result = await workspaceStore.runPendingApprovalAction(
             params.sessionID,
-            params.requestID
+            params.requestID,
+            () => bridge.rejectQuestion(params.requestID, directory)
           );
+          if (
+            result.status === "already_resolving" ||
+            result.status === "not_pending"
+          ) {
+            return pendingApprovalConflict(result.status, set);
+          }
 
           return {
             sessionID: params.sessionID,
             requestID: params.requestID,
+            accepted: result.status === "accepted",
             timestamp: Date.now(),
           };
         },
@@ -636,4 +897,20 @@ export function createHttpRoutes(
         }
       )
   );
+}
+
+/** Converts slash-triggered paths to board-relative paths and rejects escapes. */
+function normalizeAutocompletePath(path: string): string | null {
+  const relative = path
+    .replace(LEADING_SLASHES, "")
+    .replace(LEADING_DOT_SEGMENTS, "");
+  if (
+    path.startsWith("\\") ||
+    WINDOWS_DRIVE_PREFIX.test(relative) ||
+    relative.includes("\0") ||
+    relative.split(PATH_SEPARATORS).some((segment) => segment === "..")
+  ) {
+    return null;
+  }
+  return relative || ".";
 }

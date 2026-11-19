@@ -1,7 +1,6 @@
 "use client";
 
 import type { Columns } from "@chorus/contracts";
-import { useEffect, useState } from "react";
 import { Kanban, KanbanColumnBody } from "@/features/kanban/components/kanban";
 import { useKanbanCardActions } from "@/features/kanban/hooks/use-kanban-card-actions";
 import { useWorkspace } from "@/features/workspace/workspace-context";
@@ -29,8 +28,13 @@ import { useWorkspace } from "@/features/workspace/workspace-context";
 const LANES = ["queue", "in_progress", "approve", "done"] as const;
 
 export function MobileLaneList() {
-  const { boards, selectBoard, selectedBoardId, updateBoardColumns } =
-    useWorkspace();
+  const {
+    boards,
+    focusBoardLocally,
+    selectBoard,
+    selectedBoardId,
+    updateBoardColumns,
+  } = useWorkspace();
 
   const active =
     boards.find((board) => board.boardId === selectedBoardId) ?? boards[0];
@@ -111,6 +115,12 @@ export function MobileLaneList() {
         boardId={active.boardId}
         columns={active.columns}
         key={active.boardId}
+        onCreateTask={() => {
+          focusBoardLocally(active.boardId);
+          window.requestAnimationFrame(() => {
+            document.getElementById("chorus-prompt-input")?.focus();
+          });
+        }}
         onUpdateColumns={updateBoardColumns}
         reviewMode={active.reviewMode ?? "auto"}
         sessionId={active.session?.sessionId}
@@ -132,29 +142,22 @@ function MobileBoardBody({
   onUpdateColumns,
   reviewMode,
   sessionId,
+  onCreateTask,
 }: {
   boardId: string;
   columns: Columns;
   onUpdateColumns: (boardId: string, columns: Columns) => void;
   reviewMode: "manual" | "auto";
   sessionId: string | undefined;
+  onCreateTask: () => void;
 }) {
   const actions = useKanbanCardActions({
     boardId,
     columns,
     onUpdateColumns,
+    reviewMode,
     sessionId,
   });
-
-  // `KanbanColumnBody` reads review mode as a prop rather than owning it, so the
-  // phone view has to echo the change back immediately: the mutation round trip
-  // is slow enough that a toggle which appears to do nothing is
-  // indistinguishable from a broken one. The server value wins once its event
-  // lands, which the effect below picks up.
-  const [mode, setMode] = useState<"manual" | "auto">(reviewMode);
-  useEffect(() => {
-    setMode(reviewMode);
-  }, [reviewMode]);
 
   return (
     <div
@@ -178,16 +181,21 @@ function MobileBoardBody({
             key={lane}
           >
             <KanbanColumnBody
+              actionStates={actions.actionStates}
+              boardBusy={actions.boardBusy}
+              boardId={boardId}
               columnId={lane}
               onApprove={actions.handleApprove}
+              onCreateTask={onCreateTask}
               onPlanChange={actions.handlePlanChange}
               onQuestionsAnswered={actions.handleQuestionsAnswered}
               onReject={actions.handleReject}
-              onReviewModeChange={(nextMode) => {
-                setMode(nextMode);
-                actions.handleReviewModeChange(nextMode);
-              }}
-              reviewMode={mode}
+              onRetry={actions.handleRetry}
+              onReviewModeChange={actions.handleReviewModeChange}
+              onRun={actions.handleRun}
+              reviewMode={actions.reviewMode}
+              reviewModeError={actions.reviewModeError}
+              reviewModePending={actions.reviewModePending}
               tasks={actions.localColumns[lane] ?? []}
             />
           </section>

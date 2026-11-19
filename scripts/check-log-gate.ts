@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -64,6 +64,7 @@ function trackedSourceFiles(root: string): SourceFile[] {
   const paths = new TextDecoder().decode(result.stdout).split("\0");
   return paths
     .filter((path) => path.length > 0)
+    .filter((path) => existsSync(resolve(root, path)))
     .filter(
       (path) =>
         SOURCE_FILE.test(path) &&

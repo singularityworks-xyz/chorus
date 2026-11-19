@@ -1,5 +1,6 @@
 import type {
   BoardSeed,
+  BoardSessionHistoryCommand,
   WorkspaceBoard as ContractWorkspaceBoard,
   WorkspaceHistoryEntry as ContractWorkspaceHistoryEntry,
   WorkspacePreferences as ContractWorkspacePreferences,
@@ -10,6 +11,7 @@ import type {
 } from "@chorus/contracts";
 import type { Columns, Task } from "@/features/kanban/components/kanban";
 import type { PendingDrag } from "./reducer";
+import type { WorkspaceSessionStatus } from "./session-status";
 
 export type WorkspaceProject = ProjectListResponse["projects"][number];
 export type WorkspaceBoardSeed = BoardSeed;
@@ -26,6 +28,11 @@ export type WorkspacePreferences = ContractWorkspacePreferences;
 
 export interface PromptSubmissionResult extends QueueBoardPromptResponse {
   task: Task;
+}
+
+export interface SessionHistoryCommandResult {
+  error?: string;
+  ok: boolean;
 }
 
 export interface PromptPart {
@@ -50,6 +57,7 @@ export interface WorkspaceContextValue {
   createBoardFromHistory: (entry: WorkspaceHistoryEntry) => void;
   createBoardFromProject: (project: RepoProject) => void;
   dismissComposerHint: () => void;
+  dismissWorkspaceActionError: () => void;
   /** Focus a board on this device without changing the shared board selection. */
   focusBoardLocally: (boardId: string) => void;
   /**
@@ -59,19 +67,9 @@ export interface WorkspaceContextValue {
    * "connected, and the workspace really is empty".
    */
   hydrated: boolean;
+  isLoadingRecentProjects: boolean;
   isOpeningFolder: boolean;
   isQueueingPrompt: boolean;
-  kanbanHistory: {
-    canRedo: boolean;
-    canUndo: boolean;
-    redo: () => { columns: Columns; task: Task } | null;
-    recordMove: (
-      columnsBefore: Columns,
-      columnsAfter: Columns,
-      task: Task
-    ) => void;
-    undo: () => { columns: Columns; prompt: string; task: Task } | null;
-  };
   /** Highest contiguously applied sequence, for diagnostics and e2e assertions. */
   lastSeq: number;
   loadProjects: () => Promise<void>;
@@ -90,17 +88,24 @@ export interface WorkspaceContextValue {
     text: string;
   }) => Promise<PromptSubmissionResult | null>;
   recentProjects: WorkspaceProject[];
-  removeBoard: (boardId: string) => void;
+  recentProjectsError: string | null;
+  recentProjectsLoaded: boolean;
+  removeBoard: (boardId: string) => Promise<void>;
   restoredPrompt: string;
   restorePrompt: (text: string) => void;
   selectBoard: (boardId: string) => void;
   selectedBoard?: WorkspaceBoard;
   selectedBoardId: string | null;
-  sessionCommand: (command: "undo" | "redo") => Promise<boolean>;
+  sessionCommand: (
+    boardId: string,
+    command: BoardSessionHistoryCommand
+  ) => Promise<SessionHistoryCommandResult>;
+  sessionHistoryChange: { boardId: string; revision: number } | null;
   /** Socket status, so the UI can show a reconnecting strip. */
-  sessionStatus: "connecting" | "live" | "offline" | "auth-expired";
+  sessionStatus: WorkspaceSessionStatus;
   setBoardModel: (boardId: string, model: ModelSelection | null) => void;
   setBoardViewMode: (mode: WorkspacePreferences["boardViewMode"]) => void;
+  setDefaultModelSelection: (model: ModelSelection | null) => Promise<void>;
   setSpeechVoiceId: (voiceId: string | null) => void;
   updateBoardColumns: (boardId: string, columns: Columns) => void;
   updateBoardPosition: (
@@ -110,5 +115,6 @@ export interface WorkspaceContextValue {
   updateBoardReviewMode: (
     boardId: string,
     reviewMode: "manual" | "auto"
-  ) => void;
+  ) => Promise<void>;
+  workspaceActionError: string | null;
 }

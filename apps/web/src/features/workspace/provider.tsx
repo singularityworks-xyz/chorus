@@ -1,8 +1,10 @@
 "use client";
 
 import {
+  apiErrorSchema,
+  type BoardSessionHistoryCommand,
   boardSeedSchema,
-  projectListResponseSchema,
+  type ModelSelection,
   queueBoardPromptResponseSchema,
   type SequencedEvent,
   type VersionedSnapshot,
@@ -11,14 +13,27 @@ import {
 } from "@chorus/contracts";
 import posthog from "posthog-js";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { useKanbanHistory } from "@/features/kanban/hooks/use-kanban-history";
+import { sendBoardSessionHistoryCommand } from "@/features/kanban/board-session-history-client";
 import { useChorusSync } from "@/features/sync/use-chorus-sync";
+import { ChorusApiError } from "@/lib/chorus-api-error";
+import { PROJECT_LIST_ERROR, requestRecentProjects } from "./projects-client";
+import {
+  INITIAL_RECENT_PROJECTS_STATE,
+  recentProjectsReducer,
+} from "./recent-projects-state";
 import {
   DRAG_TIMEOUT_MS,
   INITIAL_WORKSPACE_STATE,
   workspaceReducer,
 } from "./reducer";
+import { isCurrentBoardSelection } from "./state";
 import type { WorkspaceContextValue } from "./types";
+import {
+  OPEN_FOLDER_ERROR,
+  WORKSPACE_MUTATION_ERROR,
+  workspaceActionErrorMessage,
+  workspaceApiError,
+} from "./workspace-action-error";
 import { WorkspaceContext } from "./workspace-context";
 
 /**
@@ -83,15 +98,29 @@ export function ChorusWorkspaceProvider({
   const [isQueueingPrompt, setIsQueueingPrompt] = useState(false);
   const [authExpired, setAuthExpired] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [recentProjects, setRecentProjects] = useState<
-    WorkspaceContextValue["recentProjects"]
-  >([]);
+  const [workspaceActionError, setWorkspaceActionError] = useState<
+    string | null
+  >(null);
+  const [recentProjectsState, dispatchRecentProjects] = useReducer(
+    recentProjectsReducer,
+    INITIAL_RECENT_PROJECTS_STATE
+  );
+  const {
+    error: recentProjectsError,
+    hasLoaded: recentProjectsLoaded,
+    isLoading: isLoadingRecentProjects,
+    projects: recentProjects,
+  } = recentProjectsState;
   const [restoredPrompt, setRestoredPrompt] = useState("");
+  const [sessionHistoryChange, setSessionHistoryChange] = useState<{
+    boardId: string;
+    revision: number;
+  } | null>(null);
 
   const clientIdRef = useRef(crypto.randomUUID());
   const revisionRef = useRef(0);
-
-  const kanbanHistory = useKanbanHistory();
+  const sessionHistoryRevisionRef = useRef(0);
+  const projectsLoadControllerRef = useRef<AbortController | null>(null);
 
   const selectedBoard = boards.find(
     (board) => board.boardId === selectedBoardId
@@ -211,6 +240,10 @@ export function ChorusWorkspaceProvider({
     [reportSyncUnauthorized]
   );
 
+  const dismissWorkspaceActionError = useCallback(() => {
+    setWorkspaceActionError(null);
+  }, []);
+
   /**
    * Sends one mutation.
    *
@@ -219,54 +252,116 @@ export function ChorusWorkspaceProvider({
    */
   const mutateWorkspace = useCallback(
     async (mutation: WorkspaceMutation): Promise<void> => {
-      const response = await fetch("/api/workspace", {
-        body: JSON.stringify(mutation),
-        headers: { "content-type": "application/json" },
-        method: "POST",
-      });
+      try {
+        const response = await fetch("/api/workspace", {
+          body: JSON.stringify(mutation),
+          headers: { "content-type": "application/json" },
+          method: "POST",
+          signal: AbortSignal.timeout(10_000),
+        });
 
-      if (reportUnauthorized(response)) {
-        throw new Error("unauthorized");
-      }
+        if (reportUnauthorized(response)) {
+          throw new ChorusApiError("unauthorized", "unauthorized");
+        }
 
-      if (!response.ok) {
-        throw new Error(`mutation failed: ${String(response.status)}`);
+        if (!response.ok) {
+          const payload: unknown = await response.json().catch(() => undefined);
+          throw workspaceApiError(payload, WORKSPACE_MUTATION_ERROR);
+        }
+
+        setWorkspaceActionError(null);
+      } catch (error) {
+        if (
+          !(error instanceof ChorusApiError && error.code === "unauthorized")
+        ) {
+          setWorkspaceActionError(
+            workspaceActionErrorMessage(error, WORKSPACE_MUTATION_ERROR)
+          );
+        }
+        throw error;
       }
     },
     [reportUnauthorized]
   );
 
   const loadProjects = useCallback(async () => {
-    try {
-      const response = await fetch("/api/projects", { cache: "no-store" });
+    projectsLoadControllerRef.current?.abort();
+    const controller = new AbortController();
+    projectsLoadControllerRef.current = controller;
+    dispatchRecentProjects({ type: "request-started" });
 
-      if (!response.ok) {
+    try {
+      const projects = await requestRecentProjects({
+        onUnauthorized: reportUnauthorized,
+        signal: controller.signal,
+      });
+
+      if (controller.signal.aborted) {
         return;
       }
 
-      setRecentProjects(
-        projectListResponseSchema.parse(await response.json()).projects
-      );
+      if (projects === null) {
+        dispatchRecentProjects({ type: "request-unauthorized" });
+        return;
+      }
+
+      dispatchRecentProjects({ projects, type: "request-succeeded" });
     } catch (error) {
-      console.error("Failed to load projects:", error);
+      if (controller.signal.aborted) {
+        return;
+      }
+      dispatchRecentProjects({
+        message: error instanceof Error ? error.message : PROJECT_LIST_ERROR,
+        type: "request-failed",
+      });
+    } finally {
+      if (projectsLoadControllerRef.current === controller) {
+        projectsLoadControllerRef.current = null;
+      }
     }
-  }, []);
+  }, [reportUnauthorized]);
 
   useEffect(() => {
-    loadProjects();
-  }, [loadProjects]);
+    // Credential bootstrap and the first socket handshake own initial auth.
+    // Reading protected routes in parallel can receive a 401 before the fresh
+    // local session cookie lands, which would cancel the successful handshake.
+    if (status !== "live" || recentProjectsLoaded) {
+      return;
+    }
+
+    loadProjects().catch((error: unknown) => {
+      dispatchRecentProjects({
+        message: error instanceof Error ? error.message : PROJECT_LIST_ERROR,
+        type: "request-failed",
+      });
+    });
+    return () => {
+      const controller = projectsLoadControllerRef.current;
+      projectsLoadControllerRef.current = null;
+      controller?.abort();
+    };
+  }, [loadProjects, recentProjectsLoaded, status]);
 
   // ── handlers ──────────────────────────────────────────────────────────────
 
   const openFolder = useCallback(async () => {
     setIsOpeningFolder(true);
+    setWorkspaceActionError(null);
 
     try {
       const response = await fetch("/api/projects/open-folder", {
         method: "POST",
       });
 
-      if (reportUnauthorized(response) || !response.ok) {
+      if (reportUnauthorized(response)) {
+        return;
+      }
+
+      if (!response.ok) {
+        const payload: unknown = await response.json().catch(() => undefined);
+        setWorkspaceActionError(
+          workspaceApiError(payload, OPEN_FOLDER_ERROR).message
+        );
         return;
       }
 
@@ -292,6 +387,11 @@ export function ChorusWorkspaceProvider({
       await loadProjects();
     } catch (error) {
       console.error("Failed to open folder:", error);
+      if (!(error instanceof ChorusApiError && error.code === "unauthorized")) {
+        setWorkspaceActionError(
+          workspaceActionErrorMessage(error, OPEN_FOLDER_ERROR)
+        );
+      }
     } finally {
       setIsOpeningFolder(false);
     }
@@ -341,7 +441,7 @@ export function ChorusWorkspaceProvider({
 
   const removeBoard = useCallback(
     (boardId: string) => {
-      mutateWorkspace(
+      return mutateWorkspace(
         createWorkspaceMutation(
           clientIdRef.current,
           revisionRef.current,
@@ -350,9 +450,7 @@ export function ChorusWorkspaceProvider({
             boardId,
           }
         )
-      ).catch((error: unknown) => {
-        console.error("Failed to remove board:", error);
-      });
+      );
     },
     [mutateWorkspace]
   );
@@ -361,6 +459,9 @@ export function ChorusWorkspaceProvider({
     (boardId: string) => {
       setLocalBoardFocus(null);
       dispatch({ boardId, type: "optimistic/drag-settle" });
+      if (isCurrentBoardSelection(persistedSelectedBoardId, boardId)) {
+        return;
+      }
       mutateWorkspace(
         createWorkspaceMutation(
           clientIdRef.current,
@@ -374,7 +475,7 @@ export function ChorusWorkspaceProvider({
         console.error("Failed to select board:", error);
       });
     },
-    [mutateWorkspace]
+    [mutateWorkspace, persistedSelectedBoardId]
   );
 
   const focusBoardLocally = useCallback((boardId: string) => {
@@ -436,7 +537,16 @@ export function ChorusWorkspaceProvider({
         }
 
         if (!response.ok) {
-          throw new Error(`Failed to queue prompt: ${String(response.status)}`);
+          const errorPayload = apiErrorSchema.safeParse(
+            await response.json().catch(() => undefined)
+          );
+          if (errorPayload.success) {
+            throw new ChorusApiError(
+              errorPayload.data.code,
+              errorPayload.data.message
+            );
+          }
+          throw new Error("prompt_request_failed");
         }
 
         const payload = queueBoardPromptResponseSchema.parse(
@@ -449,7 +559,7 @@ export function ChorusWorkspaceProvider({
         return {
           ...payload,
           task: {
-            id: `pending-${payload.timestamp}`,
+            id: payload.taskId,
             label:
               selectedBoard.repo.projectName ??
               selectedBoard.repo.directory.split("/").filter(Boolean).at(-1) ??
@@ -465,9 +575,6 @@ export function ChorusWorkspaceProvider({
             title: input.text.slice(0, 96),
           },
         };
-      } catch (error) {
-        console.error("Failed to queue prompt:", error);
-        return null;
       } finally {
         setIsQueueingPrompt(false);
       }
@@ -580,16 +687,14 @@ export function ChorusWorkspaceProvider({
       boardId: string,
       reviewMode: Parameters<WorkspaceContextValue["updateBoardReviewMode"]>[1]
     ) => {
-      mutateWorkspace(
+      return mutateWorkspace(
         createWorkspaceMutation(
           clientIdRef.current,
           revisionRef.current,
           "board.review_mode.set",
           { boardId, reviewMode }
         )
-      ).catch((error: unknown) => {
-        console.error("Failed to update board review mode:", error);
-      });
+      );
     },
     [mutateWorkspace]
   );
@@ -616,6 +721,20 @@ export function ChorusWorkspaceProvider({
     [mutateWorkspace]
   );
 
+  const setDefaultModelSelection = useCallback(
+    async (model: ModelSelection | null): Promise<void> => {
+      await mutateWorkspace(
+        createWorkspaceMutation(
+          clientIdRef.current,
+          revisionRef.current,
+          "preference.default_model.set",
+          { model }
+        )
+      );
+    },
+    [mutateWorkspace]
+  );
+
   const addRecentModel = useCallback(
     (model: Parameters<WorkspaceContextValue["addRecentModel"]>[0]) => {
       mutateWorkspace(
@@ -633,60 +752,42 @@ export function ChorusWorkspaceProvider({
   );
 
   const sessionCommand = useCallback(
-    async (command: "undo" | "redo"): Promise<boolean> => {
-      if (!selectedBoard?.session.sessionId) {
-        return false;
-      }
-
-      const endpoint =
-        command === "undo"
-          ? `/api/sessions/${selectedBoard.session.sessionId}/revert`
-          : `/api/sessions/${selectedBoard.session.sessionId}/unrevert`;
-
+    async (boardId: string, command: BoardSessionHistoryCommand) => {
       try {
-        const response = await fetch(endpoint, { method: "POST" });
+        const result = await sendBoardSessionHistoryCommand(boardId, command, {
+          onUnauthorized: reportUnauthorized,
+        });
 
-        if (reportUnauthorized(response)) {
-          return false;
-        }
-
-        posthog.capture(
-          response.ok ? "session_command_success" : "session_command_error",
-          {
-            command,
-            sessionID: selectedBoard.session.sessionId,
-            status: response.status,
-            timestamp: Date.now(),
-          }
-        );
-
-        return response.ok;
-      } catch (error) {
-        posthog.capture("session_command_exception", {
+        posthog.capture("session_command_success", {
+          boardId,
           command,
-          errorMessage: error instanceof Error ? error.message : String(error),
-          sessionID: selectedBoard.session.sessionId,
+          sessionID: result.sessionId,
           timestamp: Date.now(),
         });
-        return false;
+        sessionHistoryRevisionRef.current += 1;
+        setSessionHistoryChange({
+          boardId,
+          revision: sessionHistoryRevisionRef.current,
+        });
+
+        return { ok: true };
+      } catch (error) {
+        posthog.capture("session_command_exception", {
+          boardId,
+          command,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          timestamp: Date.now(),
+        });
+        return {
+          error:
+            error instanceof Error
+              ? error.message
+              : `Could not ${command} repository changes. Check the board connection and try again.`,
+          ok: false,
+        };
       }
     },
-    [reportUnauthorized, selectedBoard]
-  );
-
-  const recordMove = useCallback(
-    (
-      columnsBefore: Parameters<
-        WorkspaceContextValue["kanbanHistory"]["recordMove"]
-      >[0],
-      columnsAfter: Parameters<
-        WorkspaceContextValue["kanbanHistory"]["recordMove"]
-      >[1],
-      task: Parameters<WorkspaceContextValue["kanbanHistory"]["recordMove"]>[2]
-    ) => {
-      kanbanHistory.recordMove(columnsBefore, columnsAfter, task);
-    },
-    [kanbanHistory]
+    [reportUnauthorized]
   );
 
   const value: WorkspaceContextValue = {
@@ -696,20 +797,15 @@ export function ChorusWorkspaceProvider({
     boards,
     clearSelection,
     connectionError,
+    dismissWorkspaceActionError,
     hydrated,
     createBoardFromHistory,
     createBoardFromProject: createBoardFromRecentProject,
     dismissComposerHint,
     focusBoardLocally,
+    isLoadingRecentProjects,
     isOpeningFolder,
     isQueueingPrompt,
-    kanbanHistory: {
-      canRedo: kanbanHistory.canRedo,
-      canUndo: kanbanHistory.canUndo,
-      redo: kanbanHistory.redo,
-      recordMove,
-      undo: kanbanHistory.undo,
-    },
     lastSeq,
     loadProjects,
     openFolder,
@@ -718,20 +814,25 @@ export function ChorusWorkspaceProvider({
     previousWorkspaces,
     queuePrompt,
     recentProjects,
+    recentProjectsError,
+    recentProjectsLoaded,
     removeBoard,
     restoredPrompt,
     restorePrompt: setRestoredPrompt,
     selectBoard,
+    sessionHistoryChange,
     selectedBoard,
     selectedBoardId,
     sessionCommand,
     sessionStatus: status,
     setBoardModel,
+    setDefaultModelSelection,
     setBoardViewMode,
     setSpeechVoiceId,
     updateBoardColumns,
     updateBoardPosition,
     updateBoardReviewMode,
+    workspaceActionError,
   };
 
   return (

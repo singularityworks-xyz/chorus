@@ -1,10 +1,20 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
+import { Transform } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import {
   applyEventToBoard,
+  LOCAL_ENTRY_PORT,
   queueBoardPromptResponseSchema,
   serverMessageSchema,
   sessionFileDiffsSchema,
@@ -12,32 +22,51 @@ import {
   webSocketTicketResponseSchema,
   workspaceSnapshotSchema,
 } from "@chorus/contracts";
+import { OpenCodeAdapter } from "@chorus/oc-adapter";
+import { cors } from "@elysiajs/cors";
 import { Elysia } from "elysia";
 import { authGuardHandler } from "../src/auth/guard";
+import { createLocalEntry } from "../src/auth/local-entry";
 import { DevicePairingTokenStore } from "../src/auth/pairing";
 import { createAuthRoutes } from "../src/auth/routes";
+import { SessionRegistry } from "../src/auth/session-registry";
 import { OpenCodeBridge } from "../src/bridge/opencode/bridge";
 import { RepositoryRegistry } from "../src/projects/repository-registry";
+import { ProjectService } from "../src/projects/service";
 import { WorktreeManager } from "../src/projects/worktree-manager";
 import { createHttpRoutes } from "../src/routes";
+import { createProjectRoutes } from "../src/routes/projects";
 import { createWorkspaceRoutes } from "../src/routes/workspace";
 import { BoardTaskService } from "../src/tasks/board-task-service";
+import { boardDirectory } from "../src/tasks/session-directory";
 import { WorkspaceStore } from "../src/workspace/store";
 import { createWsHandler } from "../src/ws/handler";
 import { WorkspaceHub } from "../src/ws/hub";
 import { startScriptedEngine } from "./fixtures/opencode-engine";
 
 const SNAPSHOT_HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const BROWSER_FIXTURE_WEB_ORIGIN =
+  process.env.CHORUS_BROWSER_FIXTURE_ORIGIN ?? "http://localhost:3001";
+const BROWSER_FIXTURE_ORIGINS = [
+  BROWSER_FIXTURE_WEB_ORIGIN,
+  "http://localhost:3001",
+  "http://127.0.0.1:3001",
+];
 
 interface QualificationRun {
   boardId: string;
   sessionId: string;
+  taskId: string;
 }
+
+type QualificationRequest = (path: string, body?: unknown) => Promise<unknown>;
 
 interface QualificationMirror {
   boards: WorkspaceBoard[];
   error?: string;
   initialized: boolean;
+  ready: boolean;
+  recentEventRanges: Array<{ fromSeq: number; seq: number }>;
   resyncing: boolean;
   seq: number;
   socket: WebSocket;
@@ -86,6 +115,9 @@ function receiveQualificationFrame(
         mirror.initialized = true;
         mirror.resyncing = false;
         return;
+      case "ready":
+        mirror.ready = true;
+        return;
       case "event":
         applyQualificationEvent(mirror, frame, onEvent);
         return;
@@ -123,6 +155,159 @@ export async function waitForQualification(
   }
 }
 
+interface TransportFaultProxy {
+  baseUrl: string;
+  breakConnections(): void;
+  close(): Promise<void>;
+}
+
+function disconnectQualificationMirror(
+  socket: WebSocket,
+  proxy: TransportFaultProxy | undefined
+): void {
+  if (proxy) {
+    proxy.breakConnections();
+    return;
+  }
+  socket.close(1000, "qualification network flap");
+}
+
+function validateTcpFaultProxyCount(count: number): void {
+  if (!Number.isInteger(count) || count < 0 || count > 10) {
+    throw new Error("tcpFaultProxyMirrors must be an integer from 0 to 10.");
+  }
+}
+
+function validateTcpFaultProxyLatency(latencyMs: number): void {
+  if (!Number.isInteger(latencyMs) || latencyMs < 0 || latencyMs > 2000) {
+    throw new Error(
+      "tcpFaultProxyLatencyMs must be an integer from 0 to 2000."
+    );
+  }
+}
+
+function qualificationWebSocketUrl(
+  base: string,
+  ticket: string,
+  proxy: TransportFaultProxy | undefined
+): string {
+  const socketBase = proxy?.baseUrl ?? base.replace("http:", "ws:");
+  return `${socketBase}/ws?ticket=${encodeURIComponent(ticket)}`;
+}
+
+async function startTransportFaultProxies(
+  count: number,
+  destinationPort: number,
+  latencyMs: number
+): Promise<Map<number, TransportFaultProxy>> {
+  const proxies = new Map<number, TransportFaultProxy>();
+  try {
+    for (let index = 0; index < count; index += 1) {
+      proxies.set(
+        index,
+        await startTransportFaultProxy(destinationPort, latencyMs)
+      );
+    }
+    return proxies;
+  } catch (error) {
+    await Promise.allSettled(
+      [...proxies.values()].map((proxy) => proxy.close())
+    );
+    throw error;
+  }
+}
+
+async function startTransportFaultProxy(
+  destinationPort: number,
+  latencyMs: number
+): Promise<TransportFaultProxy> {
+  const connections = new Set<{ client: Socket; upstream: Socket }>();
+  const server: Server = createServer((client) => {
+    const upstream = connect({ host: "127.0.0.1", port: destinationPort });
+    const clientToServer = createTransportDelayStream(latencyMs);
+    const serverToClient = createTransportDelayStream(latencyMs);
+    const connection = { client, upstream };
+    connections.add(connection);
+    let closed = false;
+    const closePeer = (socket: Socket) => {
+      if (closed) {
+        return;
+      }
+      closed = true;
+      connections.delete(connection);
+      clientToServer.destroy();
+      serverToClient.destroy();
+      (socket === client ? upstream : client).destroy();
+    };
+
+    client.on("close", () => closePeer(client));
+    client.on("error", () => closePeer(client));
+    upstream.on("close", () => closePeer(upstream));
+    upstream.on("error", () => closePeer(upstream));
+    client.pipe(clientToServer).pipe(upstream);
+    upstream.pipe(serverToClient).pipe(client);
+  });
+
+  await new Promise<void>((resolveListen, reject) => {
+    server.once("error", reject);
+    server.listen({ host: "127.0.0.1", port: 0, exclusive: true }, () => {
+      server.removeAllListeners("error");
+      resolveListen();
+    });
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    await new Promise<void>((resolveClose, reject) =>
+      server.close((error) => (error ? reject(error) : resolveClose()))
+    );
+    throw new Error("Could not start the qualification transport proxy.");
+  }
+
+  const breakConnections = () => {
+    for (const connection of connections) {
+      connections.delete(connection);
+      connection.client.destroy();
+      connection.upstream.destroy();
+    }
+  };
+
+  return {
+    baseUrl: `ws://127.0.0.1:${address.port}`,
+    breakConnections,
+    async close() {
+      breakConnections();
+      await new Promise<void>((resolveClose, reject) =>
+        server.close((error) => (error ? reject(error) : resolveClose()))
+      );
+    },
+  };
+}
+
+function createTransportDelayStream(latencyMs: number): Transform {
+  const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      if (latencyMs === 0) {
+        callback(null, chunk);
+        return;
+      }
+      const timer = setTimeout(() => {
+        pendingTimers.delete(timer);
+        callback(null, chunk);
+      }, latencyMs);
+      pendingTimers.add(timer);
+    },
+    destroy(error, callback) {
+      for (const timer of pendingTimers) {
+        clearTimeout(timer);
+      }
+      pendingTimers.clear();
+      callback(error);
+    },
+  });
+}
+
 function wireComparable(value: unknown): unknown {
   const serialized = JSON.stringify(value);
   return serialized === undefined ? undefined : JSON.parse(serialized);
@@ -141,16 +326,195 @@ function readSnapshotHash(value: unknown): string {
   return value.hash;
 }
 
+function queueQualificationRuns(
+  interactive: boolean,
+  boardIds: string[],
+  getBoard: (boardId: string) => WorkspaceBoard | undefined,
+  request: QualificationRequest
+): Promise<QualificationRun[]> {
+  if (interactive) {
+    return Promise.resolve([]);
+  }
+  return Promise.all(
+    boardIds.map(async (boardId) => {
+      const board = getBoard(boardId);
+      const response = queueBoardPromptResponseSchema.parse(
+        await request("/tasks", {
+          boardId,
+          directory: board?.repo.worktree ?? board?.repo.directory,
+          text: "Scripted isolated change",
+          reviewMode: "auto",
+        })
+      );
+      return {
+        boardId,
+        sessionId: response.sessionId,
+        taskId: response.taskId,
+      };
+    })
+  );
+}
+
+function startOptionalLocalEntry(options: {
+  token: string;
+  registry: SessionRegistry;
+  webPort: number | undefined;
+}): (() => Promise<void>) | undefined {
+  if (options.webPort === undefined) {
+    return undefined;
+  }
+  const server = createLocalEntry({
+    token: options.token,
+    registry: options.registry,
+    webPort: options.webPort,
+  })
+    .onAfterHandle(({ request, set }) => {
+      traceFixtureAuth(request, set.status);
+    })
+    .listen({ hostname: "127.0.0.1", port: LOCAL_ENTRY_PORT });
+  return async () => {
+    await server.stop(true);
+  };
+}
+
+function traceFixtureAuth(
+  request: Request,
+  status: number | string | undefined
+) {
+  if (process.env.CHORUS_BROWSER_FIXTURE_TRACE_AUTH !== "1") {
+    return;
+  }
+  const pathname = new URL(request.url).pathname;
+  if (
+    ["/auth/device", "/auth/local-session", "/projects", "/workspace"].includes(
+      pathname
+    )
+  ) {
+    process.stdout.write(
+      `${JSON.stringify({ method: request.method, pathname, status: status ?? 200 })}\n`
+    );
+  }
+}
+
+function createQualificationRoot(rootDirectory?: string) {
+  if (rootDirectory === undefined) {
+    return {
+      ownsRoot: true,
+      root: mkdtempSync(join(tmpdir(), "chorus-qualification-")),
+    };
+  }
+
+  const root = resolve(rootDirectory);
+  const insideTemp = relative(resolve(tmpdir()), root);
+  if (
+    insideTemp.startsWith("..") ||
+    !insideTemp.startsWith("chorus-qualification-")
+  ) {
+    throw new Error(
+      "persistent qualification data must use a chorus-qualification-* directory inside the system temp directory"
+    );
+  }
+  mkdirSync(root, { recursive: true });
+  return { ownsRoot: false, root };
+}
+
+function removeOwnedQualificationRoot(root: string, ownsRoot: boolean) {
+  if (!ownsRoot) {
+    return;
+  }
+  const insideTemp = relative(resolve(tmpdir()), resolve(root));
+  if (
+    insideTemp.startsWith("..") ||
+    !insideTemp.startsWith("chorus-qualification-")
+  ) {
+    throw new Error("refusing to remove an unexpected qualification directory");
+  }
+  rmSync(root, { recursive: true, force: true });
+}
+
+async function loadOrSeedQualificationBoards(
+  request: QualificationRequest,
+  workspace: WorkspaceStore,
+  repositories: readonly string[]
+): Promise<string[]> {
+  const existingBoardIds = workspace
+    .getSnapshot()
+    .boards.map((board) => board.boardId);
+  if (existingBoardIds.length > 0) {
+    return existingBoardIds;
+  }
+
+  // Task dispatch now requires the same installation-wide model selection
+  // used by the UI. Seed a deterministic fixture model in this disposable
+  // workspace so the lifecycle test exercises accepted runs and streaming.
+  await request("/workspace/mutations", {
+    baseRevision: null,
+    clientId: "qualification",
+    mutationId: "select-scripted-model",
+    type: "preference.default_model.set",
+    payload: { model: { modelID: "scripted", providerID: "fixture" } },
+  });
+
+  const boardIds: string[] = [];
+  for (let index = 0; index < 8; index += 1) {
+    const directory = repositories[index % 3];
+    if (!directory) {
+      throw new Error("qualification repository is missing");
+    }
+    const state = workspaceSnapshotSchema.parse(
+      await request("/workspace/mutations", {
+        type: "board.create",
+        clientId: "qualification",
+        mutationId: `create-${index}`,
+        baseRevision: null,
+        payload: {
+          seed: {
+            title: `Run ${index}`,
+            repo: { directory, worktree: directory, sandboxes: [] },
+          },
+        },
+      })
+    );
+    const board = state.boards.at(-1);
+    if (!board) {
+      throw new Error("qualification board creation failed");
+    }
+    boardIds.push(board.boardId);
+  }
+  return boardIds;
+}
+
 /** Real repositories, SDK, HTTP commands, SQLite writer and authenticated WS mirrors. */
-export async function startPhase6Harness() {
-  const root = mkdtempSync(join(tmpdir(), "chorus-qualification-"));
-  const engine = startScriptedEngine();
+export async function startPhase6Harness({
+  interactive = false,
+  localEntryWebPort,
+  questionReplyDelayMs,
+  rootDirectory,
+  servePort = 0,
+  tcpFaultProxyMirrors = 0,
+  tcpFaultProxyLatencyMs = 0,
+}: {
+  interactive?: boolean;
+  localEntryWebPort?: number;
+  questionReplyDelayMs?: number;
+  /** Keep fixture data at this disposable path so a second process can reopen it. */
+  rootDirectory?: string;
+  servePort?: number;
+  tcpFaultProxyMirrors?: number;
+  tcpFaultProxyLatencyMs?: number;
+} = {}) {
+  validateTcpFaultProxyCount(tcpFaultProxyMirrors);
+  validateTcpFaultProxyLatency(tcpFaultProxyLatencyMs);
+  const { root, ownsRoot } = createQualificationRoot(rootDirectory);
   const repositories: string[] = [];
   let store: WorkspaceStore | undefined;
   let hub: WorkspaceHub | undefined;
   let bridge: OpenCodeBridge | undefined;
+  let stopLocalEntry: (() => Promise<void>) | undefined;
   let stopHttp: (() => Promise<void>) | undefined;
+  let stopEngine: (() => Promise<void>) | undefined;
   const mirrors: QualificationMirror[] = [];
+  let transportFaultProxies = new Map<number, TransportFaultProxy>();
   const latencies: number[] = [];
   let latencyCursor = 0;
   let frameCount = 0;
@@ -164,36 +528,37 @@ export async function startPhase6Harness() {
   }
 
   async function close() {
+    await stopLocalEntry?.();
+    stopLocalEntry = undefined;
     for (const mirror of mirrors) {
       mirror.socket.close();
     }
+    await Promise.all(
+      [...transportFaultProxies.values()].map((proxy) => proxy.close())
+    );
     hub?.close();
     bridge?.stop();
     await stopHttp?.();
     await store?.close();
-    await engine.stop();
-    const insideTemp = relative(resolve(tmpdir()), resolve(root));
-    if (
-      insideTemp.startsWith("..") ||
-      !insideTemp.startsWith("chorus-qualification-")
-    ) {
-      throw new Error(
-        "refusing to remove an unexpected qualification directory"
-      );
-    }
-    rmSync(root, { recursive: true, force: true });
+    await stopEngine?.();
+    removeOwnedQualificationRoot(root, ownsRoot);
   }
 
   try {
+    const engine = startScriptedEngine({ questionReplyDelayMs });
+    stopEngine = () => engine.stop();
+
     for (let index = 0; index < 3; index += 1) {
       const directory = join(root, `repo-${index}`);
-      mkdirSync(directory);
-      git(directory, ["init", "--quiet"]);
-      git(directory, ["config", "user.email", "fixture@example.com"]);
-      git(directory, ["config", "user.name", "Chorus fixture"]);
-      writeFileSync(join(directory, "README.md"), "# Scripted fixture\n");
-      git(directory, ["add", "README.md"]);
-      git(directory, ["commit", "--quiet", "-m", "fixture"]);
+      if (!existsSync(directory)) {
+        mkdirSync(directory);
+        git(directory, ["init", "--quiet"]);
+        git(directory, ["config", "user.email", "fixture@example.com"]);
+        git(directory, ["config", "user.name", "Chorus fixture"]);
+        writeFileSync(join(directory, "README.md"), "# Scripted fixture\n");
+        git(directory, ["add", "README.md"]);
+        git(directory, ["commit", "--quiet", "-m", "fixture"]);
+      }
       repositories.push(directory);
     }
     const registry = await RepositoryRegistry.fromEnvironment(
@@ -213,6 +578,34 @@ export async function startPhase6Harness() {
       repositories[0] ?? root
     );
     bridge = engineBridge;
+    engineBridge.setRecoverySessionProvider((directory) => {
+      const canonicalDirectory = realpathSync(directory);
+      return workspace
+        .getSnapshot()
+        .boards.filter((board) => {
+          let boardCheckout: string;
+          try {
+            boardCheckout = realpathSync(boardDirectory(board));
+          } catch {
+            return false;
+          }
+          return (
+            boardCheckout === canonicalDirectory &&
+            board.session.currentTaskId !== undefined &&
+            (board.session.state === "active" ||
+              Object.values(board.columns)
+                .flat()
+                .some(
+                  (task) =>
+                    (task.pendingApprovals?.length ?? 0) > 0 ||
+                    task.pendingApproval !== undefined
+                ))
+          );
+        })
+        .flatMap((board) =>
+          board.session.sessionId ? [board.session.sessionId] : []
+        );
+    });
     engineBridge.subscribe(async (event) => {
       await workspace.applyAgentEvent(event);
     });
@@ -223,23 +616,57 @@ export async function startPhase6Harness() {
       null,
       registry
     );
+    const globalAdapter = OpenCodeAdapter.from({ baseUrl: engine.baseUrl });
+    const projectService = new ProjectService(
+      engine.baseUrl,
+      repositories[0] ?? root,
+      { pickFolder: async () => null },
+      (directory) => workspace.registerPickedRepository(directory),
+      undefined,
+      registry,
+      async (directory) =>
+        OpenCodeAdapter.from({ baseUrl: engine.baseUrl, directory }),
+      async (directory) => {
+        await engineBridge.subscribeDirectory(directory);
+      },
+      globalAdapter,
+      { listCredentials: async () => ({ credentials: [] }) }
+    );
     const token = crypto.randomUUID();
     const ticketOptions = { store: workspace.meta, now: Date.now };
+    const sessionRegistry = new SessionRegistry(workspace.meta, token);
     const app = new Elysia()
-      .resolve({ as: "global" }, authGuardHandler({ token, ticketOptions }))
+      .onAfterHandle(({ request, set }) => {
+        traceFixtureAuth(request, set.status);
+      })
+      .use(
+        cors({
+          origin: BROWSER_FIXTURE_ORIGINS,
+          credentials: true,
+          maxAge: 86_400,
+          methods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
+        })
+      )
+      .resolve(
+        { as: "global" },
+        authGuardHandler({ sessionRegistry, token, ticketOptions })
+      )
       .use(
         createAuthRoutes({
           token,
           ticketStore: workspace.meta,
+          sessionRegistry,
           isProduction: false,
-          localOrigins: [],
+          localOrigins: BROWSER_FIXTURE_ORIGINS,
           pairingTokenStore: new DevicePairingTokenStore(),
         })
       )
       .use(createWorkspaceRoutes(workspace, boardTasks))
       .use(createHttpRoutes(engineBridge, boardTasks, workspace))
+      .use(createProjectRoutes(projectService))
       .use(
         createWsHandler({
+          sessionRegistry,
           boardTasks,
           bridge: engineBridge,
           hub: workspaceHub,
@@ -248,10 +675,15 @@ export async function startPhase6Harness() {
           ticketOptions,
         })
       )
-      .listen({ hostname: "127.0.0.1", port: 0 });
+      .listen({ hostname: "127.0.0.1", port: servePort });
     stopHttp = async () => {
       await app.stop(true);
     };
+    stopLocalEntry = startOptionalLocalEntry({
+      token,
+      registry: sessionRegistry,
+      webPort: localEntryWebPort,
+    });
     const base = `http://127.0.0.1:${app.server?.port}`;
     const login = await fetch(`${base}/auth/login`, {
       method: "POST",
@@ -271,6 +703,11 @@ export async function startPhase6Harness() {
       throw new Error("qualification device registration failed");
     }
     const cookie = `${sessionCookie}; ${deviceCookie}`;
+    transportFaultProxies = await startTransportFaultProxies(
+      tcpFaultProxyMirrors,
+      app.server?.port ?? 0,
+      tcpFaultProxyLatencyMs
+    );
     async function request(path: string, body?: unknown) {
       const response = await fetch(`${base}${path}`, {
         method: body === undefined ? "GET" : "POST",
@@ -287,29 +724,55 @@ export async function startPhase6Harness() {
       return data;
     }
 
-    const boardIds: string[] = [];
-    for (let index = 0; index < 8; index += 1) {
-      const directory = repositories[index % 3];
-      const state = workspaceSnapshotSchema.parse(
-        await request("/workspace/mutations", {
-          type: "board.create",
-          clientId: "qualification",
-          mutationId: `create-${index}`,
-          baseRevision: null,
-          payload: {
-            seed: {
-              title: `Run ${index}`,
-              repo: { directory, worktree: directory, sandboxes: [] },
-            },
-          },
-        })
+    function bindMirrorSocket(
+      mirror: QualificationMirror,
+      socket: WebSocket
+    ): void {
+      socket.addEventListener("open", () =>
+        socket.send(
+          JSON.stringify({
+            type: "hello",
+            since: mirror.seq,
+            workspaceId: workspace.workspaceId,
+          })
+        )
       );
-      const board = state.boards.at(-1);
-      if (!board) {
-        throw new Error("qualification board creation failed");
-      }
-      boardIds.push(board.boardId);
+      socket.addEventListener("message", (message) => {
+        if (mirror.socket !== socket) {
+          return;
+        }
+        receiveQualificationFrame(mirror, message.data, (frame) => {
+          latencies[latencyCursor++ % 20_000] = Math.max(
+            0,
+            Date.now() - frame.ts
+          );
+          frameCount += 1;
+          if (mirror.recentEventRanges.length === 64) {
+            mirror.recentEventRanges.shift();
+          }
+          mirror.recentEventRanges.push({
+            fromSeq: frame.fromSeq,
+            seq: frame.seq,
+          });
+        });
+      });
+      socket.addEventListener("close", (event) => {
+        if (mirror.socket === socket) {
+          mirror.error ??= `socket closed (${event.code}): ${event.reason}`;
+        }
+      });
+      socket.addEventListener("error", () => {
+        if (mirror.socket === socket) {
+          mirror.error ??= "socket transport error";
+        }
+      });
     }
+
+    const boardIds = await loadOrSeedQualificationBoards(
+      request,
+      workspace,
+      repositories
+    );
     const snapshotHashes = new Map<string, string>();
     for (const boardId of boardIds) {
       const board = workspace.getBoard(boardId);
@@ -324,75 +787,66 @@ export async function startPhase6Harness() {
       const { ticket } = webSocketTicketResponseSchema.parse(
         await request("/auth/ws-ticket")
       );
+      const proxy = transportFaultProxies.get(index);
       const socket = new WebSocket(
-        `${base.replace("http:", "ws:")}/ws?ticket=${encodeURIComponent(ticket)}`
+        qualificationWebSocketUrl(base, ticket, proxy)
       );
       const mirror = {
         socket,
         boards: [] as WorkspaceBoard[],
         seq: 0,
         initialized: false,
+        ready: false,
+        recentEventRanges: [] as Array<{ fromSeq: number; seq: number }>,
         resyncing: false,
         error: undefined as string | undefined,
       };
       mirrors.push(mirror);
-      socket.addEventListener("open", () =>
-        socket.send(JSON.stringify({ type: "hello", since: 0 }))
-      );
-      socket.addEventListener("message", (message) =>
-        receiveQualificationFrame(mirror, message.data, (frame) => {
-          latencies[latencyCursor++ % 20_000] = Math.max(
-            0,
-            Date.now() - frame.ts
-          );
-          frameCount += 1;
-        })
-      );
-      socket.addEventListener("close", (event) => {
-        mirror.error ??= `socket closed (${event.code}): ${event.reason}`;
-      });
+      bindMirrorSocket(mirror, socket);
     }
     await waitForQualification(() =>
       mirrors.every((mirror) => mirror.initialized)
     );
-    const runs = await Promise.all(
-      boardIds.map(async (boardId) => {
-        const board = workspace.getBoard(boardId);
-        const response = queueBoardPromptResponseSchema.parse(
-          await request("/tasks", {
-            boardId,
-            directory: board?.repo.worktree ?? board?.repo.directory,
-            text: "Scripted isolated change",
-            reviewMode: "auto",
+    const runs = await queueQualificationRuns(
+      interactive,
+      boardIds,
+      (boardId) => workspace.getBoard(boardId),
+      request
+    );
+    if (!interactive) {
+      await waitForQualification(
+        () =>
+          boardIds.every(
+            (boardId) =>
+              (workspace.getBoard(boardId)?.columns.approve?.length ?? 0) === 1
+          ),
+        5000,
+        () =>
+          boardIds.map((boardId) => {
+            const board = workspace.getBoard(boardId);
+            return {
+              boardId,
+              columns: board?.columns,
+              session: board?.session,
+            };
           })
+      );
+      await Promise.all(
+        runs.map((run) =>
+          request(`/tasks/${run.sessionId}/approve`, {
+            requestID: `permission-${run.sessionId}`,
+          })
+        )
+      );
+    }
+
+    function requirePrepopulatedRuns(operation: string): void {
+      if (runs.length === 0) {
+        throw new Error(
+          `${operation} requires prepopulated qualification runs; use the browser to dispatch interactive fixture tasks`
         );
-        return { boardId, sessionId: response.sessionId };
-      })
-    );
-    await waitForQualification(
-      () =>
-        boardIds.every(
-          (boardId) =>
-            (workspace.getBoard(boardId)?.columns.approve?.length ?? 0) === 1
-        ),
-      5000,
-      () =>
-        boardIds.map((boardId) => {
-          const board = workspace.getBoard(boardId);
-          return {
-            boardId,
-            columns: board?.columns,
-            session: board?.session,
-          };
-        })
-    );
-    await Promise.all(
-      runs.map((run) =>
-        request(`/tasks/${run.sessionId}/approve`, {
-          requestID: `permission-${run.sessionId}`,
-        })
-      )
-    );
+      }
+    }
 
     function completeRun(run: QualificationRun): void {
       const board = workspace.getBoard(run.boardId);
@@ -501,14 +955,143 @@ export async function startPhase6Harness() {
       }
     }
 
+    async function queueInteractiveTask(
+      boardId: string,
+      text: string,
+      reviewMode: "auto" | "manual"
+    ): Promise<QualificationRun> {
+      if (!interactive) {
+        throw new Error("queueInteractiveTask requires interactive mode");
+      }
+      const board = workspace.getBoard(boardId);
+      const directory = board?.repo.worktree ?? board?.repo.directory;
+      if (!directory) {
+        throw new Error("interactive fixture board has no checkout");
+      }
+      const response = queueBoardPromptResponseSchema.parse(
+        await request("/tasks", { boardId, directory, text, reviewMode })
+      );
+      return {
+        boardId: response.boardId,
+        sessionId: response.sessionId,
+        taskId: response.taskId,
+      };
+    }
+
     return {
       close,
+      async disconnectMirror(index: number) {
+        const mirror = mirrors[index];
+        if (!mirror) {
+          throw new Error(`qualification mirror ${index} does not exist`);
+        }
+        const socket = mirror.socket;
+        if (socket.readyState === WebSocket.OPEN) {
+          disconnectQualificationMirror(
+            socket,
+            transportFaultProxies.get(index)
+          );
+        }
+        await waitForQualification(
+          () => socket.readyState === WebSocket.CLOSED,
+          5000,
+          () => ({ index, readyState: socket.readyState })
+        );
+      },
       engine,
       runs,
+      boardIds,
       mirrors,
       store: workspace,
       root,
+      serveBaseUrl: base,
+      accessToken: token,
+      diagnostics() {
+        const recentLatencies = latencies.filter((latency) => latency > 0);
+        const sortedLatencies = [...recentLatencies].sort((a, b) => a - b);
+        return {
+          frameCount,
+          headSeq: workspace.headSeq(),
+          hub: workspaceHub.stats(),
+          mirrors: mirrors.map((mirror, mirrorIndex) => ({
+            error: mirror.error,
+            initialized: mirror.initialized,
+            mirrorIndex,
+            readyState: mirror.socket.readyState,
+            resyncing: mirror.resyncing,
+            seq: mirror.seq,
+          })),
+          p95LatencyMs:
+            sortedLatencies[Math.floor(sortedLatencies.length * 0.95)] ?? 0,
+        };
+      },
+      async reconnectMirror(index: number) {
+        const mirror = mirrors[index];
+        if (!mirror) {
+          throw new Error(`qualification mirror ${index} does not exist`);
+        }
+        const { ticket } = webSocketTicketResponseSchema.parse(
+          await request("/auth/ws-ticket")
+        );
+        const proxy = transportFaultProxies.get(index);
+        const socket = new WebSocket(
+          qualificationWebSocketUrl(base, ticket, proxy)
+        );
+        mirror.socket = socket;
+        mirror.ready = false;
+        mirror.resyncing = false;
+        mirror.error = undefined;
+        mirror.recentEventRanges.length = 0;
+        bindMirrorSocket(mirror, socket);
+        await waitForQualification(
+          () => mirror.ready,
+          5000,
+          () => ({
+            error: mirror.error,
+            index,
+            readyState: socket.readyState,
+            seq: mirror.seq,
+          })
+        );
+      },
+      queueInteractiveTask,
+      async finalizeReview(
+        boardId: string,
+        taskId: string,
+        plan: string,
+        answers: string[] = []
+      ) {
+        if (!interactive) {
+          throw new Error("finalizeReview requires interactive mode");
+        }
+        await request(
+          `/boards/${encodeURIComponent(boardId)}/tasks/${encodeURIComponent(taskId)}/finalize-review`,
+          { plan, answers }
+        );
+      },
+      async approvePermission(sessionId: string, requestId: string) {
+        if (!interactive) {
+          throw new Error("approvePermission requires interactive mode");
+        }
+        await request(`/tasks/${encodeURIComponent(sessionId)}/approve`, {
+          requestID: requestId,
+        });
+      },
+      replyInteractiveQuestion(
+        sessionId: string,
+        requestId: string,
+        optionIndex = 0
+      ) {
+        if (!interactive) {
+          throw new Error("replyInteractiveQuestion requires interactive mode");
+        }
+        return request(
+          `/tasks/${encodeURIComponent(sessionId)}/questions/${encodeURIComponent(requestId)}/reply`,
+          { answers: [{ questionIndex: 0, optionIndices: [optionIndex] }] }
+        );
+      },
       appendBatch(count: number) {
+        requirePrepopulatedRuns("appendBatch");
         for (let index = 0; index < count; index += 1) {
           const run = runs[index % runs.length];
           if (run) {
@@ -516,7 +1099,20 @@ export async function startPhase6Harness() {
           }
         }
       },
+      appendReasoningBatch(count: number) {
+        requirePrepopulatedRuns("appendReasoningBatch");
+        for (let index = 0; index < count; index += 1) {
+          const run = runs[index % runs.length];
+          if (run) {
+            engine.appendReasoningDelta(
+              run.sessionId,
+              " Checking the board state."
+            );
+          }
+        }
+      },
       async complete(settleTimeoutMs = 5000) {
+        requirePrepopulatedRuns("complete");
         await Promise.all(runs.map(completeRun));
         await waitForQualification(
           () =>

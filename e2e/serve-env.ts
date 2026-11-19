@@ -32,13 +32,14 @@ const repoRoot = process.cwd();
  * deliberately shared across a mid-test restart so the database survives -- the
  * client has to resume against a process that has forgotten the connection.
  */
-export const SERVE_DATA_DIR =
+const runDirectory =
   process.env.CHORUS_E2E_DATA_DIR ?? join(tmpdir(), "chorus-e2e");
 
-export const SERVE_LOG_FILE = `${SERVE_DATA_DIR}/serve.log`;
-export const SERVE_PID_FILE = `${SERVE_DATA_DIR}/serve.pid`;
-export const ENGINE_LOG_FILE = `${SERVE_DATA_DIR}/opencode.log`;
-export const ENGINE_PID_FILE = `${SERVE_DATA_DIR}/opencode.pid`;
+export const SERVE_DATA_DIR = join(runDirectory, "workspace");
+export const SERVE_LOG_FILE = join(runDirectory, "serve.log");
+export const SERVE_PID_FILE = `${runDirectory}/serve.pid`;
+export const ENGINE_LOG_FILE = `${runDirectory}/opencode.log`;
+export const ENGINE_PID_FILE = `${runDirectory}/opencode.pid`;
 
 /**
  * A throwaway git repository for board-creating tests.

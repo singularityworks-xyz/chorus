@@ -1,13 +1,32 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { z } from "zod";
 import { openCodeStoragePaths } from "../opencode/storage-paths";
 
-interface OpencodeConfigFile {
-  $schema?: string;
-  disabled_providers?: string[];
-  enabled_providers?: string[];
-  provider?: Record<string, Record<string, unknown>>;
-  [key: string]: unknown;
+const opencodeConfigSchema = z
+  .object({
+    $schema: z.string().optional(),
+    disabled_providers: z.array(z.string()).optional(),
+    enabled_providers: z.array(z.string()).optional(),
+    provider: z.record(z.string(), z.unknown()).optional(),
+  })
+  .passthrough();
+
+type OpencodeConfigFile = z.infer<typeof opencodeConfigSchema>;
+
+export class OpenCodeConfigStoreError extends Error {
+  readonly code: "config_invalid" | "config_read_failed";
+
+  constructor(code: "config_invalid" | "config_read_failed", cause?: unknown) {
+    super(
+      code === "config_invalid"
+        ? "OpenCode global configuration is invalid; no settings were changed"
+        : "OpenCode global configuration could not be read; no settings were changed",
+      { cause }
+    );
+    this.code = code;
+    this.name = "OpenCodeConfigStoreError";
+  }
 }
 
 export interface ConfiguredProviderCatalog {
@@ -24,14 +43,29 @@ export class OpenCodeConfigStore {
   }
 
   async read(): Promise<OpencodeConfigFile> {
+    let raw: string;
     try {
-      const raw = await readFile(this.#configPath, "utf8");
-      return JSON.parse(raw) as OpencodeConfigFile;
-    } catch {
-      return {
-        $schema: "https://opencode.ai/config.json",
-      };
+      raw = await readFile(this.#configPath, "utf8");
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return {
+          $schema: "https://opencode.ai/config.json",
+        };
+      }
+      throw new OpenCodeConfigStoreError("config_read_failed", error);
     }
+
+    let contents: unknown;
+    try {
+      contents = JSON.parse(raw);
+    } catch (error) {
+      throw new OpenCodeConfigStoreError("config_invalid", error);
+    }
+    const parsed = opencodeConfigSchema.safeParse(contents);
+    if (!parsed.success) {
+      throw new OpenCodeConfigStoreError("config_invalid", parsed.error);
+    }
+    return parsed.data;
   }
 
   async write(config: OpencodeConfigFile): Promise<void> {
@@ -74,4 +108,10 @@ export class OpenCodeConfigStore {
 
     return this.listConfiguredProviders();
   }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    error instanceof Error && "code" in error && typeof error.code === "string"
+  );
 }

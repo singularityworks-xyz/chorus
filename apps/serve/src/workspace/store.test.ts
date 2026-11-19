@@ -1,9 +1,21 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { WorkspaceMutation } from "@chorus/contracts";
+import {
+  type WorkspaceMutation,
+  workspaceIdSchema,
+  workspaceSnapshotSchema,
+} from "@chorus/contracts";
 import type { NormalizedAgentEvent } from "@chorus/oc-adapter";
+import { restoreDatabaseFile, WORKSPACE_ID_KEY } from "./db";
 import { WorkspaceStore } from "./store";
 
 const dirs: string[] = [];
@@ -129,6 +141,43 @@ function agentEvent(
 }
 
 describe("WorkspaceStore persistence", () => {
+  test("keeps a stable sync identity for this database and assigns a new one to another", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chorus-store-identity-"));
+    dirs.push(dir);
+
+    const first = createStoreAt(dir);
+    await first.load();
+    const firstId = first.workspaceId;
+    await first.close();
+
+    const reopened = createStoreAt(dir);
+    await reopened.load();
+    expect(reopened.workspaceId).toBe(firstId);
+
+    const separate = createStore();
+    await separate.load();
+    expect(separate.workspaceId).not.toBe(firstId);
+  });
+
+  test("repairs a malformed persisted sync identity", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chorus-store-identity-"));
+    dirs.push(dir);
+
+    const first = createStoreAt(dir);
+    await first.load();
+    const originalId = first.workspaceId;
+    first.meta.setMeta(WORKSPACE_ID_KEY, "not-a-uuid");
+    await first.close();
+
+    const reopened = createStoreAt(dir);
+    await reopened.load();
+
+    expect(reopened.workspaceId).not.toBe(originalId);
+    expect(workspaceIdSchema.safeParse(reopened.workspaceId).success).toBe(
+      true
+    );
+  });
+
   test("appends board.create as a single sequenced event", async () => {
     const store = createStore();
     await store.load();
@@ -162,6 +211,11 @@ describe("WorkspaceStore persistence", () => {
         model: { providerID: "anthropic", modelID: "claude" },
       })
     );
+    await first.applyMutation(
+      mutation("preference.default_model.set", {
+        model: { providerID: "openai", modelID: "gpt-5" },
+      })
+    );
     const before = first.getSnapshot();
     await first.close();
 
@@ -171,7 +225,315 @@ describe("WorkspaceStore persistence", () => {
     expect(second.getSnapshot()).toEqual(before);
     expect(second.getBoard(boardId)?.position).toEqual({ x: 42, y: 43 });
     expect(second.getBoard(boardId)?.modelSelection?.modelID).toBe("claude");
+    expect(second.getSnapshot().preferences.defaultModelSelection).toEqual({
+      providerID: "openai",
+      modelID: "gpt-5",
+    });
     await second.close();
+  });
+
+  test("promotes one unambiguous legacy board model to the global setting", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chorus-global-model-migration-"));
+    dirs.push(dir);
+    const first = createStoreAt(dir);
+    await first.load();
+    const boardId = await seedBoard(first);
+    await first.applyMutation(
+      mutation("board.model.set", {
+        boardId,
+        model: { providerID: "anthropic", modelID: "claude" },
+      })
+    );
+    await first.close();
+
+    const second = createStoreAt(dir);
+    await second.load();
+    expect(second.getSnapshot().preferences.defaultModelSelection).toEqual({
+      providerID: "anthropic",
+      modelID: "claude",
+    });
+
+    const backupPath = join(
+      dir,
+      "backups",
+      "before-global-model-selection-v1.db"
+    );
+    if (process.platform !== "win32") {
+      expect(fileMode(join(dir, "backups"))).toBe(0o700);
+    }
+    expect(fileMode(backupPath)).toBe(0o600);
+    const rollbackDir = mkdtempSync(
+      join(tmpdir(), "chorus-global-model-rollback-")
+    );
+    dirs.push(rollbackDir);
+    const restored = restoreDatabaseFile(rollbackDir, backupPath);
+    expect(restored.integrity).toBe("ok");
+
+    const backupDatabase = new Database(restored.path, { readonly: true });
+    const snapshotRow = backupDatabase
+      .query<{ blob: string }, []>(
+        "SELECT blob FROM snapshots ORDER BY seq DESC LIMIT 1"
+      )
+      .get();
+    backupDatabase.close();
+    if (!snapshotRow) {
+      throw new Error(
+        "The migration backup did not contain a workspace snapshot."
+      );
+    }
+    const persistedBlob: unknown = JSON.parse(snapshotRow.blob);
+    if (
+      typeof persistedBlob !== "object" ||
+      persistedBlob === null ||
+      !("snapshot" in persistedBlob)
+    ) {
+      throw new Error("The migration backup snapshot has an invalid shape.");
+    }
+    const backupSnapshot = workspaceSnapshotSchema.parse(
+      persistedBlob.snapshot
+    );
+    expect(backupSnapshot.preferences.defaultModelSelection).toBeNull();
+    expect(backupSnapshot.boards[0]?.modelSelection).toEqual({
+      providerID: "anthropic",
+      modelID: "claude",
+    });
+
+    const migratedSeq = second.headSeq();
+    await second.close();
+
+    const third = createStoreAt(dir);
+    await third.load();
+    expect(third.getSnapshot().preferences.defaultModelSelection).toEqual({
+      providerID: "anthropic",
+      modelID: "claude",
+    });
+    expect(third.headSeq()).toBe(migratedSeq);
+  });
+
+  test("rehearses migration and rollback with a representative workspace install", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chorus-global-model-rehearsal-"));
+    dirs.push(dir);
+    const initial = createStoreAt(dir);
+    await initial.load();
+
+    const boardIds: string[] = [];
+    for (const [index, projectName] of ["Alpha", "Beta", "Gamma"].entries()) {
+      const directory = `/srv/chorus-rehearsal/${projectName.toLowerCase()}`;
+      const commit = await initial.applyMutation(
+        mutation("board.create", {
+          seed: {
+            title: `${projectName} repository`,
+            repo: {
+              directory,
+              projectId: `project-${index + 1}`,
+              projectName,
+              sandboxes: [],
+              worktree: `${directory}/.chorus-worktrees/board-${index + 1}`,
+            },
+          },
+        })
+      );
+      const event = commit?.events[0];
+      if (!commit || event?.type !== "board.created") {
+        throw new Error("expected a rehearsal board to be committed");
+      }
+      boardIds.push(event.board.boardId);
+    }
+
+    const [alphaId, betaId, gammaId] = boardIds;
+    if (!(alphaId && betaId && gammaId)) {
+      throw new Error("representative rehearsal must create three boards");
+    }
+    await initial.applyMutation(
+      mutation("board.model.set", {
+        boardId: alphaId,
+        model: { providerID: "anthropic", modelID: "claude" },
+      })
+    );
+    await initial.applyMutation(
+      mutation("board.review_mode.set", {
+        boardId: betaId,
+        reviewMode: "manual",
+      })
+    );
+    await initial.applyMutation(
+      mutation("board.move", {
+        boardId: gammaId,
+        position: { x: 640, y: 280 },
+      })
+    );
+    await initial.applyMutation(
+      mutation("board.columns.replace", {
+        boardId: gammaId,
+        columns: {
+          approve: [],
+          done: [
+            {
+              id: "historical-task",
+              label: "feature",
+              labelVariant: "success-light",
+              outcome: "succeeded",
+              run: {
+                elapsed: "0m 05s",
+                model: "anthropic/claude-previous",
+                sessionId: "historical-session",
+                startedAt: Date.now(),
+                steps: [
+                  {
+                    id: "historical-response",
+                    kind: "response",
+                    status: "done",
+                    summary: "Historical output stays attached to its run.",
+                  },
+                ],
+                taskTitle: "Preserve this completed run",
+              },
+              title: "Preserve this completed run",
+            },
+          ],
+          in_progress: [],
+          queue: [],
+        },
+      })
+    );
+    await initial.applyMutation(
+      mutation("preference.dismiss_composer_hint", {})
+    );
+    await initial.applyMutation(
+      mutation("preference.board_view_mode.set", { mode: "stacked" })
+    );
+    await initial.applyMutation(
+      mutation("preference.recently_used_models.add", {
+        model: { providerID: "openai", modelID: "gpt-5" },
+      })
+    );
+    await initial.applyMutation(mutation("board.select", { boardId: betaId }));
+
+    const legacySnapshot = initial.getSnapshot();
+    await initial.close();
+
+    const migrated = createStoreAt(dir);
+    await migrated.load();
+    const migratedSnapshot = migrated.getSnapshot();
+    expect(migratedSnapshot.preferences.defaultModelSelection).toEqual({
+      providerID: "anthropic",
+      modelID: "claude",
+    });
+    expect(migratedSnapshot.boards).toEqual(legacySnapshot.boards);
+    expect(migratedSnapshot.selectedBoardId).toBe(
+      legacySnapshot.selectedBoardId
+    );
+    expect(migratedSnapshot.previousWorkspaces).toEqual(
+      legacySnapshot.previousWorkspaces
+    );
+    expect(migratedSnapshot.preferences).toEqual({
+      ...legacySnapshot.preferences,
+      defaultModelSelection: { providerID: "anthropic", modelID: "claude" },
+    });
+
+    const backupPath = join(
+      dir,
+      "backups",
+      "before-global-model-selection-v1.db"
+    );
+    const rollbackDir = mkdtempSync(
+      join(tmpdir(), "chorus-global-model-rehearsal-rollback-")
+    );
+    dirs.push(rollbackDir);
+    const restored = restoreDatabaseFile(rollbackDir, backupPath);
+    expect(restored.integrity).toBe("ok");
+    const rollbackDatabase = new Database(restored.path, { readonly: true });
+    const rollbackSnapshotRow = rollbackDatabase
+      .query<{ blob: string }, []>(
+        "SELECT blob FROM snapshots ORDER BY seq DESC LIMIT 1"
+      )
+      .get();
+    rollbackDatabase.close();
+    if (!rollbackSnapshotRow) {
+      throw new Error("restored rollback database has no workspace snapshot");
+    }
+    const rollbackBlob: unknown = JSON.parse(rollbackSnapshotRow.blob);
+    if (
+      typeof rollbackBlob !== "object" ||
+      rollbackBlob === null ||
+      !("snapshot" in rollbackBlob)
+    ) {
+      throw new Error("restored rollback snapshot has an invalid shape");
+    }
+    const rollbackSnapshot = workspaceSnapshotSchema.parse(
+      rollbackBlob.snapshot
+    );
+    expect(rollbackSnapshot).toEqual(legacySnapshot);
+    expect(
+      rollbackSnapshot.boards.find((board) => board.boardId === gammaId)
+        ?.columns.done?.[0]?.run?.model
+    ).toBe("anthropic/claude-previous");
+    await migrated.close();
+  });
+
+  test("does not choose between conflicting legacy board models", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chorus-global-model-conflict-"));
+    dirs.push(dir);
+    const first = createStoreAt(dir);
+    await first.load();
+    const firstBoardId = await seedBoard(first, "First");
+    const secondBoardId = await seedBoard(first, "Second");
+    await first.applyMutation(
+      mutation("board.model.set", {
+        boardId: firstBoardId,
+        model: { providerID: "anthropic", modelID: "claude" },
+      })
+    );
+    await first.applyMutation(
+      mutation("board.model.set", {
+        boardId: secondBoardId,
+        model: { providerID: "openai", modelID: "gpt-5" },
+      })
+    );
+    await first.close();
+
+    const recovered = createStoreAt(dir);
+    await recovered.load();
+    expect(
+      recovered.getSnapshot().preferences.defaultModelSelection
+    ).toBeNull();
+    expect(() => statSync(join(dir, "backups"))).toThrow();
+  });
+
+  test("refuses to migrate when its existing rollback backup is corrupt", async () => {
+    const dir = mkdtempSync(
+      join(tmpdir(), "chorus-global-model-corrupt-backup-")
+    );
+    dirs.push(dir);
+    const first = createStoreAt(dir);
+    await first.load();
+    const boardId = await seedBoard(first);
+    await first.applyMutation(
+      mutation("board.model.set", {
+        boardId,
+        model: { providerID: "anthropic", modelID: "claude" },
+      })
+    );
+    await first.close();
+
+    const backupDirectory = join(dir, "backups");
+    mkdirSync(backupDirectory, { recursive: true });
+    writeFileSync(
+      join(backupDirectory, "before-global-model-selection-v1.db"),
+      "not a SQLite database"
+    );
+
+    const recovered = createStoreAt(dir);
+    await expect(recovered.load()).rejects.toThrow(
+      "existing workspace migration backup is invalid"
+    );
+    expect(
+      recovered.getSnapshot().preferences.defaultModelSelection
+    ).toBeNull();
+    expect(recovered.getBoard(boardId)?.modelSelection).toEqual({
+      providerID: "anthropic",
+      modelID: "claude",
+    });
   });
 
   test("every mutation type produces exactly one event", async () => {
@@ -194,6 +556,9 @@ describe("WorkspaceStore persistence", () => {
       mutation("preference.set_voice", { voice: "daniel" }),
       mutation("preference.board_view_mode.set", { mode: "stacked" }),
       mutation("preference.recently_used_models.add", {
+        model: { providerID: "p", modelID: "m" },
+      }),
+      mutation("preference.default_model.set", {
         model: { providerID: "p", modelID: "m" },
       }),
       mutation("board.select", { boardId }),
@@ -658,6 +1023,163 @@ describe("WorkspaceStore snapshots and retention", () => {
 });
 
 describe("WorkspaceStore agent events", () => {
+  test("accepted pending approval resumes the task atomically", async () => {
+    const store = createStore();
+    await store.load();
+    const boardId = await seedActiveBoard(store);
+
+    await store.applyAgentEvent(
+      agentEvent({
+        activity: "waiting_for_approval",
+        permission: "edit",
+        permissionID: "permission-1",
+      })
+    );
+
+    expect(
+      store.getBoard(boardId)?.columns.approve[0]?.pendingApproval?.requestId
+    ).toBe("permission-1");
+    expect(
+      await store.resolvePendingApproval("sess-1", "permission-1", true)
+    ).toBe(true);
+
+    const resumedBoard = store.getBoard(boardId);
+    expect(resumedBoard?.columns.approve).toHaveLength(0);
+    expect(resumedBoard?.columns.in_progress[0]).toMatchObject({
+      id: "task-1",
+      pendingApprovals: [],
+    });
+    expect(
+      resumedBoard?.columns.in_progress[0]?.pendingApproval
+    ).toBeUndefined();
+  });
+
+  test("resolving one of several approvals keeps the task waiting", async () => {
+    const store = createStore();
+    await store.load();
+    const boardId = await seedActiveBoard(store);
+
+    await store.applyAgentEvent(
+      agentEvent({
+        activity: "waiting_for_approval",
+        permission: "edit",
+        permissionID: "permission-1",
+      })
+    );
+    await store.applyAgentEvent(
+      agentEvent({
+        activity: "waiting_for_approval",
+        permission: "bash",
+        permissionID: "permission-2",
+      })
+    );
+
+    expect(
+      await store.resolvePendingApproval("sess-1", "permission-2", true)
+    ).toBe(true);
+    const waitingBoard = store.getBoard(boardId);
+    expect(waitingBoard?.columns.approve).toHaveLength(1);
+    expect(waitingBoard?.columns.approve[0]).toMatchObject({
+      id: "task-1",
+      pendingApprovals: [{ requestId: "permission-1" }],
+    });
+    expect(waitingBoard?.columns.in_progress).toHaveLength(0);
+
+    expect(
+      await store.resolvePendingApproval("sess-1", "permission-1", true)
+    ).toBe(true);
+    const resumedBoard = store.getBoard(boardId);
+    expect(resumedBoard?.columns.approve).toHaveLength(0);
+    expect(resumedBoard?.columns.in_progress[0]).toMatchObject({
+      id: "task-1",
+      pendingApprovals: [],
+    });
+  });
+
+  test("only one concurrent client can answer a pending approval", async () => {
+    const store = createStore();
+    await store.load();
+    const boardId = await seedActiveBoard(store);
+    await store.applyAgentEvent(
+      agentEvent({
+        activity: "waiting_for_approval",
+        permission: "edit",
+        permissionID: "permission-shared",
+      })
+    );
+
+    let releaseAction: (() => void) | undefined;
+    let markActionStarted: (() => void) | undefined;
+    const actionGate = new Promise<void>((resolve) => {
+      releaseAction = resolve;
+    });
+    const actionStarted = new Promise<void>((resolve) => {
+      markActionStarted = resolve;
+    });
+    let actionCalls = 0;
+    const firstResponse = store.runPendingApprovalAction(
+      "sess-1",
+      "permission-shared",
+      async () => {
+        actionCalls += 1;
+        markActionStarted?.();
+        await actionGate;
+        return true;
+      },
+      { accepts: (accepted) => accepted, resume: true }
+    );
+
+    await actionStarted;
+    const secondResponse = await store.runPendingApprovalAction(
+      "sess-1",
+      "permission-shared",
+      () => {
+        actionCalls += 1;
+        return Promise.resolve(true);
+      },
+      { accepts: (accepted) => accepted, resume: true }
+    );
+    expect(secondResponse).toEqual({ status: "already_resolving" });
+    expect(actionCalls).toBe(1);
+
+    releaseAction?.();
+    expect(await firstResponse).toEqual({ status: "accepted", value: true });
+    expect(store.getBoard(boardId)?.columns.in_progress[0]).toMatchObject({
+      id: "task-1",
+      pendingApprovals: [],
+    });
+  });
+
+  test("failed provider responses leave requests retryable", async () => {
+    const store = createStore();
+    await store.load();
+    const boardId = await seedActiveBoard(store);
+    await store.applyAgentEvent(
+      agentEvent({
+        activity: "waiting_for_approval",
+        permission: "edit",
+        permissionID: "permission-retry",
+      })
+    );
+
+    await expect(
+      store.runPendingApprovalAction("sess-1", "permission-retry", () =>
+        Promise.reject(new Error("provider unavailable"))
+      )
+    ).rejects.toThrow("provider unavailable");
+    expect(
+      store.getBoard(boardId)?.columns.approve[0]?.pendingApproval?.requestId
+    ).toBe("permission-retry");
+
+    const retried = await store.runPendingApprovalAction(
+      "sess-1",
+      "permission-retry",
+      async () => true,
+      { accepts: (accepted) => accepted, resume: true }
+    );
+    expect(retried).toEqual({ status: "accepted", value: true });
+  });
+
   test("an agent event expands into several sequenced events", async () => {
     const store = createStore();
     await store.load();
@@ -673,6 +1195,240 @@ describe("WorkspaceStore agent events", () => {
       "step.upserted",
       "card.started",
     ]);
+  });
+
+  test("coalesces streamed deltas without losing per-event idempotency", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chorus-agent-delta-batch-"));
+    dirs.push(dir);
+    const store = createStoreAt(dir);
+    await store.load();
+    const boardId = await seedActiveBoard(store);
+    const startingSeq = store.headSeq();
+    const deltas = ["first ", "second ", "third"].map((delta, index) =>
+      agentEvent({
+        delta,
+        messageID: "message-batched",
+        partID: "part-batched",
+        sourceEventId: `delta-${index}`,
+        timestamp: Date.now() + index,
+      })
+    );
+
+    const commits = await Promise.all(
+      deltas.map((event) => store.applyAgentEvent(event))
+    );
+
+    expect(commits[0]).not.toBeNull();
+    expect(commits.every((commit) => commit === commits[0])).toBe(true);
+    expect(commits[0]?.boardId).toBe(boardId);
+    expect(commits[0]?.events).toHaveLength(1);
+    expect(commits[0]?.events[0]).toMatchObject({
+      delta: "first second third",
+      stepId: "part-msg-message-batched-part-batched",
+      taskId: "task-1",
+      type: "step.delta_appended",
+    });
+    expect(store.headSeq()).toBe(startingSeq + 1);
+    expect(
+      store.getBoard(boardId)?.columns.in_progress[0]?.run?.steps[0]?.content
+    ).toBe("first second third");
+
+    const replayed = createStoreAt(dir);
+    await replayed.load();
+    const replayedHead = replayed.headSeq();
+    for (const event of deltas) {
+      expect(await replayed.applyAgentEvent(event)).toBeNull();
+    }
+    expect(replayed.headSeq()).toBe(replayedHead);
+    expect(
+      replayed.getBoard(boardId)?.columns.in_progress[0]?.run?.steps[0]?.content
+    ).toBe("first second third");
+  });
+
+  test("keeps distinct streamed steps separate in the same batch", async () => {
+    const store = createStore();
+    await store.load();
+    const boardId = await seedActiveBoard(store);
+    const commits = await Promise.all([
+      store.applyAgentEvent(
+        agentEvent({
+          delta: "thinking output",
+          messageID: "message-multiple-steps",
+          partID: "thinking-part",
+        })
+      ),
+      store.applyAgentEvent(
+        agentEvent({
+          delta: "response output",
+          messageID: "message-multiple-steps",
+          partID: "response-part",
+        })
+      ),
+    ]);
+
+    expect(commits[0]).not.toBeNull();
+    expect(commits.every((commit) => commit === commits[0])).toBe(true);
+    expect(commits[0]?.boardId).toBe(boardId);
+    expect(
+      commits[0]?.events.map((event) =>
+        event.type === "step.delta_appended"
+          ? { delta: event.delta, stepId: event.stepId }
+          : event
+      )
+    ).toEqual([
+      {
+        delta: "thinking output",
+        stepId: "part-msg-message-multiple-steps-thinking-part",
+      },
+      {
+        delta: "response output",
+        stepId: "part-msg-message-multiple-steps-response-part",
+      },
+    ]);
+  });
+
+  test("drops late streamed text after the session releases its task", async () => {
+    const store = createStore();
+    await store.load();
+    const boardId = await seedActiveBoard(store);
+    await store.applyAgentEvent(agentEvent({ activity: "idle" }));
+    const startingSeq = store.headSeq();
+
+    expect(store.getBoard(boardId)?.session.currentTaskId).toBeUndefined();
+    expect(
+      await store.applyAgentEvent(
+        agentEvent({
+          delta: "late text",
+          messageID: "message-after-idle",
+          partID: "part-after-idle",
+          sourceEventId: "late-delta-after-idle",
+        })
+      )
+    ).toBeNull();
+    expect(store.headSeq()).toBe(startingSeq);
+    expect(store.getBoard(boardId)?.columns.in_progress).toHaveLength(0);
+    expect(store.getBoard(boardId)?.columns.done[0]?.run?.steps ?? []).toEqual(
+      []
+    );
+  });
+
+  test("flushes buffered text before a later lifecycle event", async () => {
+    const store = createStore();
+    await store.load();
+    await seedActiveBoard(store);
+    const startingSeq = store.headSeq();
+
+    const deltaCommit = store.applyAgentEvent(
+      agentEvent({
+        delta: "output before idle",
+        messageID: "message-barrier",
+        partID: "part-barrier",
+      })
+    );
+    const idleCommit = store.applyAgentEvent(agentEvent({ activity: "idle" }));
+    const [delta, idle] = await Promise.all([deltaCommit, idleCommit]);
+    const appended = store
+      .eventsSince(startingSeq)
+      .map(({ event }) => event.type);
+
+    expect(delta?.events.map((event) => event.type)).toEqual([
+      "step.delta_appended",
+    ]);
+    expect(idle?.events.map((event) => event.type)).toEqual(["session.idle"]);
+    expect(appended).toEqual(["step.delta_appended", "session.idle"]);
+  });
+
+  test("flushes buffered text before a later client mutation", async () => {
+    const store = createStore();
+    await store.load();
+    const boardId = await seedActiveBoard(store);
+    const startingSeq = store.headSeq();
+
+    const deltaCommit = store.applyAgentEvent(
+      agentEvent({
+        delta: "output before move",
+        messageID: "message-mutation-barrier",
+        partID: "part-mutation-barrier",
+      })
+    );
+    const mutationCommit = store.applyMutation(
+      mutation("board.move", { boardId, position: { x: 20, y: 30 } })
+    );
+    const [delta, moved] = await Promise.all([deltaCommit, mutationCommit]);
+    const appended = store
+      .eventsSince(startingSeq)
+      .map(({ event }) => event.type);
+
+    expect(delta?.events.map((event) => event.type)).toEqual([
+      "step.delta_appended",
+    ]);
+    expect(moved?.events.map((event) => event.type)).toEqual(["board.moved"]);
+    expect(appended).toEqual(["step.delta_appended", "board.moved"]);
+  });
+
+  test("flushes pending streamed text before drain and graceful close", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chorus-agent-delta-close-"));
+    dirs.push(dir);
+    const store = createStoreAt(dir);
+    await store.load();
+    const boardId = await seedActiveBoard(store);
+    const event = agentEvent({
+      delta: "persisted on close",
+      messageID: "message-close",
+      partID: "part-close",
+      sourceEventId: "delta-before-close",
+    });
+
+    const pendingCommit = store.applyAgentEvent(event);
+    await store.drain();
+    expect((await pendingCommit)?.events).toHaveLength(1);
+    await store.close();
+
+    const restarted = createStoreAt(dir);
+    await restarted.load();
+    expect(
+      restarted.getBoard(boardId)?.columns.in_progress[0]?.run?.steps[0]
+        ?.content
+    ).toBe("persisted on close");
+    expect(await restarted.applyAgentEvent(event)).toBeNull();
+  });
+
+  test("completes an accepted mutation that is queued before graceful close", async () => {
+    const dir = mkdtempSync(
+      join(tmpdir(), "chorus-agent-delta-close-mutation-")
+    );
+    dirs.push(dir);
+    const store = createStoreAt(dir);
+    await store.load();
+    const boardId = await seedActiveBoard(store);
+    const deltaCommit = store.applyAgentEvent(
+      agentEvent({
+        delta: "output before move",
+        messageID: "message-close-mutation",
+        partID: "part-close-mutation",
+      })
+    );
+    const mutationCommit = store.applyMutation(
+      mutation("board.move", { boardId, position: { x: 20, y: 30 } })
+    );
+    const close = store.close();
+
+    const [delta, moved] = await Promise.all([deltaCommit, mutationCommit]);
+    await close;
+
+    expect(delta?.events.map((event) => event.type)).toEqual([
+      "step.delta_appended",
+    ]);
+    expect(moved?.events.map((event) => event.type)).toEqual(["board.moved"]);
+    expect(moved?.firstSeq).toBe((delta?.lastSeq ?? 0) + 1);
+
+    const restarted = createStoreAt(dir);
+    await restarted.load();
+    expect(restarted.getBoard(boardId)?.position).toEqual({ x: 20, y: 30 });
+    expect(
+      restarted.getBoard(boardId)?.columns.in_progress[0]?.run?.steps[0]
+        ?.content
+    ).toBe("output before move");
   });
 
   test("deduplicates recovered agent events across store restarts", async () => {

@@ -1,11 +1,18 @@
 import { describe, expect, mock, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   EventCallback,
   EventStreamHandle,
   EventStreamOptions,
+  NormalizedAgentEvent,
   OpenCodeAdapter,
+  Session,
   SessionMessageWithParts,
 } from "@chorus/oc-adapter";
+import { normalizeSessionHistory } from "@chorus/oc-adapter";
+import { WorkspaceStore } from "../../workspace/store";
 import { OpenCodeBridge } from "./bridge";
 
 describe("OpenCodeBridge", () => {
@@ -92,6 +99,44 @@ describe("OpenCodeBridge", () => {
     ).toEqual(["/repo/first", "/repo/second", "/repo/first"]);
   });
 
+  test("session reads pass the selected checkout into the SDK request", async () => {
+    const session: Session = {
+      directory: "/repo/board-one",
+      id: "session-board",
+      projectID: "fixture",
+      slug: "session-board",
+      time: { created: 1, updated: 1 },
+      title: "Board one",
+      version: "1.19.0",
+    };
+    const getSession = mock(async () => session);
+    const adapter = {
+      sessions: { get: getSession },
+    } as unknown as OpenCodeAdapter;
+    const engineProvider = {
+      adapterForDirectory: mock(async () => adapter),
+      markReconciled: mock(() => undefined),
+      markSessionActivity: mock(() => undefined),
+      markSubscribed: mock(() => undefined),
+      setEvictionHandler: mock(() => undefined),
+    };
+    const bridge = new OpenCodeBridge(
+      "http://127.0.0.1:4096",
+      "/repo",
+      undefined,
+      { engineProvider }
+    );
+
+    await expect(
+      bridge.getSession({
+        engineDirectory: "/repo/board-one",
+        sessionID: "session-board",
+      })
+    ).resolves.toBe(session);
+
+    expect(getSession).toHaveBeenCalledWith("session-board", "/repo/board-one");
+  });
+
   test("waits for recovered history and pending requests to persist before marking reconciled", async () => {
     const messages = [
       {
@@ -125,6 +170,7 @@ describe("OpenCodeBridge", () => {
     });
     const eventTypes: string[] = [];
     const adapter = {
+      normalizeHistory: normalizeSessionHistory,
       events: {
         subscribe: mock(
           (
@@ -199,6 +245,186 @@ describe("OpenCodeBridge", () => {
     bridge.stop();
   });
 
+  test("rehydrated board recovers its active task, history, and pending requests", async () => {
+    const root = mkdtempSync(join(tmpdir(), "chorus-bridge-restart-"));
+    const repository = join(root, "repository");
+    const dataDirectory = join(root, "data");
+    mkdirSync(repository, { recursive: true });
+    let store: WorkspaceStore | undefined;
+    let bridge: OpenCodeBridge | undefined;
+
+    try {
+      const firstStore = new WorkspaceStore(dataDirectory);
+      store = firstStore;
+      await firstStore.load();
+      const created = await firstStore.applyMutation({
+        baseRevision: null,
+        clientId: "bridge-restart-test",
+        mutationId: "create-restart-board",
+        payload: {
+          seed: {
+            repo: {
+              directory: repository,
+              sandboxes: [],
+              worktree: repository,
+            },
+            title: "Restart board",
+          },
+        },
+        type: "board.create",
+      });
+      const createdEvent = created?.events[0];
+      if (!created || createdEvent?.type !== "board.created") {
+        throw new Error("expected the recovery fixture board to be created");
+      }
+
+      const boardId = createdEvent.board.boardId;
+      await firstStore.applyMutation({
+        baseRevision: null,
+        clientId: "bridge-restart-test",
+        mutationId: "attach-restart-session",
+        payload: {
+          boardId,
+          session: { sessionId: "session-recovered", state: "active" },
+        },
+        type: "board.session.patch",
+      });
+      await firstStore.applyBoardEvents(boardId, [
+        {
+          boardId,
+          column: "queue",
+          task: {
+            id: "task-recovered",
+            label: "Recover task",
+            labelVariant: "primary-light",
+            title: "Recover task",
+          },
+          taskId: "task-recovered",
+          ts: Date.now(),
+          type: "card.created",
+        },
+      ]);
+      await firstStore.close();
+
+      // This is the same durable workspace file Serve opens during startup.
+      const restartedStore = new WorkspaceStore(dataDirectory);
+      store = restartedStore;
+      await restartedStore.load();
+
+      let markReconciled: () => void = () => undefined;
+      const reconciliationFinished = new Promise<void>((resolve) => {
+        markReconciled = resolve;
+      });
+      const history: SessionMessageWithParts[] = [
+        {
+          info: {
+            id: "message-recovered",
+            role: "assistant",
+            time: { created: 100 },
+          },
+          parts: [
+            {
+              id: "part-recovered",
+              messageID: "message-recovered",
+              sessionID: "session-recovered",
+              text: "recovered response text",
+              type: "text",
+            },
+          ],
+        },
+      ] as unknown as SessionMessageWithParts[];
+      const adapter = {
+        normalizeHistory: normalizeSessionHistory,
+        events: {
+          subscribe: mock(
+            (
+              _callback: EventCallback,
+              options?: EventStreamOptions
+            ): Promise<EventStreamHandle> => {
+              options?.onStatus?.("connected");
+              return Promise.resolve({ stop: () => undefined });
+            }
+          ),
+        },
+        permissions: {
+          list: mock(async () => [
+            {
+              id: "permission-recovered",
+              permission: "edit",
+              sessionID: "session-recovered",
+            },
+          ]),
+        },
+        questions: {
+          list: mock(async () => [
+            {
+              id: "question-recovered",
+              questions: [],
+              sessionID: "session-recovered",
+            },
+          ]),
+        },
+        sessions: {
+          messages: mock(async () => history),
+          status: mock(async () => ({ "session-recovered": { type: "busy" } })),
+        },
+      } as unknown as OpenCodeAdapter;
+      const engineProvider = {
+        adapterForDirectory: mock(async () => adapter),
+        markReconciled: mock(() => markReconciled()),
+        markSessionActivity: mock(() => undefined),
+        markSubscribed: mock(() => undefined),
+        setEvictionHandler: mock(() => undefined),
+      };
+      const restartedBridge = new OpenCodeBridge(
+        "http://127.0.0.1:4096",
+        repository,
+        undefined,
+        { engineProvider }
+      );
+      bridge = restartedBridge;
+      restartedBridge.setRecoverySessionProvider(() => ["session-recovered"]);
+      restartedBridge.subscribe(async (event: NormalizedAgentEvent) => {
+        await restartedStore.applyAgentEvent(event);
+      });
+
+      await restartedBridge.subscribeDirectory(repository);
+      await reconciliationFinished;
+
+      const recoveredBoard = restartedStore.getBoard(boardId);
+      const recoveredTask = recoveredBoard?.columns.approve.find(
+        (task) => task.id === "task-recovered"
+      );
+      expect(recoveredBoard?.session).toMatchObject({
+        currentTaskId: "task-recovered",
+        sessionId: "session-recovered",
+        state: "active",
+      });
+      expect(
+        recoveredTask?.run?.steps.some((step) =>
+          step.content?.includes("recovered response text")
+        )
+      ).toBe(true);
+      expect(
+        recoveredTask?.pendingApprovals?.map((request) => request.requestId)
+      ).toEqual(["permission-recovered", "question-recovered"]);
+      expect(
+        restartedStore
+          .eventsSince(0)
+          .filter(
+            ({ event }) =>
+              event.type === "step.upserted" &&
+              event.step.content?.includes("recovered response text") === true
+          )
+      ).toHaveLength(1);
+      expect(engineProvider.markReconciled).toHaveBeenCalledTimes(1);
+    } finally {
+      bridge?.stop();
+      await store?.close();
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
   test("reconciliation ignores sessions that are not attached to recoverable board work", async () => {
     let finishReconciliation: () => void = () => undefined;
     const reconciliationFinished = new Promise<void>((resolve) => {
@@ -206,6 +432,7 @@ describe("OpenCodeBridge", () => {
     });
     const received: string[] = [];
     const adapter = {
+      normalizeHistory: normalizeSessionHistory,
       events: {
         subscribe: mock(
           (
@@ -298,6 +525,7 @@ describe("OpenCodeBridge", () => {
     });
     let reconciliationCount = 0;
     const adapter = {
+      normalizeHistory: normalizeSessionHistory,
       events: {
         subscribe: mock(
           (

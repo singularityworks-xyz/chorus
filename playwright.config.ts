@@ -12,10 +12,8 @@ import { SERVE_PORT, WEB_PORT } from "./e2e/serve-env";
  * - A WebSocket that dies mid-session reconnects on its own.
  * - A 4401 close stops the reconnect loop rather than looping forever.
  *
- * Serve is booted by `globalSetup` with a pinned token and a throwaway data dir,
- * so a spec can stop and restart it mid-session. Next.js runs as a production
- * build rather than `next dev`, because dev-mode hydration does not attach
- * handlers in this app and a spec that cannot drive the UI is not worth running.
+ * Each test gets a fresh Serve workspace. The restart scenario reopens that
+ * test's database. Next.js runs from the packaged standalone build.
  */
 export default defineConfig({
   forbidOnly: Boolean(process.env.CI),
@@ -37,6 +35,8 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   timeout: 60_000,
   use: {
+    actionTimeout: 10_000,
+    navigationTimeout: 15_000,
     baseURL: `http://127.0.0.1:${WEB_PORT}`,
     // The default headless executable is chrome-headless-shell. Playwright's
     // Windows process launcher does not hide its child consoles, so select the
@@ -47,37 +47,29 @@ export default defineConfig({
   projects: [
     {
       name: "desktop",
-      use: { ...devices["Desktop Chrome"] },
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1440, height: 960 },
+      },
     },
     {
       name: "mobile",
-      // The agent lifecycle is server-side behaviour and one project covers it.
-      // Excluded here rather than skipped inside the spec so `beforeEach` never
-      // runs on a phone, where board selection is not drivable.
-      testIgnore: "**/agent.e2e.ts",
-      // The phone layout is the spec §9 deliverable, and the lane list replaces
-      // the canvas below `md`, so the mobile project is not redundant.
+      // These specs exercise controls on the desktop canvas card.
+      testIgnore: [
+        "**/agent.e2e.ts",
+        "**/canvas-controls.e2e.ts",
+        "**/session-history.e2e.ts",
+      ],
       use: { ...devices["Pixel 7"] },
     },
   ],
-  // Neither serve nor the engine is started here.
-  //
-  // One spec stops and restarts serve mid-session, and `webServer` will not let a
-  // test reach its own process. The engine moved for a different reason: Playwright
-  // spawning `opencode serve` proved unreliable here, intermittently leaving the
-  // child dead while the wait ran the full timeout. `globalSetup` starts both,
-  // waits for them explicitly, and `globalTeardown` stops them.
   webServer: [
     {
-      // The production build, not `next dev`.
-      //
-      // Dev-mode hydration does not attach handlers in this app — a controlled
-      // input and a plain `onClick` both stay inert under `next dev` with
-      // Turbopack, while the built output behaves correctly. A spec that cannot
-      // drive the UI is not worth running, and the release gate should exercise
-      // the output that actually ships.
-      command: `bun run --cwd apps/web build && bun run --cwd apps/web start --port ${WEB_PORT}`,
+      command:
+        "bun run --cwd apps/web build && node apps/web/.next/standalone/apps/web/server.js",
       env: {
+        HOSTNAME: "127.0.0.1",
+        PORT: String(WEB_PORT),
         CHORUS_SERVE_URL: `http://127.0.0.1:${SERVE_PORT}`,
         NEXT_PUBLIC_CHORUS_WS_URL: `ws://127.0.0.1:${SERVE_PORT}/ws`,
       },

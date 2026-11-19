@@ -18,6 +18,7 @@ const logger = createLogger(
 
 export interface ManagedEngine {
   assertReady(expectedVersion?: string): Promise<void>;
+  beginShutdown?(): void;
   forceKill?(): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -36,6 +37,7 @@ interface EngineEntry {
 export interface EngineManagerInput {
   adoptExisting: false;
   baseUrl: string;
+  databasePath?: string;
   directory: string;
   expectedVersion: string;
   password?: string;
@@ -52,6 +54,7 @@ export interface EngineRegistryOptions {
   ) => OpenCodeAdapter;
   allocatePort?: () => Promise<number>;
   canonicalize?: (directory: string) => Promise<string>;
+  databasePath?: string;
   expectedVersion: string;
   managerFactory?: (input: EngineManagerInput) => ManagedEngine;
   maxEngines?: number;
@@ -70,6 +73,7 @@ export class EngineRegistry {
   readonly #maxEngines: number;
   readonly #username: string | undefined;
   readonly #password: string | undefined;
+  readonly #databasePath: string | undefined;
   readonly #managerFactory: (input: EngineManagerInput) => ManagedEngine;
   readonly #adapterFactory: (
     baseUrl: string,
@@ -92,6 +96,7 @@ export class EngineRegistry {
     this.#maxEngines = options.maxEngines ?? DEFAULT_ENGINE_LIMIT;
     this.#username = options.username;
     this.#password = options.password;
+    this.#databasePath = options.databasePath;
     this.#managerFactory =
       options.managerFactory ?? ((input) => new OpenCodeProcessManager(input));
     this.#adapterFactory =
@@ -202,8 +207,15 @@ export class EngineRegistry {
     entry.lastUsedAt = this.#now();
   }
 
-  async stop(): Promise<void> {
+  beginShutdown(): void {
     this.#stopped = true;
+    for (const manager of this.#managers) {
+      manager.beginShutdown?.();
+    }
+  }
+
+  async stop(): Promise<void> {
+    this.beginShutdown();
     const pending = [...this.#pending.values()];
     await Promise.allSettled(
       [...this.#managers].map((manager) => manager.stop())
@@ -216,7 +228,7 @@ export class EngineRegistry {
   }
 
   async forceKill(): Promise<void> {
-    this.#stopped = true;
+    this.beginShutdown();
     const managers = [...this.#managers];
     this.#entries.clear();
     this.#pending.clear();
@@ -305,6 +317,7 @@ export class EngineRegistry {
       const manager = this.#managerFactory({
         adoptExisting: false,
         baseUrl,
+        databasePath: this.#databasePath,
         directory,
         expectedVersion: this.#expectedVersion,
         password: this.#password,

@@ -1,5 +1,10 @@
 import { describe, expect, mock, test } from "bun:test";
+import { ReferenceLookupError } from "@chorus/oc-adapter";
 import { Elysia } from "elysia";
+import {
+  BoardTaskCommandError,
+  GlobalModelNotConfiguredError,
+} from "../tasks/board-task-service";
 import { createHttpRoutes } from "./index";
 
 function makeMockBridge() {
@@ -21,7 +26,22 @@ function makeMockBridge() {
         file: "src/main.ts",
       },
     ]),
+    listAutocompleteCommands: mock(async () => [
+      { name: "review", description: "Review changes" },
+    ]),
+    listAutocompleteSkills: mock(async () => [
+      { name: "typescript", description: "TypeScript" },
+    ]),
+    findAutocompleteFiles: mock(async () => [
+      { path: "src/main.ts", type: "file" as const },
+    ]),
+    listAutocompleteDirectory: mock(async () => [
+      { path: "src/test", type: "directory" as const },
+    ]),
     replyPermission: mock(async () => true),
+    replyQuestion: mock(async () => undefined),
+    rejectQuestion: mock(async () => undefined),
+    listQuestions: mock(async () => []),
     forkSession: mock(async () => ({ id: "sess-forked" })),
     getStatus: mock(() => ({
       connected: true,
@@ -38,6 +58,7 @@ function makeMockBoardTasks() {
       boards: [],
       preferences: {
         composerHintDismissed: false,
+        defaultModelSelection: null,
         speechVoiceId: null,
       },
       previousWorkspaces: [],
@@ -49,10 +70,62 @@ function makeMockBoardTasks() {
     queuePrompt: mock(async (input: unknown) => ({
       boardId: (input as { boardId: string }).boardId,
       sessionId: "sess-123",
+      taskId: "task-123",
       createdSession: true,
       accepted: true,
       timestamp: 123,
     })),
+    runQueuedTask: mock(async (boardId: string, taskId: string) => ({
+      boardId,
+      sessionId: "sess-123",
+      status: "accepted" as const,
+      taskId,
+      timestamp: 123,
+    })),
+    retryTask: mock(async (boardId: string, taskId: string) => ({
+      boardId,
+      sessionId: "sess-123",
+      status: "accepted" as const,
+      taskId,
+      timestamp: 123,
+    })),
+    abortTask: mock(async (boardId: string, taskId: string) => ({
+      boardId,
+      sessionId: "sess-123",
+      status: "accepted" as const,
+      taskId,
+      timestamp: 123,
+    })),
+    finalizeReview: mock(async (boardId: string, taskId: string) => ({
+      boardId,
+      sessionId: "sess-123",
+      status: "accepted" as const,
+      taskId,
+      timestamp: 123,
+    })),
+    rejectReview: mock(async (boardId: string, taskId: string) => ({
+      accepted: true as const,
+      boardId,
+      taskId,
+      timestamp: 123,
+    })),
+    getSessionHistoryState: mock(async (boardId: string) => ({
+      boardId,
+      canRedo: false,
+      canUndo: true,
+      busy: false,
+      sessionId: "sess-123",
+      timestamp: 123,
+    })),
+    sessionHistoryCommand: mock(
+      async (boardId: string, command: "undo" | "redo") => ({
+        accepted: true as const,
+        boardId,
+        command,
+        sessionId: "sess-123",
+        timestamp: 123,
+      })
+    ),
   };
 }
 
@@ -64,6 +137,36 @@ describe("HTTP routes", () => {
     const bridge = makeMockBridge();
     const boardTasks = makeMockBoardTasks();
     const updateBoardSession = mock(async () => undefined);
+    const resolvePendingApproval = mock(
+      async (_sessionID: string, _requestID: string, _resume: boolean) => false
+    );
+    const runPendingApprovalAction = mock(
+      async (
+        sessionID: string,
+        requestID: string,
+        action: () => Promise<unknown>,
+        options?: {
+          accepts?: (value: unknown) => boolean;
+          resume?: boolean;
+        }
+      ): Promise<
+        | { status: "accepted"; value: unknown }
+        | { status: "already_resolving" }
+        | { status: "not_pending" }
+        | { status: "rejected" }
+      > => {
+        const value = await action();
+        if (options?.accepts && !options.accepts(value)) {
+          return { status: "rejected" as const };
+        }
+        await resolvePendingApproval(
+          sessionID,
+          requestID,
+          options?.resume ?? false
+        );
+        return { status: "accepted" as const, value };
+      }
+    );
     const app = new Elysia().use(
       createHttpRoutes(
         bridge as never,
@@ -72,20 +175,37 @@ describe("HTTP routes", () => {
         // and resolves the checkout a follow-up command runs against. A session it
         // cannot place is refused rather than silently defaulted.
         {
+          getBoard: (boardId: string) =>
+            boardId === "board-1"
+              ? {
+                  boardId,
+                  repo: { directory: "/repo", worktree: BOARD_WORKTREE },
+                  session: { currentTaskId: "task-1", sessionId: "sess-123" },
+                }
+              : undefined,
           getBoardBySessionId: (sessionID: string) =>
             sessionID === "sess-1" || sessionID === "sess-123"
               ? {
                   boardId: "board-1",
                   repo: { directory: "/repo", worktree: BOARD_WORKTREE },
+                  session: { currentTaskId: "task-1", sessionId: sessionID },
                 }
               : undefined,
           getSnapshot: () => ({ boards: [] }),
-          resolvePendingApproval: async () => false,
+          resolvePendingApproval,
+          runPendingApprovalAction,
           updateBoardSession,
         } as never
       )
     );
-    return { app, bridge, boardTasks, updateBoardSession };
+    return {
+      app,
+      bridge,
+      boardTasks,
+      resolvePendingApproval,
+      runPendingApprovalAction,
+      updateBoardSession,
+    };
   }
 
   describe("GET /health", () => {
@@ -120,6 +240,122 @@ describe("HTTP routes", () => {
         opencodeUrl: "http://localhost:4096",
         activeSessions: 2,
         uptime: 1000,
+      });
+    });
+  });
+
+  describe("GET /boards/:boardID/autocomplete", () => {
+    test("uses the selected board worktree for normalized suggestions", async () => {
+      const { app, bridge, boardTasks } = makeApp();
+      const response = await app.handle(
+        new Request(
+          "http://localhost/boards/board-1/autocomplete?kind=files&query=main"
+        )
+      );
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        kind: "files",
+        files: ["src/main.ts"],
+      });
+      expect(boardTasks.assertBoardOpen).toHaveBeenCalledWith("board-1");
+      expect(boardTasks.assertCheckoutAuthorized).toHaveBeenCalledWith(
+        BOARD_WORKTREE
+      );
+      expect(bridge.findAutocompleteFiles).toHaveBeenCalledWith(
+        "main",
+        BOARD_WORKTREE
+      );
+    });
+
+    test("serves commands, skills, and directory entries from the board checkout", async () => {
+      const { app, bridge } = makeApp();
+      const commandsResponse = await app.handle(
+        new Request(
+          "http://localhost/boards/board-1/autocomplete?kind=commands"
+        )
+      );
+      const skillsResponse = await app.handle(
+        new Request("http://localhost/boards/board-1/autocomplete?kind=skills")
+      );
+      const directoryResponse = await app.handle(
+        new Request(
+          "http://localhost/boards/board-1/autocomplete?kind=directory&path=%2Fsrc"
+        )
+      );
+
+      expect(commandsResponse.status).toBe(200);
+      expect(await commandsResponse.json()).toEqual({
+        kind: "commands",
+        commands: [{ name: "review", description: "Review changes" }],
+      });
+      expect(skillsResponse.status).toBe(200);
+      expect(await skillsResponse.json()).toEqual({
+        kind: "skills",
+        skills: [{ name: "typescript", description: "TypeScript" }],
+      });
+      expect(directoryResponse.status).toBe(200);
+      expect(await directoryResponse.json()).toEqual({
+        kind: "directory",
+        entries: [{ path: "src/test", type: "directory" }],
+      });
+      expect(bridge.listAutocompleteCommands).toHaveBeenCalledWith(
+        BOARD_WORKTREE
+      );
+      expect(bridge.listAutocompleteSkills).toHaveBeenCalledWith(
+        BOARD_WORKTREE
+      );
+      expect(bridge.listAutocompleteDirectory).toHaveBeenCalledWith(
+        "src",
+        BOARD_WORKTREE
+      );
+    });
+
+    test("rejects unknown boards, invalid lookups, and paths outside the board", async () => {
+      const { app, bridge } = makeApp();
+      const unknownBoard = await app.handle(
+        new Request(
+          "http://localhost/boards/missing/autocomplete?kind=commands"
+        )
+      );
+      const invalidKind = await app.handle(
+        new Request("http://localhost/boards/board-1/autocomplete?kind=other")
+      );
+      const escapingPath = await app.handle(
+        new Request(
+          "http://localhost/boards/board-1/autocomplete?kind=directory&path=..%2Fsecret"
+        )
+      );
+      const rootedWindowsPath = await app.handle(
+        new Request(
+          "http://localhost/boards/board-1/autocomplete?kind=directory&path=%5Csecret"
+        )
+      );
+
+      expect(unknownBoard.status).toBe(404);
+      expect(invalidKind.status).toBe(422);
+      expect(escapingPath.status).toBe(422);
+      expect(rootedWindowsPath.status).toBe(422);
+      expect(bridge.listAutocompleteDirectory).not.toHaveBeenCalled();
+    });
+
+    test("maps provider failures to a retryable client error", async () => {
+      const { app, bridge } = makeApp();
+      bridge.listAutocompleteCommands.mockRejectedValue(
+        new ReferenceLookupError("OpenCode command.list failed: disconnected")
+      );
+
+      const response = await app.handle(
+        new Request(
+          "http://localhost/boards/board-1/autocomplete?kind=commands"
+        )
+      );
+
+      expect(response.status).toBe(502);
+      expect(await response.json()).toEqual({
+        code: "autocomplete_unavailable",
+        message:
+          "Could not load board suggestions. Check the provider connection and retry.",
       });
     });
   });
@@ -179,6 +415,7 @@ describe("HTTP routes", () => {
       expect(body).toEqual({
         boardId: "board-1",
         sessionId: "sess-123",
+        taskId: "task-123",
         createdSession: true,
         accepted: true,
         timestamp: 123,
@@ -235,11 +472,37 @@ describe("HTTP routes", () => {
 
       expect(res.status).toBe(422);
     });
+
+    test("returns a recoverable conflict when the global model is missing", async () => {
+      const { app, boardTasks } = makeApp();
+      boardTasks.queuePrompt.mockRejectedValue(
+        new GlobalModelNotConfiguredError()
+      );
+
+      const response = await app.handle(
+        new Request("http://localhost/tasks", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            boardId: "board-1",
+            directory: "/tmp/repo",
+            text: "build a feature",
+          }),
+        })
+      );
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        code: "global_model_not_configured",
+        message:
+          "Choose one provider and model in Settings before starting a task.",
+      });
+    });
   });
 
   describe("POST /tasks/:sessionID/approve", () => {
     test("approves a permission request", async () => {
-      const { app, bridge } = makeApp();
+      const { app, bridge, resolvePendingApproval } = makeApp();
 
       const res = await app.handle(
         new Request("http://localhost/tasks/sess-1/approve", {
@@ -266,6 +529,11 @@ describe("HTTP routes", () => {
         reply: "once",
         message: undefined,
       });
+      expect(resolvePendingApproval).toHaveBeenCalledWith(
+        "sess-1",
+        "perm-1",
+        true
+      );
     });
 
     test("passes optional message", async () => {
@@ -303,6 +571,177 @@ describe("HTTP routes", () => {
     });
   });
 
+  describe("board task commands", () => {
+    test("reads and changes history through the explicit board session", async () => {
+      const { app, boardTasks } = makeApp();
+
+      const stateResponse = await app.handle(
+        new Request("http://localhost/boards/board-1/session/history")
+      );
+      const commandResponse = await app.handle(
+        new Request("http://localhost/boards/board-1/session/history/undo", {
+          method: "POST",
+        })
+      );
+
+      expect(stateResponse.status).toBe(200);
+      expect(await stateResponse.json()).toMatchObject({
+        boardId: "board-1",
+        canUndo: true,
+        canRedo: false,
+      });
+      expect(boardTasks.getSessionHistoryState).toHaveBeenCalledWith("board-1");
+      expect(commandResponse.status).toBe(200);
+      expect(await commandResponse.json()).toMatchObject({
+        accepted: true,
+        boardId: "board-1",
+        command: "undo",
+      });
+      expect(boardTasks.sessionHistoryCommand).toHaveBeenCalledWith(
+        "board-1",
+        "undo"
+      );
+    });
+
+    test("rejects unsupported board session history commands", async () => {
+      const { app, boardTasks } = makeApp();
+
+      const response = await app.handle(
+        new Request("http://localhost/boards/board-1/session/history/reset", {
+          method: "POST",
+        })
+      );
+
+      expect(response.status).toBe(422);
+      expect(boardTasks.sessionHistoryCommand).not.toHaveBeenCalled();
+    });
+
+    test("maps session history failures to actionable HTTP errors", async () => {
+      const { app, boardTasks } = makeApp();
+      boardTasks.getSessionHistoryState.mockRejectedValue(
+        new BoardTaskCommandError(
+          "session_history_unavailable",
+          "Could not load repository history for this board. Refresh the board and retry."
+        )
+      );
+      boardTasks.sessionHistoryCommand.mockRejectedValue(
+        new BoardTaskCommandError(
+          "session_command_failed",
+          "Refresh repository history before trying again."
+        )
+      );
+
+      const stateResponse = await app.handle(
+        new Request("http://localhost/boards/board-1/session/history")
+      );
+      const commandResponse = await app.handle(
+        new Request("http://localhost/boards/board-1/session/history/undo", {
+          method: "POST",
+        })
+      );
+
+      expect(stateResponse.status).toBe(503);
+      expect(await stateResponse.json()).toEqual({
+        code: "session_history_unavailable",
+        message:
+          "Could not load repository history for this board. Refresh the board and retry.",
+      });
+      expect(commandResponse.status).toBe(502);
+      expect(await commandResponse.json()).toEqual({
+        code: "session_command_failed",
+        message: "Refresh repository history before trying again.",
+      });
+    });
+
+    test("routes Run and Retry with explicit board and task identities", async () => {
+      const { app, boardTasks } = makeApp();
+
+      const runResponse = await app.handle(
+        new Request("http://localhost/boards/board-1/tasks/task-1/run", {
+          method: "POST",
+        })
+      );
+      const retryResponse = await app.handle(
+        new Request("http://localhost/boards/board-1/tasks/task-2/retry", {
+          method: "POST",
+        })
+      );
+
+      expect(runResponse.status).toBe(200);
+      expect(retryResponse.status).toBe(200);
+      expect(boardTasks.runQueuedTask).toHaveBeenCalledWith(
+        "board-1",
+        "task-1"
+      );
+      expect(boardTasks.retryTask).toHaveBeenCalledWith("board-1", "task-2");
+    });
+
+    test("routes Stop with explicit board and task identities", async () => {
+      const { app, boardTasks } = makeApp();
+
+      const response = await app.handle(
+        new Request("http://localhost/boards/board-1/tasks/task-5/abort", {
+          method: "POST",
+        })
+      );
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ accepted: true });
+      expect(boardTasks.abortTask).toHaveBeenCalledWith("board-1", "task-5");
+    });
+
+    test("routes plan finalize and reject with explicit board and task identities", async () => {
+      const { app, boardTasks } = makeApp();
+      const payload = { answers: ["Use the safer option"], plan: "step one" };
+
+      const finalizeResponse = await app.handle(
+        new Request(
+          "http://localhost/boards/board-1/tasks/task-3/finalize-review",
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          }
+        )
+      );
+      const rejectResponse = await app.handle(
+        new Request(
+          "http://localhost/boards/board-1/tasks/task-4/reject-review",
+          { method: "POST" }
+        )
+      );
+
+      expect(finalizeResponse.status).toBe(200);
+      expect(await finalizeResponse.json()).toMatchObject({ accepted: true });
+      expect(boardTasks.finalizeReview).toHaveBeenCalledWith(
+        "board-1",
+        "task-3",
+        payload
+      );
+      expect(rejectResponse.status).toBe(200);
+      expect(boardTasks.rejectReview).toHaveBeenCalledWith("board-1", "task-4");
+    });
+
+    test("returns a recoverable conflict when another task is active", async () => {
+      const { app, boardTasks } = makeApp();
+      boardTasks.runQueuedTask.mockRejectedValue(
+        new BoardTaskCommandError("board_busy", "This board is busy.")
+      );
+
+      const response = await app.handle(
+        new Request("http://localhost/boards/board-1/tasks/task-1/run", {
+          method: "POST",
+        })
+      );
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        code: "board_busy",
+        message: "This board is busy.",
+      });
+    });
+  });
+
   describe("POST /tasks/:sessionID/reject", () => {
     test("rejects a permission request", async () => {
       const { app, bridge } = makeApp();
@@ -335,9 +774,99 @@ describe("HTTP routes", () => {
     });
   });
 
-  describe("POST /tasks/:sessionID/abort", () => {
-    test("aborts a running session", async () => {
+  describe("question commands", () => {
+    test("answers a question with an explicit accepted acknowledgment", async () => {
+      const { app, bridge, resolvePendingApproval, runPendingApprovalAction } =
+        makeApp();
+
+      const response = await app.handle(
+        new Request(
+          "http://localhost/tasks/sess-1/questions/question-1/reply",
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              answers: [
+                { questionIndex: 0, optionIndices: [1], customAnswer: "" },
+              ],
+            }),
+          }
+        )
+      );
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        accepted: true,
+        requestID: "question-1",
+        sessionID: "sess-1",
+        timestamp: expect.any(Number),
+      });
+      expect(bridge.replyQuestion).toHaveBeenCalledWith({
+        answers: [{ questionIndex: 0, optionIndices: [1], customAnswer: "" }],
+        directory: BOARD_WORKTREE,
+        requestID: "question-1",
+      });
+      expect(resolvePendingApproval).toHaveBeenCalledWith(
+        "sess-1",
+        "question-1",
+        true
+      );
+      expect(runPendingApprovalAction).toHaveBeenCalledTimes(1);
+    });
+
+    test("reports a conflict when another client is already answering", async () => {
+      const { app, bridge, runPendingApprovalAction } = makeApp();
+      runPendingApprovalAction.mockImplementation(async () => ({
+        status: "already_resolving",
+      }));
+
+      const response = await app.handle(
+        new Request(
+          "http://localhost/tasks/sess-1/questions/question-1/reply",
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ answers: [] }),
+          }
+        )
+      );
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        code: "pending_approval_conflict",
+        message:
+          "Another client is already responding to this request. Wait for the board to sync before trying again.",
+      });
+      expect(bridge.replyQuestion).not.toHaveBeenCalled();
+    });
+
+    test("rejects a question with an explicit accepted acknowledgment", async () => {
       const { app, bridge } = makeApp();
+
+      const response = await app.handle(
+        new Request(
+          "http://localhost/tasks/sess-1/questions/question-1/reject",
+          { method: "POST" }
+        )
+      );
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        accepted: true,
+        requestID: "question-1",
+        sessionID: "sess-1",
+        timestamp: expect.any(Number),
+      });
+      expect(bridge.rejectQuestion).toHaveBeenCalledWith(
+        "question-1",
+        BOARD_WORKTREE
+      );
+    });
+  });
+
+  describe("POST /tasks/:sessionID/abort", () => {
+    test("resolves the current board task and uses the task lifecycle command", async () => {
+      const { app, boardTasks, bridge } = makeApp();
 
       const res = await app.handle(
         new Request("http://localhost/tasks/sess-1/abort", {
@@ -350,16 +879,18 @@ describe("HTTP routes", () => {
       expect(res.status).toBe(200);
 
       const body = await res.json();
-      expect(body).toEqual({
+      expect(body).toMatchObject({
+        boardId: "board-1",
+        taskId: "task-1",
+        sessionId: "sess-123",
+        status: "accepted",
         sessionID: "sess-1",
         accepted: true,
         timestamp: expect.any(Number),
       });
 
-      expect(bridge.abortSession).toHaveBeenCalledWith(
-        "sess-1",
-        BOARD_WORKTREE
-      );
+      expect(boardTasks.abortTask).toHaveBeenCalledWith("board-1", "task-1");
+      expect(bridge.abortSession).not.toHaveBeenCalled();
     });
 
     test("refuses a session no board owns", async () => {

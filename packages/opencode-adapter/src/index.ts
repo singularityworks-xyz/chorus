@@ -3,9 +3,11 @@ import { createRequire } from "node:module";
 import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2";
 import { createClient as createAdapterClient } from "./features/client/client";
 import { ConfigManager } from "./features/config/config-manager";
+import type { SessionMessageWithParts } from "./features/events/event-stream";
 import {
   EventStream,
   normalizeEvent,
+  normalizeSessionHistory,
   resetMessageTracking,
 } from "./features/events/event-stream";
 import { InstanceManager } from "./features/instance/instance-manager";
@@ -13,6 +15,7 @@ import { PermissionHandler } from "./features/permissions/permission-handler";
 import { ProjectManager } from "./features/projects/project-manager";
 import { ProviderManager } from "./features/providers/provider-manager";
 import { QuestionHandler } from "./features/questions/question-handler";
+import { WorkspaceReferenceManager } from "./features/references/reference-manager";
 import { SessionManager } from "./features/session/session-manager";
 import { TuiManager } from "./features/tui/tui-manager";
 
@@ -75,6 +78,11 @@ export type {
   QuestionRequest,
 } from "./features/questions/question-handler";
 export type {
+  CommandReference,
+  FileReference,
+} from "./features/references/reference-manager";
+export { ReferenceLookupError } from "./features/references/reference-manager";
+export type {
   SessionCommandInput,
   SessionCreateInput,
   SessionFileDiff,
@@ -102,6 +110,7 @@ export class OpenCodeAdapter {
   readonly questions: QuestionHandler;
   readonly projects: ProjectManager;
   readonly providers: ProviderManager;
+  readonly references: WorkspaceReferenceManager;
   readonly tui: TuiManager;
 
   constructor(client: OpencodeClient, normalizationScope = "default") {
@@ -115,6 +124,7 @@ export class OpenCodeAdapter {
     this.questions = new QuestionHandler(client);
     this.projects = new ProjectManager(client);
     this.providers = new ProviderManager(client);
+    this.references = new WorkspaceReferenceManager(client);
     this.tui = new TuiManager(client);
   }
 
@@ -132,6 +142,8 @@ export class OpenCodeAdapter {
   }
 
   normalize = (event: Event) => normalizeEvent(event, this.#normalizationScope);
+  normalizeHistory = (sessionID: string, messages: SessionMessageWithParts[]) =>
+    normalizeSessionHistory(sessionID, messages, this.#normalizationScope);
   /** The SDK version this adapter is compiled against. See decision #5. */
   sdkVersion = sdkVersion;
   resetMessageTracking = resetMessageTracking;

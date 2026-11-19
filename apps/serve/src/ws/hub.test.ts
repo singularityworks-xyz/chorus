@@ -71,11 +71,17 @@ function makeSocket(buffered = 0): FakeSocket {
 
 async function connect(hub: WorkspaceHub, socket: FakeSocket, since = 0) {
   hub.register(socket);
-  await hub.handleRawMessage(socket, JSON.stringify({ since, type: "hello" }));
+  await hub.handleRawMessage(
+    socket,
+    JSON.stringify({ since, type: "hello", workspaceId: hub.workspaceId })
+  );
 }
 
 /** Seeds a board and returns its id. */
-async function seedBoard(store: WorkspaceStore): Promise<string> {
+async function seedBoard(
+  store: WorkspaceStore,
+  title = "Repo"
+): Promise<string> {
   const commit = await store.applyMutation({
     baseRevision: null,
     clientId: "hub-test",
@@ -83,7 +89,7 @@ async function seedBoard(store: WorkspaceStore): Promise<string> {
     payload: {
       seed: {
         repo: { directory: "/tmp/repo", sandboxes: [], worktree: "/tmp/repo" },
-        title: "Repo",
+        title,
       },
     },
     type: "board.create",
@@ -170,7 +176,11 @@ describe("resume handshake", () => {
 
     await connect(hub, socket, 0);
 
-    expect(socket.messages[0]).toEqual({ head: 0, type: "ready" });
+    expect(socket.messages[0]).toEqual({
+      head: 0,
+      type: "ready",
+      workspaceId: store.workspaceId,
+    });
     expect(socket.messages[1]?.type).toBe("snapshot");
     expect(hub.clientCount()).toBe(1);
 
@@ -186,7 +196,11 @@ describe("resume handshake", () => {
 
     await connect(hub, socket, store.headSeq());
 
-    expect(socket.messages[0]).toEqual({ head: 1, type: "ready" });
+    expect(socket.messages[0]).toEqual({
+      head: 1,
+      type: "ready",
+      workspaceId: store.workspaceId,
+    });
     expect(socket.messages).toHaveLength(1);
 
     hub.close();
@@ -257,6 +271,43 @@ describe("resume handshake", () => {
     await connect(hub, socket, 9999);
 
     expect(socket.messages[1]?.type).toBe("snapshot");
+
+    hub.close();
+  });
+
+  test("a different workspace with the same sequence gets a fresh snapshot", async () => {
+    const previous = makeStore();
+    await previous.load();
+    const previousBoardId = await seedBoard(previous, "Previous workspace");
+
+    const current = makeStore();
+    await current.load();
+    const currentBoardId = await seedBoard(current, "Current workspace");
+    expect(current.headSeq()).toBe(previous.headSeq());
+    expect(current.workspaceId).not.toBe(previous.workspaceId);
+
+    const hub = new WorkspaceHub(current);
+    const socket = makeSocket();
+    hub.register(socket);
+    await hub.handleRawMessage(
+      socket,
+      JSON.stringify({
+        since: previous.headSeq(),
+        type: "hello",
+        workspaceId: previous.workspaceId,
+      })
+    );
+
+    expect(socket.messages[1]?.type).toBe("snapshot");
+    const snapshot = socket.messages[1]?.data as {
+      boards: { boardId: string }[];
+    };
+    expect(snapshot.boards.map((board) => board.boardId)).toEqual([
+      currentBoardId,
+    ]);
+    expect(snapshot.boards.map((board) => board.boardId)).not.toContain(
+      previousBoardId
+    );
 
     hub.close();
   });
@@ -428,6 +479,13 @@ describe("decideResume", () => {
     expect(decideResume(10, 10, 0)).toEqual({ kind: "up-to-date" });
   });
 
+  test("a changed workspace always replaces the cached state", () => {
+    expect(decideResume(10, 10, 0, false)).toEqual({
+      kind: "snapshot",
+      reason: "workspace-changed",
+    });
+  });
+
   test("a small gap replays from the client's position", () => {
     expect(decideResume(10, 12, 0)).toEqual({
       fromSeq: 10,
@@ -547,6 +605,7 @@ describe("command rate limit", () => {
 
     expect(socket.closeCalls.at(-1)?.code).toBe(4429);
     expect(hub.clientCount()).toBe(0);
+    expect(hub.stats().dropReasons["command-rate-limit"]).toBe(1);
 
     hub.close();
   });
@@ -1061,6 +1120,7 @@ describe("heartbeat", () => {
     expect(socket.closeCalls.at(-1)?.code).toBe(4000);
     expect(socket.closeCalls.at(-1)?.reason).toBe("pong timeout");
     expect(hub.clientCount()).toBe(0);
+    expect(hub.stats().dropReasons["pong-timeout"]).toBe(1);
 
     // Regression: the heartbeat used to clear only the client set, leaving the
     // id map holding a dead client. A late frame on that id then resolved to a
@@ -1138,7 +1198,10 @@ describe("sequence accounting across coalescing", () => {
 
     const a = makeSocket(0);
     hub.register(a);
-    await hub.handleRawMessage(a, JSON.stringify({ since: 0, type: "hello" }));
+    await hub.handleRawMessage(
+      a,
+      JSON.stringify({ since: 0, type: "hello", workspaceId: hub.workspaceId })
+    );
     a.messages.length = 0;
 
     // The seed events above are already buffered; deliver them, then start
@@ -1169,7 +1232,11 @@ describe("sequence accounting across coalescing", () => {
     hub.register(b);
     await hub.handleRawMessage(
       b,
-      JSON.stringify({ since: last.seq, type: "hello" })
+      JSON.stringify({
+        since: last.seq,
+        type: "hello",
+        workspaceId: hub.workspaceId,
+      })
     );
 
     const replayed = b.messages
@@ -1200,7 +1267,11 @@ describe("sequence accounting across coalescing", () => {
     hub.register(b);
     await hub.handleRawMessage(
       b,
-      JSON.stringify({ since: headBefore, type: "hello" })
+      JSON.stringify({
+        since: headBefore,
+        type: "hello",
+        workspaceId: hub.workspaceId,
+      })
     );
     const fromReplay = b.messages.filter((m) => m.type === "event");
     expect(fromReplay.length).toBeGreaterThan(0);

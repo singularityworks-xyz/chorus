@@ -1,6 +1,14 @@
 import { Database } from "bun:sqlite";
-import { chmodSync, copyFileSync, mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  constants as fsConstants,
+  mkdirSync,
+  rmSync,
+} from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 
 /**
  * SQLite layer for the Chorus event log (spec §5).
@@ -17,6 +25,7 @@ import { join } from "node:path";
 export const CHORUS_DB_FILENAME = "chorus.db";
 
 export const HEAD_SEQ_KEY = "head_seq";
+export const WORKSPACE_ID_KEY = "workspace_id";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS events (
@@ -142,6 +151,21 @@ export function resolveDbPath(dataDir: string): string {
   return join(dataDir, CHORUS_DB_FILENAME);
 }
 
+function databaseIntegrity(databasePath: string): string {
+  let probe: Database | null = null;
+  try {
+    probe = new Database(databasePath, { readonly: true, create: false });
+    const row = probe
+      .query<{ integrity_check: string }, []>("PRAGMA integrity_check")
+      .get();
+    return row?.integrity_check ?? "unknown";
+  } catch (error) {
+    return `unreadable: ${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    probe?.close();
+  }
+}
+
 /**
  * Opens (creating if needed) the Chorus database.
  *
@@ -187,6 +211,17 @@ export class ChorusDatabase {
       )
       .get(key);
     return row?.value ?? null;
+  }
+
+  getOrCreateMeta(key: string, initialValue: string): string {
+    this.#db
+      .query("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)")
+      .run(key, initialValue);
+    const value = this.getMeta(key);
+    if (value === null) {
+      throw new Error(`failed to initialize database metadata: ${key}`);
+    }
+    return value;
   }
 
   hasAgentReceipt(receiptId: string): boolean {
@@ -440,9 +475,17 @@ export class ChorusDatabase {
     events: EventToAppend[],
     mutationKey: { id: string; ts: number } | null,
     metaChanges: MetaChange[] = [],
-    agentReceipt?: { id: string; ts: number }
+    agentReceipt?:
+      | { id: string; ts: number }
+      | Array<{ id: string; ts: number }>
   ): { firstSeq: number; lastSeq: number } {
-    if (events.length === 0 && !agentReceipt) {
+    let agentReceipts: Array<{ id: string; ts: number }> = [];
+    if (Array.isArray(agentReceipt)) {
+      agentReceipts = agentReceipt;
+    } else if (agentReceipt) {
+      agentReceipts = [agentReceipt];
+    }
+    if (events.length === 0 && agentReceipts.length === 0) {
       const head = this.headSeq();
       return { firstSeq: head + 1, lastSeq: head };
     }
@@ -451,21 +494,29 @@ export class ChorusDatabase {
       .transaction(() => {
         let seq = this.headSeq();
 
-        if (agentReceipt) {
-          this.#db
-            .query(
-              "INSERT INTO agent_receipts (receipt_id, received_at) VALUES (?, ?)"
-            )
-            .run(agentReceipt.id, agentReceipt.ts);
+        if (agentReceipts.length > 0) {
+          const insertReceipt = this.#db.query(
+            "INSERT INTO agent_receipts (receipt_id, received_at) VALUES (?, ?)"
+          );
+          for (const receipt of agentReceipts) {
+            insertReceipt.run(receipt.id, receipt.ts);
+          }
         }
 
-        for (const event of events) {
-          seq += 1;
-          this.#db
-            .query(
-              "INSERT INTO events (seq, ts, board_id, type, payload) VALUES (?, ?, ?, ?, ?)"
-            )
-            .run(seq, event.ts, event.boardId, event.type, event.payload);
+        if (events.length > 0) {
+          const insertEvent = this.#db.query(
+            "INSERT INTO events (seq, ts, board_id, type, payload) VALUES (?, ?, ?, ?, ?)"
+          );
+          for (const event of events) {
+            seq += 1;
+            insertEvent.run(
+              seq,
+              event.ts,
+              event.boardId,
+              event.type,
+              event.payload
+            );
+          }
         }
 
         this.setMeta(HEAD_SEQ_KEY, String(seq));
@@ -614,6 +665,64 @@ export class ChorusDatabase {
     this.#db.query("VACUUM INTO ?").run(destination);
   }
 
+  /** Creates or validates a private, immutable rollback copy. */
+  createVerifiedBackup(destination: string): boolean {
+    const resolvedDestination = resolve(destination);
+    if (resolvedDestination === this.path) {
+      throw new Error("A workspace backup cannot replace the active database.");
+    }
+
+    const directory = dirname(resolvedDestination);
+    mkdirSync(directory, { mode: 0o700, recursive: true });
+    chmodSync(directory, 0o700);
+
+    if (existsSync(resolvedDestination)) {
+      const integrity = databaseIntegrity(resolvedDestination);
+      if (integrity !== "ok") {
+        throw new Error(
+          `The existing workspace migration backup is invalid (${integrity}); refusing to migrate.`
+        );
+      }
+      chmodSync(resolvedDestination, 0o600);
+      return false;
+    }
+
+    const temporaryPath = join(
+      directory,
+      `.${basename(resolvedDestination)}.${randomUUID()}.tmp`
+    );
+    let destinationCreated = false;
+    try {
+      this.#db.query("VACUUM INTO ?").run(temporaryPath);
+      chmodSync(temporaryPath, 0o600);
+      const temporaryIntegrity = databaseIntegrity(temporaryPath);
+      if (temporaryIntegrity !== "ok") {
+        throw new Error(
+          `The workspace backup failed its integrity check (${temporaryIntegrity}).`
+        );
+      }
+
+      copyFileSync(
+        temporaryPath,
+        resolvedDestination,
+        fsConstants.COPYFILE_EXCL
+      );
+      destinationCreated = true;
+      chmodSync(resolvedDestination, 0o600);
+      return true;
+    } catch (cause) {
+      if (destinationCreated) {
+        rmSync(resolvedDestination, { force: true });
+      }
+      throw new Error(
+        `Could not create a verified workspace migration backup at ${resolvedDestination}.`,
+        { cause }
+      );
+    } finally {
+      rmSync(temporaryPath, { force: true });
+    }
+  }
+
   close(): void {
     if (this.#closed) {
       return;
@@ -649,7 +758,10 @@ export function restoreDatabaseFile(
 
   let probe: Database | null = null;
   try {
-    probe = new Database(dbPath, { readonly: true });
+    // SQLite cannot open a WAL-mode database read-only when it needs to create
+    // the shared-memory sidecar. The restore directory is private and writable,
+    // so open the already-existing file read/write for the integrity check.
+    probe = new Database(dbPath, { create: false });
     const row = probe
       .query<{ integrity_check: string }, []>("PRAGMA integrity_check")
       .get();

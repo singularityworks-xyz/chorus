@@ -275,11 +275,17 @@ describe("board lifecycle events", () => {
       taskId: TASK,
       plan: "step one",
       questions: ["which?"],
+      questionAnswers: ["option A"],
+      reviewApproved: true,
+      errorMessage: null,
     });
 
     const task = columnOf(next, "in_progress")[0];
     expect(task.plan).toBe("step one");
     expect(task.questions).toEqual(["which?"]);
+    expect(task.questionAnswers).toEqual(["option A"]);
+    expect(task.reviewApproved).toBe(true);
+    expect(task.errorMessage).toBeUndefined();
   });
 
   test("board.created and board.removed do not mutate an existing board", () => {
@@ -494,6 +500,7 @@ describe("card lifecycle events", () => {
 
     expect(laneOf(next, TASK)).toBe("done");
     expect(next.session.currentTaskId).toBeUndefined();
+    expect(columnOf(next, "done")[0]?.outcome).toBe("succeeded");
   });
 
   test("card.failed moves to done and marks the session errored", () => {
@@ -508,6 +515,22 @@ describe("card lifecycle events", () => {
     expect(laneOf(next, TASK)).toBe("done");
     expect(next.session.state).toBe("error");
     expect(next.session.errorMessage).toBe("boom");
+    expect(columnOf(next, "done")[0]?.outcome).toBe("failed");
+    expect(columnOf(next, "done")[0]?.errorMessage).toBe("boom");
+  });
+
+  test("card.aborted moves a rejected plan to done and releases the task", () => {
+    const next = applyEventToBoard(makeBoard(), {
+      type: "card.aborted",
+      ts: T0,
+      boardId: BOARD,
+      taskId: TASK,
+      reason: "Plan rejected",
+    });
+
+    expect(laneOf(next, TASK)).toBe("done");
+    expect(next.session.currentTaskId).toBeUndefined();
+    expect(columnOf(next, "done")[0]?.outcome).toBe("aborted");
   });
 
   test("moves are idempotent — re-applying a move is a no-op", () => {
@@ -785,15 +808,17 @@ describe("session events", () => {
     expect(laneOf(next, TASK)).toBe("done");
     expect(next.session.currentTaskId).toBeUndefined();
     expect(next.session.state).toBe("active");
+    expect(columnOf(next, "done")[0]?.outcome).toBe("succeeded");
   });
 
   test("session.idle in manual review moves the card to approve and stores the plan", () => {
     const board = makeBoard({
-      reviewMode: "manual",
+      reviewMode: "auto",
       columns: {
         queue: [],
         in_progress: [
           makeTask({
+            promptInput: { reviewMode: "manual", text: "Fix the bug" },
             run: {
               elapsed: "0m 00s",
               model: "claude",
@@ -824,6 +849,53 @@ describe("session events", () => {
 
     expect(laneOf(next, TASK)).toBe("approve");
     expect(columnOf(next, "approve")[0].plan).toBe("the plan");
+    expect(columnOf(next, "approve")[0].outcome).toBe("awaiting_review");
+  });
+
+  test("review mode changes during a run do not alter that task policy", () => {
+    const board = makeBoard({
+      reviewMode: "auto",
+      columns: {
+        queue: [],
+        in_progress: [
+          makeTask({
+            promptInput: { reviewMode: "manual", text: "Fix the bug" },
+          }),
+        ],
+        approve: [],
+        done: [],
+      },
+    });
+
+    const next = applyEventToBoard(board, {
+      type: "session.idle",
+      ts: T0,
+      boardId: BOARD,
+    });
+
+    expect(laneOf(next, TASK)).toBe("approve");
+    expect(columnOf(next, "approve")[0]?.outcome).toBe("awaiting_review");
+  });
+
+  test("legacy tasks use the board review mode when no task policy was saved", () => {
+    const board = makeBoard({
+      reviewMode: "manual",
+      columns: {
+        queue: [],
+        in_progress: [makeTask()],
+        approve: [],
+        done: [],
+      },
+    });
+
+    const next = applyEventToBoard(board, {
+      type: "session.idle",
+      ts: T0,
+      boardId: BOARD,
+    });
+
+    expect(laneOf(next, TASK)).toBe("approve");
+    expect(columnOf(next, "approve")[0]?.outcome).toBe("awaiting_review");
   });
 
   test("session.idle with no current task is a no-op", () => {
@@ -845,6 +917,8 @@ describe("session events", () => {
     expect(next.session.state).toBe("error");
     expect(next.session.errorMessage).toBe("exploded");
     expect(next.session.currentTaskId).toBeUndefined();
+    expect(columnOf(next, "done")[0]?.outcome).toBe("failed");
+    expect(columnOf(next, "done")[0]?.errorMessage).toBe("exploded");
   });
 
   test("session.timeout moves the card to done but keeps the session state", () => {
@@ -858,6 +932,8 @@ describe("session events", () => {
     expect(laneOf(next, TASK)).toBe("done");
     expect(next.session.state).toBe("active");
     expect(next.session.errorMessage).toBe("no activity");
+    expect(columnOf(next, "done")[0]?.outcome).toBe("timed_out");
+    expect(columnOf(next, "done")[0]?.errorMessage).toBe("no activity");
   });
 });
 
@@ -867,6 +943,7 @@ describe("workspace-scoped events", () => {
     preferences: {
       boardViewMode: "relaxed" as const,
       composerHintDismissed: false,
+      defaultModelSelection: null,
       recentlyUsedModels: [],
       speechVoiceId: null,
     },
@@ -920,6 +997,25 @@ describe("workspace-scoped events", () => {
       mode: "stacked",
     });
     expect(next.preferences.boardViewMode).toBe("stacked");
+  });
+
+  test("global model selection is shared and can be cleared", () => {
+    const selected = applyEventToWorkspace(workspace, {
+      type: "preference.default_model_set",
+      ts: T0,
+      model: { providerID: "anthropic", modelID: "claude" },
+    });
+    expect(selected.preferences.defaultModelSelection).toEqual({
+      providerID: "anthropic",
+      modelID: "claude",
+    });
+
+    const cleared = applyEventToWorkspace(selected, {
+      type: "preference.default_model_set",
+      ts: T0,
+      model: null,
+    });
+    expect(cleared.preferences.defaultModelSelection).toBeNull();
   });
 
   test("recent models prepend and de-duplicate", () => {
@@ -990,6 +1086,7 @@ describe("formatting via the public API", () => {
         queue: [],
         in_progress: [
           makeTask({
+            promptInput: { reviewMode: "manual", text: "Fix the bug" },
             run: {
               elapsed: "0m 00s",
               model: "claude",
@@ -1037,6 +1134,7 @@ describe("formatting via the public API", () => {
         queue: [],
         in_progress: [
           makeTask({
+            promptInput: { reviewMode: "manual", text: "Fix the bug" },
             run: {
               elapsed: "0m 00s",
               model: "claude",

@@ -81,6 +81,37 @@ export interface OpencodeProviderOauthAuthorization {
   url: string;
 }
 
+export class ProviderOperationError extends Error {
+  readonly operation: string;
+
+  constructor(operation: string, errorCode?: string) {
+    super(`OpenCode ${operation} failed${errorCode ? ` (${errorCode})` : ""}`);
+    this.name = "ProviderOperationError";
+    this.operation = operation;
+  }
+}
+
+function unwrap<T>(
+  result: { data?: T; error?: unknown },
+  operation: string
+): T {
+  if (result.data !== undefined) {
+    return result.data;
+  }
+
+  const errorCode =
+    typeof result.error === "object" &&
+    result.error !== null &&
+    "code" in result.error &&
+    typeof result.error.code === "string"
+      ? result.error.code
+      : undefined;
+  throw new ProviderOperationError(
+    operation,
+    errorCode ?? (result.error === undefined ? "no_data" : "engine_error")
+  );
+}
+
 export class ProviderManager {
   readonly client: OpencodeClient;
 
@@ -94,12 +125,7 @@ export class ProviderManager {
   }): Promise<OpencodeModelCatalog> {
     const result = await this.client.provider.list();
 
-    const providers = result.data;
-    if (!providers) {
-      return {
-        models: [],
-      };
-    }
+    const providers = unwrap(result, "provider.list");
 
     const connected = new Set(providers.connected);
     const models = providers.all
@@ -167,13 +193,8 @@ export class ProviderManager {
       }),
     ]);
 
-    const providers = providersResult.data;
-    const authMethods = authResult.data ?? {};
-    if (!providers) {
-      return {
-        providers: [],
-      };
-    }
+    const providers = unwrap(providersResult, "provider.list");
+    const authMethods = unwrap(authResult, "provider.auth");
 
     const connected = new Set(providers.connected);
 
@@ -211,8 +232,10 @@ export class ProviderManager {
       workspace: input.workspace,
     });
 
+    const authMethods = unwrap(result, "provider.auth");
+
     return {
-      methods: result.data?.[input.providerID] ?? [],
+      methods: authMethods[input.providerID] ?? [],
     };
   }
 
@@ -231,11 +254,7 @@ export class ProviderManager {
       inputs: input.inputs,
     });
 
-    if (!result.data) {
-      throw new Error("OpenCode provider oauth authorize returned no data");
-    }
-
-    return result.data;
+    return unwrap(result, "provider.oauth.authorize");
   }
 
   async completeOauth(input: {
@@ -253,7 +272,7 @@ export class ProviderManager {
       code: input.code,
     });
 
-    return result.data ?? false;
+    return unwrap(result, "provider.oauth.callback");
   }
 
   async setApiAuth(input: {
@@ -269,6 +288,6 @@ export class ProviderManager {
       },
     });
 
-    return result.data ?? false;
+    return unwrap(result, "auth.set");
   }
 }

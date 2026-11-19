@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorkspaceStore } from "../workspace/store";
@@ -30,7 +30,7 @@ function makeRepository(): string {
     cwd: directory,
     windowsHide: true,
   });
-  return directory;
+  return realpathSync(directory);
 }
 
 describe("RepositoryRegistry", () => {

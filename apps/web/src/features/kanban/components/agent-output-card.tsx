@@ -12,13 +12,15 @@ import {
   MessageSquareIcon,
   SquareIcon,
   TerminalIcon,
+  TriangleAlertIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useCallback, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import { abortBoardTask } from "../task-abort-client";
+import { copyTextToClipboard } from "../utils/copy-text-to-clipboard";
 import { type GroupedStep, groupSteps } from "../utils/group-steps";
+import { StreamedContentPanel } from "./streamed-content-panel";
 
 export type AgentStepKind =
   | "thinking"
@@ -51,65 +53,76 @@ export interface AgentRunContext {
   taskTitle: string;
 }
 
-export const PLACEHOLDER_RUN: AgentRunContext = {
-  sessionId: "session_placeholder_001",
-  taskTitle: "Implement real-time collaborative cursor tracking via WebSocket",
-  model: "claude-sonnet-4-5",
-  elapsed: "2m 03s",
-  steps: [
-    {
-      id: "step-1",
-      kind: "thinking",
-      status: "done",
-      summary: "Planning WebSocket cursor broadcast architecture",
-      content:
-        "I'll implement a shared cursor state using a WebSocket server. Each client will broadcast cursor position on mousemove with debouncing, and receive cursor positions of all other connected clients. I'll use a Map<sessionId, {x, y, userId}> on the server to track state.",
-    },
-    {
-      id: "step-2",
-      kind: "tool_call",
-      status: "done",
-      summary: "read_file(apps/serve/src/ws/handler.ts)",
-    },
-    {
-      id: "step-3",
-      kind: "file_edit",
-      status: "done",
-      summary: "apps/serve/src/ws/cursor-handler.ts",
-      filePath: "apps/serve/src/ws/cursor-handler.ts",
-      linesAdded: 64,
-      linesRemoved: 0,
-      originalContent:
-        "// Original file content here\n// This will be replaced by the diff editor",
-      modifiedContent:
-        "// New file content here\n// With cursor tracking logic added",
-    },
-    {
-      id: "step-4",
-      kind: "file_edit",
-      status: "done",
-      summary: "apps/web/src/hooks/use-cursors.ts",
-      filePath: "apps/web/src/hooks/use-cursors.ts",
-      linesAdded: 38,
-      linesRemoved: 5,
-    },
-    {
-      id: "step-5",
-      kind: "command",
-      status: "done",
-      summary: "bun run check-types",
-      content: "Found 0 errors.",
-    },
-    {
-      id: "step-6",
-      kind: "response",
-      status: "running",
-      summary: "Writing implementation summary…",
-      content:
-        "I've implemented shared cursor tracking. The server broadcasts cursor positions via WebSocket, and the `useCursors` hook handles debounced emission and remote-cursor rendering. Types are clean.",
-    },
-  ],
+export function getFilePreviewContent(step: AgentStep) {
+  return step.modifiedContent ?? step.content;
+}
+
+const FILE_CONTENT_UNAVAILABLE_MESSAGES: Record<AgentStepStatus, string> = {
+  done: "The agent completed this edit without sending file contents.",
+  error: "File contents are unavailable because this edit failed.",
+  running: "Waiting for the agent to send file contents.",
 };
+
+export function FileContentUnavailable({
+  status,
+}: {
+  status: AgentStepStatus;
+}) {
+  return (
+    <p
+      className="flex h-[200px] items-center justify-center px-4 text-center text-[0.7rem] text-white/40"
+      role={status === "error" ? "alert" : "status"}
+    >
+      {FILE_CONTENT_UNAVAILABLE_MESSAGES[status]}
+    </p>
+  );
+}
+
+const EMPTY_AGENT_STEPS: AgentStep[] = [];
+const MARKDOWN_REFRESH_INTERVAL_MS = 100;
+const COPY_STATE_PRESENTATION = {
+  copying: {
+    iconClass: "text-white/30",
+    label: "Copy response",
+    title: "Copy response",
+  },
+  copied: {
+    iconClass: "text-emerald-400",
+    label: "Response copied",
+    title: "Response copied",
+  },
+  error: {
+    iconClass: "text-rose-400",
+    label: "Copy response failed",
+    title: "Could not copy. Select the response and copy it manually.",
+  },
+  idle: {
+    iconClass: "text-white/30",
+    label: "Copy response",
+    title: "Copy response",
+  },
+} as const;
+
+function useStreamedMarkdownContent(content: string, isStreaming: boolean) {
+  const [displayedContent, setDisplayedContent] = useState(content);
+  const latestContent = useRef(content);
+  latestContent.current = content;
+
+  useEffect(() => {
+    if (!isStreaming) {
+      setDisplayedContent(latestContent.current);
+      return;
+    }
+
+    setDisplayedContent(latestContent.current);
+    const interval = window.setInterval(() => {
+      setDisplayedContent(latestContent.current);
+    }, MARKDOWN_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(interval);
+  }, [isStreaming]);
+
+  return isStreaming ? displayedContent : content;
+}
 
 const STEP_META: Record<
   AgentStepKind,
@@ -174,6 +187,10 @@ function GroupedThinkingBlock({
   const [expanded, setExpanded] = useState(false);
   const hasContent = group.content && group.content.length > 0;
   const stepCount = group.sourceSteps.length;
+  const displayedContent = useStreamedMarkdownContent(
+    group.content,
+    isRunning && expanded
+  );
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -201,6 +218,8 @@ function GroupedThinkingBlock({
 
         {hasContent && (
           <button
+            aria-expanded={expanded}
+            aria-label={`${expanded ? "Collapse" : "Expand"} thinking details`}
             className="shrink-0 rounded-xs p-0.5 transition-colors hover:bg-white/10"
             onClick={() => setExpanded(!expanded)}
             type="button"
@@ -215,13 +234,11 @@ function GroupedThinkingBlock({
       </div>
 
       {expanded && hasContent && (
-        <div className="ml-5 rounded-xs border border-violet-500/10 bg-violet-500/[0.03] px-3 py-2.5">
-          <div className="text-[0.72rem] text-violet-300/60 leading-relaxed">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {group.content}
-            </ReactMarkdown>
-          </div>
-        </div>
+        <StreamedContentPanel
+          className="border-violet-500/10 bg-violet-500/[0.03] text-violet-300/60"
+          content={displayedContent}
+          kind="thinking"
+        />
       )}
     </div>
   );
@@ -241,15 +258,58 @@ function GroupedResponseBlock({
 }) {
   const isRunning = group.status === "running";
   const [expanded, setExpanded] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<
+    "idle" | "copying" | "copied" | "error"
+  >("idle");
+  const copyTimeout = useRef<number | null>(null);
+  const mounted = useRef(false);
+  const copyPresentation = COPY_STATE_PRESENTATION[copyState];
   const hasContent = group.content && group.content.length > 0;
   const stepCount = group.sourceSteps.length;
+  const displayedContent = useStreamedMarkdownContent(
+    group.content,
+    isRunning && expanded
+  );
 
-  function handleCopy() {
-    if (group.content) {
-      navigator.clipboard.writeText(group.content);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (copyTimeout.current !== null) {
+        window.clearTimeout(copyTimeout.current);
+        copyTimeout.current = null;
+      }
+    };
+  }, []);
+
+  async function handleCopy() {
+    if (!group.content || copyState === "copying") {
+      return;
+    }
+
+    if (copyTimeout.current !== null) {
+      window.clearTimeout(copyTimeout.current);
+      copyTimeout.current = null;
+    }
+
+    setCopyState("copying");
+    try {
+      await copyTextToClipboard(
+        group.content,
+        typeof navigator === "undefined" ? undefined : navigator.clipboard
+      );
+      if (!mounted.current) {
+        return;
+      }
+      setCopyState("copied");
+      copyTimeout.current = window.setTimeout(() => {
+        setCopyState("idle");
+        copyTimeout.current = null;
+      }, 2000);
+    } catch {
+      if (mounted.current) {
+        setCopyState("error");
+      }
     }
   }
 
@@ -280,18 +340,18 @@ function GroupedResponseBlock({
         {hasContent && (
           <>
             <button
-              className="shrink-0 rounded-xs p-0.5 transition-colors hover:bg-white/10"
+              aria-label={copyPresentation.label}
+              className="shrink-0 rounded-xs p-0.5 transition-colors hover:bg-white/10 disabled:cursor-wait"
+              disabled={copyState === "copying"}
               onClick={handleCopy}
+              title={copyPresentation.title}
               type="button"
             >
-              <CopyIcon
-                className={cn(
-                  "size-3",
-                  copied ? "text-emerald-400" : "text-white/30"
-                )}
-              />
+              <CopyIcon className={cn("size-3", copyPresentation.iconClass)} />
             </button>
             <button
+              aria-expanded={expanded}
+              aria-label={`${expanded ? "Collapse" : "Expand"} response`}
               className="shrink-0 rounded-xs p-0.5 transition-colors hover:bg-white/10"
               onClick={() => setExpanded(!expanded)}
               type="button"
@@ -306,25 +366,74 @@ function GroupedResponseBlock({
         )}
       </div>
 
+      {copyState === "error" && (
+        <p className="ml-5 text-[0.65rem] text-rose-300/85" role="alert">
+          Could not copy the response. Select the text and copy it manually.
+        </p>
+      )}
+      {copyState === "copied" && (
+        <span className="sr-only" role="status">
+          Response copied to clipboard.
+        </span>
+      )}
+
       {expanded && hasContent && (
-        <div className="ml-5 rounded-xs border border-sky-500/10 bg-sky-500/[0.03] px-3 py-2.5">
-          <div className="text-[0.72rem] text-sky-300/70 leading-relaxed">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {group.content}
-            </ReactMarkdown>
-          </div>
-        </div>
+        <StreamedContentPanel
+          className="border-sky-500/10 bg-sky-500/[0.03] text-sky-300/70"
+          content={displayedContent}
+          kind="response"
+        />
       )}
     </div>
   );
 }
 
+export function FileEditContents({
+  canShowDiff,
+  filePath,
+  showDiff,
+  step,
+}: {
+  canShowDiff: boolean;
+  filePath: string;
+  showDiff: boolean;
+  step: AgentStep;
+}) {
+  if (
+    showDiff &&
+    canShowDiff &&
+    step.originalContent !== undefined &&
+    step.modifiedContent !== undefined
+  ) {
+    return (
+      <InlineDiffView
+        language={inferLanguage(filePath)}
+        modified={step.modifiedContent}
+        original={step.originalContent}
+      />
+    );
+  }
+
+  const fileContent = getFilePreviewContent(step);
+  if (fileContent === undefined) {
+    return <FileContentUnavailable status={step.status} />;
+  }
+
+  return (
+    <BorderlessFileView
+      filePath={filePath}
+      height="200px"
+      language={inferLanguage(filePath)}
+      value={fileContent}
+    />
+  );
+}
+
 function ChangesBlock({ step }: { step: AgentStep }) {
-  const isRunning = step.status === "running";
   const [expanded, setExpanded] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
-  const hasOriginal = step.originalContent && step.originalContent.length > 0;
-  const hasModified = step.modifiedContent && step.modifiedContent.length > 0;
+  const hasOriginal = step.originalContent !== undefined;
+  const hasModified = step.modifiedContent !== undefined;
   const hasActualChanges =
     (step.linesAdded ?? 0) > 0 || (step.linesRemoved ?? 0) > 0;
   const canShowDiff = hasOriginal && hasModified && hasActualChanges;
@@ -332,15 +441,25 @@ function ChangesBlock({ step }: { step: AgentStep }) {
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center gap-2">
-        {isRunning ? (
+        {step.status === "running" && (
           <Loader2Icon className="size-3 shrink-0 animate-spin text-emerald-400/60" />
-        ) : (
-          <CheckCircle2Icon className="size-3 shrink-0 text-white/20" />
+        )}
+        {step.status === "error" && (
+          <TriangleAlertIcon
+            aria-hidden="true"
+            className="size-3 shrink-0 text-red-400/80"
+          />
+        )}
+        {step.status === "done" && (
+          <CheckCircle2Icon
+            aria-hidden="true"
+            className="size-3 shrink-0 text-white/20"
+          />
         )}
 
         <FilePenLineIcon className="size-3 shrink-0 text-emerald-400" />
         <span className="font-medium text-[0.65rem] text-emerald-400 uppercase tracking-wider">
-          Edit
+          {step.status === "error" ? "Edit failed" : "Edit"}
         </span>
 
         <span className="min-w-0 flex-1 truncate font-mono text-[0.72rem] text-white/60">
@@ -358,6 +477,7 @@ function ChangesBlock({ step }: { step: AgentStep }) {
 
         {canShowDiff && (
           <button
+            aria-expanded={showDiff}
             className={cn(
               "shrink-0 rounded-xs px-1.5 py-0.5 font-medium text-[0.6rem] transition-colors",
               showDiff
@@ -372,6 +492,8 @@ function ChangesBlock({ step }: { step: AgentStep }) {
         )}
 
         <button
+          aria-expanded={expanded}
+          aria-label={`${expanded ? "Collapse" : "Expand"} ${step.filePath ?? "file change"}`}
           className="shrink-0 rounded-xs p-0.5 transition-colors hover:bg-white/10"
           onClick={() => setExpanded(!expanded)}
           type="button"
@@ -386,27 +508,12 @@ function ChangesBlock({ step }: { step: AgentStep }) {
 
       {expanded && step.filePath && (
         <div className="ml-5 overflow-hidden rounded-xs border border-white/5 bg-[#0d0d0d]">
-          {showDiff &&
-          canShowDiff &&
-          step.originalContent &&
-          step.modifiedContent ? (
-            <InlineDiffView
-              language={inferLanguage(step.filePath)}
-              modified={step.modifiedContent}
-              original={step.originalContent}
-            />
-          ) : (
-            <BorderlessFileView
-              filePath={step.filePath}
-              height="200px"
-              language={inferLanguage(step.filePath)}
-              value={
-                step.modifiedContent ??
-                step.content ??
-                `// File: ${step.filePath}\n// Content will appear here once the agent provides it`
-              }
-            />
-          )}
+          <FileEditContents
+            canShowDiff={canShowDiff}
+            filePath={step.filePath}
+            showDiff={showDiff}
+            step={step}
+          />
         </div>
       )}
     </div>
@@ -461,33 +568,60 @@ function GroupedStepRow({ group }: { group: GroupedStep }) {
 
 interface AgentOutputCardProps {
   accentClass?: string;
+  boardId: string;
   className?: string;
-  run: AgentRunContext;
+  isActive: boolean;
+  run?: AgentRunContext;
+  taskId: string;
+  taskTitle: string;
 }
 
 export function AgentOutputCard({
+  boardId,
+  isActive,
   run,
+  taskId,
+  taskTitle,
   accentClass: _accentClass = "bg-primary-light",
   className,
 }: AgentOutputCardProps) {
-  const doneCount = run.steps.filter((s) => s.status === "done").length;
-  const isLive = run.steps.some((s) => s.status === "running");
-  const groupedSteps = groupSteps(run.steps);
+  const steps = run?.steps ?? EMPTY_AGENT_STEPS;
+  const doneCount = steps.filter((s) => s.status === "done").length;
+  const progressPercent =
+    steps.length === 0 ? 0 : Math.round((doneCount / steps.length) * 100);
+  const groupedSteps = useMemo(() => groupSteps(steps), [steps]);
   const [aborting, setAborting] = useState(false);
+  const [stopAccepted, setStopAccepted] = useState(false);
+  const [abortError, setAbortError] = useState<string | null>(null);
+  const abortInFlight = useRef(false);
+
+  useEffect(() => {
+    if (!isActive) {
+      setStopAccepted(false);
+    }
+  }, [isActive]);
 
   const handleAbort = useCallback(async () => {
-    if (!run.sessionId || aborting) {
+    if (abortInFlight.current || stopAccepted) {
       return;
     }
+    abortInFlight.current = true;
     setAborting(true);
+    setAbortError(null);
     try {
-      await fetch(`/api/tasks/${run.sessionId}/abort`, { method: "POST" });
-    } catch {
-      // abort failed — UI will update via WS events regardless
+      await abortBoardTask(boardId, taskId);
+      setStopAccepted(true);
+    } catch (error) {
+      setAbortError(
+        error instanceof Error
+          ? error.message
+          : "Could not stop this task. Refresh the board and try again."
+      );
     } finally {
+      abortInFlight.current = false;
       setAborting(false);
     }
-  }, [run.sessionId, aborting]);
+  }, [boardId, taskId, stopAccepted]);
 
   return (
     <div
@@ -498,40 +632,42 @@ export function AgentOutputCard({
     >
       <div className="flex items-center gap-2 border-white/8 border-b bg-white/1.5 px-3 py-2">
         <span className="relative flex size-2">
-          {isLive && (
+          {isActive && (
             <span className="absolute inline-flex size-full animate-ping rounded-full bg-sky-400 opacity-50" />
           )}
           <span
             className={cn(
               "relative inline-flex size-2 rounded-full",
-              isLive ? "bg-sky-400" : "bg-white/20"
+              isActive ? "bg-sky-400" : "bg-white/20"
             )}
           />
         </span>
 
         <span className="min-w-0 flex-1 truncate font-medium text-[0.7rem] text-white/70">
-          {run.taskTitle}
+          {taskTitle}
         </span>
 
-        <span className="shrink-0 rounded-xs border border-white/8 bg-white/5 px-1.5 py-0.5 font-mono text-[0.6rem] text-white/40">
-          {run.model}
-        </span>
+        {run?.model && (
+          <span className="shrink-0 rounded-xs border border-white/8 bg-white/5 px-1.5 py-0.5 font-mono text-[0.6rem] text-white/40">
+            {run.model}
+          </span>
+        )}
 
-        {isLive && (
+        {isActive && (
           <button
             className={cn(
               "flex items-center gap-1 rounded-xs border px-1.5 py-0.5 font-medium text-[0.6rem] transition-colors",
-              aborting
+              aborting || stopAccepted
                 ? "cursor-not-allowed border-white/10 bg-white/5 text-white/20"
                 : "border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:text-red-300"
             )}
-            disabled={aborting}
+            disabled={aborting || stopAccepted}
             onClick={handleAbort}
             title="Interrupt agent"
             type="button"
           >
             <SquareIcon className="size-2.5" />
-            {aborting ? "Stopping" : "Stop"}
+            {aborting || stopAccepted ? "Stopping" : "Stop"}
           </button>
         )}
       </div>
@@ -542,28 +678,40 @@ export function AgentOutputCard({
             group.kind === "thinking" || group.kind === "response"
               ? group.id
               : group.step.id;
-          const uniqueKey =
-            "sourceSteps" in group
-              ? `${stepId}-${group.sourceSteps.length}-${group.sourceSteps[0]?.id}`
-              : `${stepId}-${group.step.content?.slice(0, 50)}`;
-          return <GroupedStepRow group={group} key={uniqueKey} />;
+          return <GroupedStepRow group={group} key={stepId} />;
         })}
+        {steps.length === 0 && (
+          <p className="text-[0.68rem] text-white/35" role="status">
+            Waiting for the agent to send its first update…
+          </p>
+        )}
       </div>
+
+      {abortError && (
+        <p
+          className="border-rose-500/15 border-t bg-rose-500/[0.03] px-3 py-2 text-[0.68rem] text-rose-300/85"
+          role="alert"
+        >
+          {abortError}
+        </p>
+      )}
 
       <div className="flex items-center gap-3 border-white/5 border-t px-3 py-2">
         <div className="h-1 flex-1 overflow-hidden rounded-full bg-white/8">
           <div
             className={cn(
               "h-full rounded-full transition-all duration-500",
-              isLive ? "bg-sky-500" : "bg-white/30"
+              isActive ? "bg-sky-500" : "bg-white/30"
             )}
             style={{
-              width: `${Math.round((doneCount / run.steps.length) * 100)}%`,
+              width: `${progressPercent}%`,
             }}
           />
         </div>
         <span className="shrink-0 text-[0.65rem] text-white/30 tabular-nums">
-          {doneCount}/{run.steps.length} steps · {run.elapsed}
+          {steps.length === 0
+            ? `Waiting · ${run?.elapsed ?? "…"}`
+            : `${doneCount}/${steps.length} steps · ${run?.elapsed ?? ""}`}
         </span>
       </div>
     </div>

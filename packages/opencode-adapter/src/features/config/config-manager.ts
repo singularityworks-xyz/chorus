@@ -1,5 +1,27 @@
 import type { Config, OpencodeClient } from "@opencode-ai/sdk/v2";
 
+function unwrap<T>(
+  result: { data?: T; error?: unknown },
+  operation: string
+): T {
+  if (result.data !== undefined) {
+    return result.data;
+  }
+
+  const errorCode =
+    typeof result.error === "object" &&
+    result.error !== null &&
+    "code" in result.error &&
+    typeof result.error.code === "string"
+      ? ` (${result.error.code})`
+      : "";
+  if (result.error !== undefined) {
+    throw new Error(`OpenCode ${operation} failed${errorCode}`);
+  }
+
+  throw new Error(`OpenCode ${operation} returned no data and no error`);
+}
+
 export class ConfigManager {
   readonly client: OpencodeClient;
 
@@ -16,12 +38,21 @@ export class ConfigManager {
       workspace: input?.workspace,
     });
 
-    return result.data ?? {};
+    return unwrap(result, "config.get");
   }
 
   async getGlobal(): Promise<Config> {
     const result = await this.client.global.config.get();
-    return result.data ?? {};
+    return unwrap(result, "global.config.get");
+  }
+
+  async listConfiguredProviders(): Promise<{ providerIDs: string[] }> {
+    const config = await this.getGlobal();
+    return {
+      providerIDs: Object.keys(config.provider ?? {}).sort((left, right) =>
+        left.localeCompare(right)
+      ),
+    };
   }
 
   async updateGlobal(config: Config): Promise<Config> {
@@ -29,7 +60,7 @@ export class ConfigManager {
       config,
     });
 
-    return result.data ?? config;
+    return unwrap(result, "global.config.update");
   }
 
   async configureGlobalProvider(providerID: string): Promise<Config> {

@@ -1,21 +1,17 @@
 "use client";
 
-import { BorderlessFileView, DiffFloatingWindow } from "@chorus/monaco";
+import { DiffFloatingWindow } from "@chorus/monaco";
 import type { Node, NodeProps } from "@xyflow/react";
 import {
   ChevronDownIcon,
   Code2Icon,
   GitBranchIcon,
-  GlobeIcon,
   GripVerticalIcon,
   LoaderCircleIcon,
-  MonitorIcon,
-  Redo2Icon,
   TriangleAlertIcon,
-  Undo2Icon,
   XIcon,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -25,6 +21,9 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { BoardSessionHistoryControls } from "@/features/kanban/components/board-session-history-controls";
+import { DiffNotice } from "@/features/kanban/components/diff-notice";
+import { GitStatusFeedback } from "@/features/kanban/components/git-status-feedback";
 import {
   KanbanCardContent,
   type KanbanCardData,
@@ -48,8 +47,9 @@ export interface KanbanCardNodeData {
   gitBranch?: string;
   gitStatus?: GitStatus | null;
   hasMobilePrompt?: boolean;
-  onRemove?: (id: string) => void;
-  onUpdateColumns?: (id: string, columns: KanbanCardData["columns"]) => void;
+  isRemoving?: boolean;
+  onRemove: (id: string) => void;
+  onUpdateColumns: (id: string, columns: KanbanCardData["columns"]) => void;
   projectName?: string;
   reviewMode?: "manual" | "auto";
   sessionId?: string;
@@ -60,6 +60,16 @@ export interface KanbanCardNodeData {
 
 const kanbanHeaderControlClass =
   "flex h-6 items-center rounded-xs font-medium text-[0.65rem] leading-none";
+
+function focusBoardPrompt(
+  boardId: string,
+  focusBoardLocally: (boardId: string) => void
+) {
+  focusBoardLocally(boardId);
+  window.requestAnimationFrame(() => {
+    document.getElementById("chorus-prompt-input")?.focus();
+  });
+}
 
 function FilePath({ path }: { path: string }) {
   const parts = path.split("/");
@@ -262,114 +272,41 @@ function inferLanguage(path?: string): string {
   return ext ? (langMap[ext] ?? "plaintext") : "plaintext";
 }
 
-function KanbanCardNodeComponent({
-  data: rawData,
-  draggable,
-  id,
-  selected,
-}: NodeProps<Node<Record<string, unknown>>>) {
-  const cardData = rawData as unknown as KanbanCardNodeData;
-  const [editorMode, setEditorMode] = useState<"kanban" | "file" | null>(null);
+function useBoardDiffs(sessionId?: string) {
   const [diffVisible, setDiffVisible] = useState(false);
   const [diffFiles, setDiffFiles] = useState<SessionFileDiff[]>([]);
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [diffNotice, setDiffNotice] = useState<string | null>(null);
   const [selectedDiffFile, setSelectedDiffFile] =
     useState<SessionFileDiff | null>(null);
   const [isLoadingDiff, setIsLoadingDiff] = useState(false);
-  const [localGitStatus, setLocalGitStatus] = useState<GitStatus | null>(
-    cardData.gitStatus ?? null
-  );
-
-  const { kanbanHistory, restorePrompt } = useWorkspace();
-
-  // Approve, reject, column moves and review mode live in one hook so the phone
-  // lane list runs the same code as this card rather than a copy of it.
-  const {
-    handleApprove,
-    handleColumnsChange,
-    handlePlanChange,
-    handleQuestionsAnswered,
-    handleReject,
-    handleReviewModeChange,
-  } = useKanbanCardActions({
-    boardId: cardData.boardId,
-    columns: cardData.columns,
-    onUpdateColumns: cardData.onUpdateColumns,
-    sessionId: cardData.sessionId,
-  });
-
-  const filePath = cardData.filePath ?? cardData.projectName ?? cardData.title;
-
-  useEffect(() => {
-    if (!filePath) {
-      return;
-    }
-
-    let cancelled = false;
-
-    fetchGitStatus(filePath)
-      .then((status) => {
-        if (!cancelled && status) {
-          setLocalGitStatus(status);
-        }
-      })
-      .catch(() => {
-        // Silently fail - git status is not critical
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [filePath]);
-
-  const handleUndo = useCallback(() => {
-    const result = kanbanHistory.undo();
-    if (!result) {
-      return;
-    }
-
-    handleColumnsChange(result.columns);
-    restorePrompt(result.prompt);
-  }, [handleColumnsChange, kanbanHistory, restorePrompt]);
-
-  const handleRedo = useCallback(() => {
-    const result = kanbanHistory.redo();
-    if (!result) {
-      return;
-    }
-
-    handleColumnsChange(result.columns);
-  }, [handleColumnsChange, kanbanHistory]);
-
-  const handleOpenHere = useCallback(() => {
-    setEditorMode("file");
-  }, []);
-
-  const handleOpenLocally = useCallback(() => {
-    setEditorMode("kanban");
-  }, []);
-
-  const handleCloseEditor = useCallback(() => {
-    setEditorMode(null);
-  }, []);
 
   const handleViewDiffs = useCallback(async () => {
-    if (!cardData.sessionId) {
+    if (!sessionId) {
       return;
     }
     setIsLoadingDiff(true);
+    setDiffError(null);
+    setDiffNotice(null);
     try {
-      const diffs = await fetchSessionDiff(cardData.sessionId);
+      const diffs = await fetchSessionDiff(sessionId);
       setDiffFiles(diffs);
       if (diffs.length > 0) {
         setSelectedDiffFile(diffs[0]);
         setDiffVisible(true);
+      } else {
+        setDiffNotice("No file changes are available for this session.");
       }
     } catch (error) {
-      console.error("Failed to fetch diffs:", error);
+      setDiffError(
+        error instanceof Error
+          ? error.message
+          : "Could not load session diffs. Try again."
+      );
     } finally {
       setIsLoadingDiff(false);
     }
-  }, [cardData.sessionId]);
+  }, [sessionId]);
 
   const handleSelectDiffFile = useCallback((diff: SessionFileDiff) => {
     setSelectedDiffFile(diff);
@@ -379,6 +316,116 @@ function KanbanCardNodeComponent({
   const handleCloseDiff = useCallback(() => {
     setDiffVisible(false);
   }, []);
+
+  return {
+    diffError,
+    diffFiles,
+    diffNotice,
+    diffVisible,
+    handleCloseDiff,
+    handleSelectDiffFile,
+    handleViewDiffs,
+    isLoadingDiff,
+    selectedDiffFile,
+  };
+}
+
+function KanbanCardNodeComponent({
+  data: rawData,
+  draggable,
+  id,
+  selected,
+}: NodeProps<Node<Record<string, unknown>>>) {
+  const cardData = rawData as unknown as KanbanCardNodeData;
+  const configuredReviewMode = cardData.reviewMode ?? "auto";
+  const [localGitStatus, setLocalGitStatus] = useState<GitStatus | null>(
+    cardData.gitStatus ?? null
+  );
+  const [gitStatusError, setGitStatusError] = useState<string | null>(null);
+  const [isLoadingGitStatus, setIsLoadingGitStatus] = useState(false);
+  const gitStatusControllerRef = useRef<AbortController | null>(null);
+  const {
+    diffError,
+    diffFiles,
+    diffNotice,
+    diffVisible,
+    handleCloseDiff,
+    handleSelectDiffFile,
+    handleViewDiffs,
+    isLoadingDiff,
+    selectedDiffFile,
+  } = useBoardDiffs(cardData.sessionId);
+
+  const { focusBoardLocally } = useWorkspace();
+
+  // Approve, reject, column moves and review mode live in one hook so the phone
+  // lane list runs the same code as this card rather than a copy of it.
+  const {
+    actionStates,
+    boardBusy,
+    handleApprove,
+    handleColumnsChange,
+    handlePlanChange,
+    handleQuestionsAnswered,
+    handleReject,
+    handleRetry,
+    handleRun,
+    handleReviewModeChange,
+    reviewMode,
+    reviewModeError,
+    reviewModePending,
+  } = useKanbanCardActions({
+    boardId: cardData.boardId,
+    columns: cardData.columns,
+    onUpdateColumns: cardData.onUpdateColumns,
+    reviewMode: configuredReviewMode,
+    sessionId: cardData.sessionId,
+  });
+  const handleCreateTask = useCallback(() => {
+    focusBoardPrompt(cardData.boardId, focusBoardLocally);
+  }, [cardData.boardId, focusBoardLocally]);
+
+  const filePath = cardData.filePath ?? cardData.projectName ?? cardData.title;
+
+  const refreshGitStatus = useCallback(() => {
+    gitStatusControllerRef.current?.abort();
+    const controller = new AbortController();
+    gitStatusControllerRef.current = controller;
+    setGitStatusError(null);
+    setIsLoadingGitStatus(true);
+    fetchGitStatus(filePath, { signal: controller.signal })
+      .then((status) => {
+        if (!controller.signal.aborted) {
+          setLocalGitStatus(status);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          setGitStatusError(
+            error instanceof Error
+              ? error.message
+              : "Could not load repository status. Retry."
+          );
+        }
+      })
+      .finally(() => {
+        if (gitStatusControllerRef.current === controller) {
+          gitStatusControllerRef.current = null;
+          setIsLoadingGitStatus(false);
+        }
+      });
+  }, [filePath]);
+
+  useEffect(() => {
+    refreshGitStatus();
+    return () => {
+      const controller = gitStatusControllerRef.current;
+      if (controller) {
+        controller.abort();
+        gitStatusControllerRef.current = null;
+      }
+    };
+  }, [refreshGitStatus]);
 
   return (
     <>
@@ -426,6 +473,12 @@ function KanbanCardNodeComponent({
 
             {localGitStatus && <GitDiffIndicator status={localGitStatus} />}
 
+            <GitStatusFeedback
+              error={gitStatusError}
+              loading={isLoadingGitStatus}
+              onRetry={refreshGitStatus}
+            />
+
             <span className="h-3.5 w-px bg-white/10" />
 
             <SessionStatus
@@ -447,36 +500,11 @@ function KanbanCardNodeComponent({
 
             <span className="h-3.5 w-px bg-white/10" />
 
-            <div className="flex items-center gap-1">
-              <button
-                className={cn(
-                  "rounded-xs p-1 transition-colors",
-                  kanbanHistory.canUndo
-                    ? "text-white/50 hover:bg-white/10 hover:text-white/80"
-                    : "cursor-not-allowed text-white/15"
-                )}
-                disabled={!kanbanHistory.canUndo}
-                onClick={handleUndo}
-                title="Undo last task"
-                type="button"
-              >
-                <Undo2Icon className="size-3.5" />
-              </button>
-              <button
-                className={cn(
-                  "rounded-xs p-1 transition-colors",
-                  kanbanHistory.canRedo
-                    ? "text-white/50 hover:bg-white/10 hover:text-white/80"
-                    : "cursor-not-allowed text-white/15"
-                )}
-                disabled={!kanbanHistory.canRedo}
-                onClick={handleRedo}
-                title="Redo undone task"
-                type="button"
-              >
-                <Redo2Icon className="size-3.5" />
-              </button>
-            </div>
+            <BoardSessionHistoryControls
+              boardBusy={boardBusy}
+              boardId={cardData.boardId}
+              sessionId={cardData.sessionId}
+            />
 
             <span className="h-3.5 w-px bg-white/10" />
 
@@ -488,27 +516,13 @@ function KanbanCardNodeComponent({
                 )}
               >
                 <Code2Icon className="size-3" />
-                <span>Open in Editor</span>
+                <span>Review Changes</span>
                 <ChevronDownIcon className="size-3 text-white/50" />
               </DropdownMenuTrigger>
               <DropdownMenuContent
                 align="end"
                 className="w-40 border-white/10 bg-[#1e1e1e] p-1.5 text-white/90 shadow-2xl"
               >
-                <DropdownMenuItem
-                  className="flex cursor-pointer items-center gap-2 rounded-xs px-2 py-1.5 text-white/80 text-xs transition-colors focus:bg-white/10 focus:text-white"
-                  onClick={handleOpenLocally}
-                >
-                  <MonitorIcon className="size-3.5" />
-                  <span>Open Locally</span>
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  className="flex cursor-pointer items-center gap-2 rounded-xs px-2 py-1.5 text-white/80 text-xs transition-colors focus:bg-white/10 focus:text-white"
-                  onClick={handleOpenHere}
-                >
-                  <GlobeIcon className="size-3.5" />
-                  <span>Open Here</span>
-                </DropdownMenuItem>
                 <DropdownMenuItem
                   className="flex cursor-pointer items-center gap-2 rounded-xs px-2 py-1.5 text-white/80 text-xs transition-colors focus:bg-white/10 focus:text-white"
                   disabled={!cardData.sessionId || isLoadingDiff}
@@ -553,56 +567,55 @@ function KanbanCardNodeComponent({
               </DropdownMenuContent>
             </DropdownMenu>
 
-            {editorMode !== null && (
-              <button
-                className="rounded-xs bg-white/10 px-2 py-1 font-medium text-[0.65rem] text-white transition-all hover:bg-white/20 active:scale-95"
-                onClick={handleCloseEditor}
-                type="button"
-              >
-                Back to Kanban
-              </button>
-            )}
-
-            {cardData.onRemove && (
-              <>
-                <span className="h-3.5 w-px bg-white/10" />
-                <button
-                  className="rounded-xs p-1 text-white/25 transition-colors hover:bg-white/8 hover:text-white/60"
-                  onClick={() => cardData.onRemove?.(id)}
-                  type="button"
-                >
-                  <XIcon className="size-3.5" />
-                </button>
-              </>
-            )}
+            <span className="h-3.5 w-px bg-white/10" />
+            <button
+              aria-label={`Remove ${cardData.title} board`}
+              className="rounded-xs p-1 text-white/25 transition-colors hover:bg-white/8 hover:text-white/60 disabled:cursor-wait disabled:opacity-40"
+              disabled={cardData.isRemoving}
+              onClick={() => cardData.onRemove(id)}
+              title={cardData.isRemoving ? "Removing board…" : "Remove board"}
+              type="button"
+            >
+              {cardData.isRemoving ? (
+                <LoaderCircleIcon className="size-3.5 animate-spin" />
+              ) : (
+                <XIcon className="size-3.5" />
+              )}
+            </button>
           </div>
         </div>
 
+        <DiffNotice
+          error={diffError}
+          notice={diffNotice}
+          onRetry={handleViewDiffs}
+          retrying={isLoadingDiff}
+        />
+
         <div className="nodrag flex min-h-0 min-w-0 flex-1 flex-col">
-          {editorMode === "file" && filePath ? (
-            <BorderlessFileView
-              filePath={filePath}
-              language={inferLanguage(filePath)}
-              value={`// File: ${filePath}\n// Connect to LSP to see live content`}
+          <div className="min-h-0 min-w-0 flex-1 p-4">
+            <KanbanCardContent
+              actionStates={actionStates}
+              boardBusy={boardBusy}
+              data={{
+                id: cardData.boardId,
+                title: cardData.title,
+                columns: cardData.columns,
+                reviewMode,
+              }}
+              onApprove={handleApprove}
+              onColumnsChange={handleColumnsChange}
+              onCreateTask={handleCreateTask}
+              onPlanChange={handlePlanChange}
+              onQuestionsAnswered={handleQuestionsAnswered}
+              onReject={handleReject}
+              onRetry={handleRetry}
+              onReviewModeChange={handleReviewModeChange}
+              onRun={handleRun}
+              reviewModeError={reviewModeError}
+              reviewModePending={reviewModePending}
             />
-          ) : (
-            <div className="min-h-0 min-w-0 flex-1 p-4">
-              <KanbanCardContent
-                data={{
-                  id: cardData.boardId,
-                  title: cardData.title,
-                  columns: cardData.columns,
-                  reviewMode: cardData.reviewMode ?? "auto",
-                }}
-                onApprove={handleApprove}
-                onColumnsChange={handleColumnsChange}
-                onPlanChange={handlePlanChange}
-                onQuestionsAnswered={handleQuestionsAnswered}
-                onReject={handleReject}
-                onReviewModeChange={handleReviewModeChange}
-              />
-            </div>
-          )}
+          </div>
         </div>
       </div>
 

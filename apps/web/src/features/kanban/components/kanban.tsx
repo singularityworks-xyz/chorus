@@ -1,5 +1,6 @@
 "use client";
 
+import type { Task as ContractTask } from "@chorus/contracts";
 import { BorderlessFileView, ChorusMonaco } from "@chorus/monaco";
 import {
   closestCorners,
@@ -59,12 +60,17 @@ import {
 } from "@/components/ui/resizable";
 import {
   AgentOutputCard,
-  type AgentRunContext,
   type AgentStep,
-  PLACEHOLDER_RUN,
 } from "@/features/kanban/components/agent-output-card";
+import type { KanbanTaskActionState } from "@/features/kanban/hooks/use-kanban-card-actions";
 import { cn } from "@/lib/utils";
+import { getBoardTaskCommandButtonState } from "../utils/board-task-state";
 import { type GroupedStep, groupSteps } from "../utils/group-steps";
+import {
+  getPendingQuestionApprovals,
+  hasPendingQuestion,
+  shouldShowReviewActions,
+} from "../utils/task-approval-state";
 import { QuestionCard } from "./question-card";
 
 function extractChangedFiles(steps: AgentStep[]): ChangedFile[] {
@@ -114,35 +120,7 @@ export interface ChangedFile {
   removed: number;
 }
 
-export interface Task {
-  /** Files changed by the agent — shown in review cards */
-  changedFiles?: ChangedFile[];
-  id: string;
-  label: string;
-  labelVariant:
-    | "primary-light"
-    | "success-light"
-    | "warning-light"
-    | "destructive-light"
-    | "info-light";
-  /** Lines added by the agent run — shown in done cards */
-  linesAdded?: number;
-  /** Lines removed by the agent run — shown in done cards */
-  linesRemoved?: number;
-  /** AI-generated plan for the task — shown in review cards for MANUAL mode */
-  plan?: string;
-  /** Questions from AI that need user input — shown in review cards for MANUAL mode */
-  questions?: string[];
-  /** Live or recorded run state shown in the in-progress card */
-  run?: AgentRunContext;
-  /** Links to an OpenCode sessionId for live agent output */
-  runId?: string;
-  /** Short paragraph describing what the agent did — shown in done cards */
-  summary?: string;
-  /** Files tagged/referenced by this task — shown in queue cards */
-  taggedFiles?: string[];
-  title: string;
-}
+export type Task = ContractTask;
 
 export type Columns = Record<string, Task[]>;
 
@@ -590,12 +568,21 @@ function ChangedFileRow({ file }: { file: ChangedFile }) {
 }
 
 interface TaskCardProps {
+  actionState?: KanbanTaskActionState;
   asHandle?: boolean;
+  boardBusy: boolean;
+  boardId: string;
   draggable?: boolean;
-  onApprove?: (taskId: string, plan: string, answers: string[]) => void;
-  onPlanChange?: (taskId: string, plan: string) => void;
-  onQuestionsAnswered?: (taskId: string, answers: string[]) => void;
-  onReject?: (taskId: string) => void;
+  onApprove: (
+    taskId: string,
+    plan: string,
+    answers: string[]
+  ) => void | Promise<void>;
+  onPlanChange: (taskId: string, plan: string) => void;
+  onQuestionsAnswered: (taskId: string, answers: string[]) => void;
+  onReject: (taskId: string) => void | Promise<void>;
+  onRetry: (taskId: string) => void | Promise<void>;
+  onRun: (taskId: string) => void | Promise<void>;
   reviewMode?: "manual" | "auto";
   showApprovalControls?: boolean;
   showDone?: boolean;
@@ -694,6 +681,8 @@ function TaskCardDiffSection({
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: TaskCard renders multiple conditional sections for different task states (queue, in_progress, review, done)
 function TaskCard({
+  boardBusy,
+  boardId,
   task,
   asHandle,
   draggable,
@@ -701,11 +690,14 @@ function TaskCard({
   showDone,
   showApprovalControls,
   showPlay,
+  actionState,
   reviewMode = "auto",
   onApprove,
   onReject,
   onPlanChange,
   onQuestionsAnswered,
+  onRetry,
+  onRun,
 }: TaskCardProps) {
   const changedFiles = task.run
     ? extractChangedFiles(task.run.steps)
@@ -713,14 +705,13 @@ function TaskCard({
   const diffTotals = task.run
     ? computeDiffTotals(task.run.steps)
     : { added: task.linesAdded ?? 0, removed: task.linesRemoved ?? 0 };
-  const questionStep = task.run?.steps.find(
-    (s) => s.kind === "response" && s.content?.startsWith("question:")
-  );
-  const questionRequestID = questionStep?.content?.replace("question:", "");
+  const hasQuestion = hasPendingQuestion(task);
+  const showReviewActions =
+    showApprovalControls && shouldShowReviewActions(task);
 
   const [editedPlan, setEditedPlan] = useState(task.plan ?? "");
   const [questionAnswers, setQuestionAnswers] = useState<string[]>(
-    task.questions?.map(() => "") ?? []
+    task.questionAnswers ?? task.questions?.map(() => "") ?? []
   );
   const [showPlanPopup, setShowPlanPopup] = useState(false);
 
@@ -729,18 +720,23 @@ function TaskCard({
   }, [task.plan]);
 
   useEffect(() => {
-    setQuestionAnswers(task.questions?.map(() => "") ?? []);
-  }, [task.questions]);
+    setQuestionAnswers(
+      task.questionAnswers ?? task.questions?.map(() => "") ?? []
+    );
+  }, [task.questionAnswers, task.questions]);
 
-  const isManualReview = showApprovalControls && reviewMode === "manual";
+  const isManualReview =
+    showApprovalControls &&
+    task.outcome === "awaiting_review" &&
+    task.reviewApproved !== true;
 
   const handleApproveClick = () => {
-    if (isManualReview && onApprove) {
-      if (editedPlan !== task.plan && onPlanChange) {
+    if (isManualReview) {
+      if (editedPlan !== task.plan) {
         onPlanChange(task.id, editedPlan);
       }
       onApprove(task.id, editedPlan, questionAnswers);
-    } else if (onApprove) {
+    } else {
       onApprove(task.id, "", []);
     }
   };
@@ -749,10 +745,21 @@ function TaskCard({
     const newAnswers = [...questionAnswers];
     newAnswers[qIndex] = value;
     setQuestionAnswers(newAnswers);
-    if (onQuestionsAnswered) {
-      onQuestionsAnswered(task.id, newAnswers);
-    }
+    onQuestionsAnswered(task.id, newAnswers);
   };
+
+  const runButton = getBoardTaskCommandButtonState(
+    "run",
+    actionState,
+    boardBusy,
+    Boolean(task.promptInput)
+  );
+  const retryButton = getBoardTaskCommandButtonState(
+    "retry",
+    actionState,
+    boardBusy,
+    Boolean(task.promptInput)
+  );
 
   const content = (
     <div
@@ -832,8 +839,24 @@ function TaskCard({
               </span>
             </div>
           )}
+          {task.errorMessage && (
+            <p
+              className="rounded-xs border border-rose-500/15 bg-rose-500/[0.03] px-2.5 py-2 text-[0.68rem] text-rose-300/85 leading-relaxed"
+              role="status"
+            >
+              {task.errorMessage}
+            </p>
+          )}
         </div>
       )}
+
+      {showApprovalControls &&
+        task.outcome === "awaiting_review" &&
+        task.reviewApproved === true && (
+          <p className="border-white/5 border-t pt-2.5 text-[0.7rem] text-emerald-300/75">
+            Implementation accepted. Waiting for task activity…
+          </p>
+        )}
 
       {showApprovalControls &&
         reviewMode === "auto" &&
@@ -848,15 +871,23 @@ function TaskCard({
 
       {showDone && (
         <div className="flex flex-col gap-2.5 border-white/5 border-t pt-2.5">
+          {task.errorMessage && (
+            <p
+              className="rounded-xs border border-rose-500/15 bg-rose-500/[0.03] px-2.5 py-2 text-[0.68rem] text-rose-300/85 leading-relaxed"
+              role="status"
+            >
+              {task.errorMessage}
+            </p>
+          )}
           {task.run && task.run.steps.length > 0 && (
             <div className="flex flex-col gap-1.5">
-              {groupSteps(task.run.steps).map((group, index) => (
+              {groupSteps(task.run.steps).map((group) => (
                 <DoneGroupedStepRow
                   group={group}
                   key={
                     group.kind === "thinking" || group.kind === "response"
-                      ? `${group.id}-${index}-${group.sourceSteps?.length ?? 0}`
-                      : `${group.step.id}-${index}-${group.step.content?.slice(0, 30) ?? ""}`
+                      ? group.id
+                      : group.step.id
                   }
                 />
               ))}
@@ -892,11 +923,17 @@ function TaskCard({
               "hover:border-emerald-500/20 hover:bg-emerald-500/12 hover:text-emerald-400",
               "active:scale-[0.97]"
             )}
-            title="Run task"
+            disabled={runButton.disabled}
+            onClick={() => onRun(task.id)}
+            title={runButton.title}
             type="button"
           >
-            <PlayIcon className="size-3 fill-current" />
-            Run
+            {actionState?.pending === "run" ? (
+              <LoaderIcon className="size-3 animate-spin" />
+            ) : (
+              <PlayIcon className="size-3 fill-current" />
+            )}
+            {runButton.label}
           </button>
         </div>
       )}
@@ -912,11 +949,14 @@ function TaskCard({
           </div>
         )}
 
-      {showApprovalControls && questionRequestID && task.run?.sessionId && (
-        <QuestionCard sessionID={task.run.sessionId} />
+      {showApprovalControls && hasQuestion && task.run?.sessionId && (
+        <QuestionCard
+          requests={getPendingQuestionApprovals(task)}
+          sessionID={task.run.sessionId}
+        />
       )}
 
-      {showApprovalControls && (
+      {showReviewActions && (
         <div className="flex items-center justify-end gap-1.5 pt-0.5">
           <button
             className={cn(
@@ -925,11 +965,16 @@ function TaskCard({
               "transition-all duration-150 hover:border-emerald-500/30 hover:bg-emerald-500/20",
               "active:scale-[0.97]"
             )}
+            disabled={!!actionState?.pending || !!actionState?.awaitingEvent}
             onClick={handleApproveClick}
             title={isManualReview ? "Finalize & Implement" : "Approve"}
             type="button"
           >
-            <CheckIcon className="size-3.5" />
+            {actionState?.pending === "approve" ? (
+              <LoaderIcon className="size-3.5 animate-spin" />
+            ) : (
+              <CheckIcon className="size-3.5" />
+            )}
           </button>
           <button
             className={cn(
@@ -938,13 +983,38 @@ function TaskCard({
               "transition-all duration-150 hover:border-rose-500/30 hover:bg-rose-500/20",
               "active:scale-[0.97]"
             )}
-            onClick={() => onReject?.(task.id)}
+            disabled={!!actionState?.pending || !!actionState?.awaitingEvent}
+            onClick={() => onReject(task.id)}
             title="Reject"
             type="button"
           >
-            <XIcon className="size-3.5" />
+            {actionState?.pending === "reject" ? (
+              <LoaderIcon className="size-3.5 animate-spin" />
+            ) : (
+              <XIcon className="size-3.5" />
+            )}
           </button>
         </div>
+      )}
+
+      {(showPlay || showDone) && !task.promptInput && (
+        <p className="text-[0.66rem] text-white/35 leading-relaxed">
+          This older task has no saved prompt, so it cannot be run or retried.
+        </p>
+      )}
+
+      {actionState?.error && (
+        <p
+          className="rounded-xs border border-rose-500/20 bg-rose-500/8 px-2.5 py-2 text-[0.68rem] text-rose-300/90 leading-relaxed"
+          role="alert"
+        >
+          {actionState.error}
+        </p>
+      )}
+      {actionState?.message && (
+        <p className="text-[0.68rem] text-white/45" role="status">
+          {actionState.message}
+        </p>
       )}
 
       {showDone && (
@@ -956,11 +1026,17 @@ function TaskCard({
               "transition-all duration-150 hover:border-white/10 hover:bg-white/8 hover:text-white/55",
               "active:scale-[0.97]"
             )}
-            title="Retry task"
+            disabled={retryButton.disabled}
+            onClick={() => onRetry(task.id)}
+            title={retryButton.title}
             type="button"
           >
-            <RotateCcwIcon className="size-3" />
-            Retry
+            {actionState?.pending === "retry" ? (
+              <LoaderIcon className="size-3 animate-spin" />
+            ) : (
+              <RotateCcwIcon className="size-3" />
+            )}
+            {retryButton.label}
           </button>
         </div>
       )}
@@ -987,13 +1063,11 @@ function TaskCard({
             </div>
           </div>
           <AgentOutputCard
-            run={
-              task.run ?? {
-                ...PLACEHOLDER_RUN,
-                sessionId: task.runId,
-                taskTitle: task.title,
-              }
-            }
+            boardId={boardId}
+            isActive={showOutput}
+            run={task.run}
+            taskId={task.id}
+            taskTitle={task.title}
           />
         </>
       ) : (
@@ -1126,21 +1200,30 @@ function defaultColumns(boardId = "board"): Columns {
 }
 
 function ReviewModeToggle({
+  pending,
   reviewMode,
   onToggle,
 }: {
+  pending: boolean;
   reviewMode: "manual" | "auto";
   onToggle: (mode: "manual" | "auto") => void;
 }) {
+  const modeLabel = reviewMode === "manual" ? "Manual" : "Auto";
+  let toggleTitle = "Switch to manual review";
+  if (pending) {
+    toggleTitle = "Saving review mode";
+  } else if (reviewMode === "manual") {
+    toggleTitle = "Switch to auto-accept";
+  }
+
   return (
     <button
+      aria-busy={pending}
+      aria-label={pending ? "Saving review mode" : `${modeLabel} review mode`}
       className="flex items-center gap-1.5 rounded-xs px-1.5 py-0.5 transition-colors hover:bg-white/5"
+      disabled={pending}
       onClick={() => onToggle(reviewMode === "manual" ? "auto" : "manual")}
-      title={
-        reviewMode === "manual"
-          ? "Switch to auto-accept"
-          : "Switch to manual review"
-      }
+      title={toggleTitle}
       type="button"
     >
       <span
@@ -1149,7 +1232,7 @@ function ReviewModeToggle({
           reviewMode === "manual" ? "text-amber-400" : "text-white/25"
         )}
       >
-        {reviewMode === "manual" ? "Manual" : "Auto"}
+        {pending ? "Saving…" : modeLabel}
       </span>
       <span
         className={cn(
@@ -1176,11 +1259,15 @@ function ColumnHeader({
   columnId,
   tasks,
   reviewMode,
+  reviewModeError,
+  reviewModePending,
   onReviewModeChange,
 }: {
   columnId: string;
   tasks: Task[];
   reviewMode: "manual" | "auto";
+  reviewModeError: string | null;
+  reviewModePending: boolean;
   onReviewModeChange: (mode: "manual" | "auto") => void;
 }) {
   const col = COLUMNS[columnId];
@@ -1208,55 +1295,82 @@ function ColumnHeader({
     : null;
 
   return (
-    <div className="flex items-center gap-2 px-1 pt-0.5 pb-0.5">
-      {col.icon}
-      <h3 className="truncate font-semibold text-[0.7rem] text-muted-foreground uppercase tracking-widest dark:text-white/40">
-        {col.title}
-      </h3>
-      <div className="ml-auto flex size-5 shrink-0 items-center justify-center rounded-full bg-white/6 font-semibold text-[10px] text-white/45">
-        {tasks.length}
+    <>
+      <div className="flex items-center gap-2 px-1 pt-0.5 pb-0.5">
+        {col.icon}
+        <h3 className="truncate font-semibold text-[0.7rem] text-muted-foreground uppercase tracking-widest dark:text-white/40">
+          {col.title}
+        </h3>
+        <div className="ml-auto flex size-5 shrink-0 items-center justify-center rounded-full bg-white/6 font-semibold text-[10px] text-white/45">
+          {tasks.length}
+        </div>
+        {isDone && doneTotals && doneTotals.fileCount > 0 && (
+          <span className="shrink-0 rounded-xs bg-white/5 px-1.5 py-0.5 font-mono text-[0.55rem] text-white/35">
+            {doneTotals.fileCount} file{doneTotals.fileCount === 1 ? "" : "s"}
+          </span>
+        )}
+        {isReview && (
+          <ReviewModeToggle
+            onToggle={onReviewModeChange}
+            pending={reviewModePending}
+            reviewMode={reviewMode}
+          />
+        )}
       </div>
-      {isDone && doneTotals && doneTotals.fileCount > 0 && (
-        <span className="shrink-0 rounded-xs bg-white/5 px-1.5 py-0.5 font-mono text-[0.55rem] text-white/35">
-          {doneTotals.fileCount} file{doneTotals.fileCount === 1 ? "" : "s"}
-        </span>
+      {isReview && reviewModeError && (
+        <p className="px-1 text-[0.62rem] text-rose-300/85" role="alert">
+          {reviewModeError}
+        </p>
       )}
-      {isReview && (
-        <ReviewModeToggle
-          onToggle={onReviewModeChange}
-          reviewMode={reviewMode}
-        />
-      )}
-    </div>
+    </>
   );
 }
 
 function TaskList({
+  boardId,
+  boardBusy,
   columnId,
   tasks,
   reviewMode,
+  actionStates,
   onApprove,
   onReject,
   onPlanChange,
   onQuestionsAnswered,
+  onRetry,
+  onRun,
 }: {
+  boardBusy: boolean;
+  boardId: string;
   columnId: string;
   tasks: Task[];
   reviewMode: "manual" | "auto";
-  onApprove?: (taskId: string, plan: string, answers: string[]) => void;
-  onReject?: (taskId: string) => void;
-  onPlanChange?: (taskId: string, plan: string) => void;
-  onQuestionsAnswered?: (taskId: string, answers: string[]) => void;
+  actionStates?: Record<string, KanbanTaskActionState | undefined>;
+  onApprove: (
+    taskId: string,
+    plan: string,
+    answers: string[]
+  ) => void | Promise<void>;
+  onReject: (taskId: string) => void | Promise<void>;
+  onRetry: (taskId: string) => void | Promise<void>;
+  onRun: (taskId: string) => void | Promise<void>;
+  onPlanChange: (taskId: string, plan: string) => void;
+  onQuestionsAnswered: (taskId: string, answers: string[]) => void;
 }) {
   return tasks.map((task) => (
     <TaskCard
+      actionState={actionStates?.[task.id]}
       asHandle
+      boardBusy={boardBusy}
+      boardId={boardId}
       draggable={columnId === "queue"}
       key={task.id}
       onApprove={onApprove}
       onPlanChange={onPlanChange}
       onQuestionsAnswered={onQuestionsAnswered}
       onReject={onReject}
+      onRetry={onRetry}
+      onRun={onRun}
       reviewMode={columnId === "approve" ? reviewMode : "auto"}
       showApprovalControls={columnId === "approve"}
       showDone={columnId === "done"}
@@ -1268,23 +1382,43 @@ function TaskList({
 }
 
 function KanbanColumnRenderer({
+  boardId,
+  boardBusy,
   columnId,
   tasks,
   reviewMode,
+  reviewModeError,
+  reviewModePending,
+  actionStates,
   onReviewModeChange,
   onApprove,
   onReject,
   onPlanChange,
   onQuestionsAnswered,
+  onRetry,
+  onRun,
+  onCreateTask,
 }: {
+  boardBusy: boolean;
+  boardId: string;
   columnId: string;
   tasks: Task[];
   reviewMode: "manual" | "auto";
+  reviewModeError: string | null;
+  reviewModePending: boolean;
   onReviewModeChange: (mode: "manual" | "auto") => void;
-  onApprove?: (taskId: string, plan: string, answers: string[]) => void;
-  onReject?: (taskId: string) => void;
-  onPlanChange?: (taskId: string, plan: string) => void;
-  onQuestionsAnswered?: (taskId: string, answers: string[]) => void;
+  actionStates?: Record<string, KanbanTaskActionState | undefined>;
+  onApprove: (
+    taskId: string,
+    plan: string,
+    answers: string[]
+  ) => void | Promise<void>;
+  onReject: (taskId: string) => void | Promise<void>;
+  onRetry: (taskId: string) => void | Promise<void>;
+  onRun: (taskId: string) => void | Promise<void>;
+  onCreateTask: () => void;
+  onPlanChange: (taskId: string, plan: string) => void;
+  onQuestionsAnswered: (taskId: string, answers: string[]) => void;
 }) {
   return (
     <ResizablePanel
@@ -1293,13 +1427,21 @@ function KanbanColumnRenderer({
       minSize={15}
     >
       <KanbanColumnBody
+        actionStates={actionStates}
+        boardBusy={boardBusy}
+        boardId={boardId}
         columnId={columnId}
         onApprove={onApprove}
+        onCreateTask={onCreateTask}
         onPlanChange={onPlanChange}
         onQuestionsAnswered={onQuestionsAnswered}
         onReject={onReject}
+        onRetry={onRetry}
         onReviewModeChange={onReviewModeChange}
+        onRun={onRun}
         reviewMode={reviewMode}
+        reviewModeError={reviewModeError}
+        reviewModePending={reviewModePending}
         tasks={tasks}
       />
     </ResizablePanel>
@@ -1315,23 +1457,43 @@ function KanbanColumnRenderer({
  * what happened when the phone reused the whole desktop card.
  */
 export function KanbanColumnBody({
+  boardId,
+  boardBusy,
   columnId,
   tasks,
   reviewMode,
+  reviewModeError,
+  reviewModePending,
+  actionStates,
   onReviewModeChange,
   onApprove,
   onReject,
   onPlanChange,
   onQuestionsAnswered,
+  onRetry,
+  onRun,
+  onCreateTask,
 }: {
+  boardBusy: boolean;
+  boardId: string;
   columnId: string;
   tasks: Task[];
   reviewMode: "manual" | "auto";
+  reviewModeError: string | null;
+  reviewModePending: boolean;
   onReviewModeChange: (mode: "manual" | "auto") => void;
-  onApprove?: (taskId: string, plan: string, answers: string[]) => void;
-  onReject?: (taskId: string) => void;
-  onPlanChange?: (taskId: string, plan: string) => void;
-  onQuestionsAnswered?: (taskId: string, answers: string[]) => void;
+  actionStates?: Record<string, KanbanTaskActionState | undefined>;
+  onApprove: (
+    taskId: string,
+    plan: string,
+    answers: string[]
+  ) => void | Promise<void>;
+  onReject: (taskId: string) => void | Promise<void>;
+  onRetry: (taskId: string) => void | Promise<void>;
+  onRun: (taskId: string) => void | Promise<void>;
+  onCreateTask: () => void;
+  onPlanChange: (taskId: string, plan: string) => void;
+  onQuestionsAnswered: (taskId: string, answers: string[]) => void;
 }) {
   const col = COLUMNS[columnId];
   const isQueue = columnId === "queue";
@@ -1351,6 +1513,8 @@ export function KanbanColumnBody({
             columnId={columnId}
             onReviewModeChange={onReviewModeChange}
             reviewMode={reviewMode}
+            reviewModeError={reviewModeError}
+            reviewModePending={reviewModePending}
             tasks={tasks}
           />
 
@@ -1364,14 +1528,22 @@ export function KanbanColumnBody({
                 "hover:bg-white/93 hover:shadow-[0_0_0_1px_rgba(255,255,255,0.15),0_4px_20px_rgba(255,255,255,0.15)]",
                 "active:scale-[0.98] active:shadow-[0_0_0_1px_rgba(255,255,255,0.1),0_1px_6px_rgba(255,255,255,0.1)]"
               )}
-              onClick={() => {
-                document.getElementById("chorus-prompt-input")?.focus();
-              }}
+              onClick={onCreateTask}
               type="button"
             >
               <PlusIcon className="size-3.5 shrink-0" />
               Create Task
             </button>
+          )}
+
+          {isQueue && boardBusy && (
+            <p
+              className="rounded-xs border border-amber-400/15 bg-amber-400/[0.06] px-2.5 py-2 text-[0.68rem] text-amber-100/70"
+              role="status"
+            >
+              Finish or resolve current work before running or retrying another
+              task.
+            </p>
           )}
 
           <KanbanColumnContent
@@ -1386,11 +1558,16 @@ export function KanbanColumnBody({
               />
             ) : (
               <TaskList
+                actionStates={actionStates}
+                boardBusy={boardBusy}
+                boardId={boardId}
                 columnId={columnId}
                 onApprove={onApprove}
                 onPlanChange={onPlanChange}
                 onQuestionsAnswered={onQuestionsAnswered}
                 onReject={onReject}
+                onRetry={onRetry}
+                onRun={onRun}
                 reviewMode={reviewMode}
                 tasks={tasks}
               />
@@ -1404,29 +1581,40 @@ export function KanbanColumnBody({
 
 export function KanbanCardContent({
   data,
+  actionStates,
+  boardBusy,
+  reviewModeError,
+  reviewModePending,
   onColumnsChange,
   onReviewModeChange,
   onApprove,
   onReject,
   onPlanChange,
   onQuestionsAnswered,
+  onRetry,
+  onRun,
+  onCreateTask,
 }: {
   data: KanbanCardData;
+  actionStates?: Record<string, KanbanTaskActionState | undefined>;
+  boardBusy: boolean;
+  reviewModeError: string | null;
+  reviewModePending: boolean;
   onColumnsChange: (columns: Columns) => void;
-  onReviewModeChange?: (mode: "manual" | "auto") => void;
-  onApprove?: (taskId: string, plan: string, answers: string[]) => void;
-  onReject?: (taskId: string) => void;
-  onPlanChange?: (taskId: string, plan: string) => void;
-  onQuestionsAnswered?: (taskId: string, answers: string[]) => void;
+  onReviewModeChange: (mode: "manual" | "auto") => void | Promise<void>;
+  onApprove: (
+    taskId: string,
+    plan: string,
+    answers: string[]
+  ) => void | Promise<void>;
+  onReject: (taskId: string) => void | Promise<void>;
+  onRetry: (taskId: string) => void | Promise<void>;
+  onRun: (taskId: string) => void | Promise<void>;
+  onCreateTask: () => void;
+  onPlanChange: (taskId: string, plan: string) => void;
+  onQuestionsAnswered: (taskId: string, answers: string[]) => void;
 }) {
-  const [reviewMode, setReviewMode] = useState<"manual" | "auto">(
-    data.reviewMode ?? "auto"
-  );
-
-  const handleReviewModeChange = (mode: "manual" | "auto") => {
-    setReviewMode(mode);
-    onReviewModeChange?.(mode);
-  };
+  const reviewMode = data.reviewMode ?? "auto";
 
   return (
     <Kanban
@@ -1443,13 +1631,21 @@ export function KanbanCardContent({
           {Object.entries(data.columns).map(([columnId, tasks], index, arr) => (
             <Fragment key={columnId}>
               <KanbanColumnRenderer
+                actionStates={actionStates}
+                boardBusy={boardBusy}
+                boardId={data.id}
                 columnId={columnId}
                 onApprove={onApprove}
+                onCreateTask={onCreateTask}
                 onPlanChange={onPlanChange}
                 onQuestionsAnswered={onQuestionsAnswered}
                 onReject={onReject}
-                onReviewModeChange={handleReviewModeChange}
+                onRetry={onRetry}
+                onReviewModeChange={onReviewModeChange}
+                onRun={onRun}
                 reviewMode={reviewMode}
+                reviewModeError={reviewModeError}
+                reviewModePending={reviewModePending}
                 tasks={tasks}
               />
               {index < arr.length - 1 && <ResizableHandle withHandle />}

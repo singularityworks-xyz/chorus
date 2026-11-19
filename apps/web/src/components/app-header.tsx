@@ -4,9 +4,8 @@ import {
   type BoardViewMode,
   type OpencodeCredentialSummary,
   type OpencodeProviderStatus,
-  opencodeConfiguredProviderCatalogSchema,
-  opencodeCredentialCatalogSchema,
-  opencodeProviderCatalogSchema,
+  opencodeAuthLoginResponseSchema,
+  opencodeModelsDialogResponseSchema,
   type WorkspaceBoard,
 } from "@chorus/contracts";
 import {
@@ -50,6 +49,17 @@ import {
 } from "@/components/ui/select";
 import { DeviceAccessPanel } from "@/features/auth/device-access-panel";
 import { PushSettings } from "@/features/notifications/push-settings";
+import { GlobalModelSettings } from "@/features/settings/global-model-settings";
+import { providerCatalogInvalidator } from "@/features/settings/provider-catalog-invalidator";
+import {
+  configureOpenCodeProvider,
+  fetchConfiguredProviders,
+  fetchProviderStatus,
+  fetchStoredCredentials,
+  postOpenCodeAction,
+  providerSettingsLoadErrorMessage,
+} from "@/features/settings/settings-client";
+import { isWorkspaceSessionLive } from "@/features/workspace/session-status";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 import { useVoiceConfig } from "@/hooks/use-voice-config";
 import { cn } from "@/lib/utils";
@@ -82,53 +92,8 @@ const headerMenuSectionLabelClass =
   "px-3 pb-1 pt-2 text-[10px] uppercase tracking-[0.2em] text-white/34";
 const DEFAULT_SPEECH_VOICE_VALUE = "__default_speech_voice__";
 
-function buildProvidersUrl(
-  refreshToken: string,
-  directory: string | null
-): string {
-  if (!directory) {
-    return `/api/providers?refresh=${refreshToken}`;
-  }
-
-  return `/api/providers?refresh=${refreshToken}&directory=${encodeURIComponent(directory)}`;
-}
-
-async function fetchProviderStatus(url: string) {
-  const response = await fetch(url, {
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    return null;
-  }
-
-  return opencodeProviderCatalogSchema.parse(await response.json()).providers;
-}
-
-async function fetchStoredCredentials() {
-  const response = await fetch("/api/opencode/auth-credentials", {
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    return null;
-  }
-
-  return opencodeCredentialCatalogSchema.parse(await response.json())
-    .credentials;
-}
-
-async function fetchConfiguredProviders() {
-  const response = await fetch("/api/opencode/configured-providers", {
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    return null;
-  }
-
-  return opencodeConfiguredProviderCatalogSchema.parse(await response.json())
-    .providerIDs;
+function buildProvidersUrl(refreshToken: string): string {
+  return `/api/providers?refresh=${refreshToken}`;
 }
 
 type NotifType = "permission" | "question";
@@ -315,7 +280,7 @@ function ProviderStatusRow({ provider }: { provider: OpencodeProviderStatus }) {
                 : "border-white/8 bg-white/[0.04] text-white/38"
             )}
           >
-            {provider.connected ? "Live" : "Idle"}
+            {provider.connected ? "Authenticated" : "Not authenticated"}
           </span>
         </div>
         <div className="mt-1 truncate text-[10px] text-white/42">
@@ -394,23 +359,7 @@ function SettingsActionItem({
   );
 }
 
-async function postOpenCodeAction(path: string, directory: string) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ directory }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to post ${path}`);
-  }
-
-  return response;
-}
-
-function useProviderSettings(selectedDirectory: string | null) {
+function useProviderSettings(isSessionLive: boolean) {
   const [providerStatus, setProviderStatus] = useState<
     OpencodeProviderStatus[]
   >([]);
@@ -422,20 +371,30 @@ function useProviderSettings(selectedDirectory: string | null) {
   );
   const [providerStatusRefreshTick, setProviderStatusRefreshTick] = useState(0);
   const [authLoginNotice, setAuthLoginNotice] = useState<string | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
+    if (!isSessionLive) {
+      return;
+    }
+
     let isCancelled = false;
+    const controller = new AbortController();
     const refreshToken = providerStatusRefreshTick.toString(36);
 
     async function loadProviderStatus() {
+      setIsLoading(true);
+      setSettingsError(null);
       try {
         const [providers, credentials, configuredProviders] = await Promise.all(
           [
             fetchProviderStatus(
-              buildProvidersUrl(refreshToken, selectedDirectory)
+              buildProvidersUrl(refreshToken),
+              controller.signal
             ),
-            fetchStoredCredentials(),
-            fetchConfiguredProviders(),
+            fetchStoredCredentials(controller.signal),
+            fetchConfiguredProviders(controller.signal),
           ]
         );
 
@@ -443,88 +402,104 @@ function useProviderSettings(selectedDirectory: string | null) {
           return;
         }
 
-        if (providers) {
-          setProviderStatus(providers);
-        }
-
-        if (credentials) {
-          setStoredCredentials(credentials);
-        }
-
-        if (configuredProviders) {
-          setConfiguredProviderIDs(configuredProviders);
-        }
+        setProviderStatus(providers);
+        setStoredCredentials(credentials);
+        setConfiguredProviderIDs(configuredProviders);
       } catch (error) {
+        if (isCancelled) {
+          return;
+        }
         console.error("Failed to load provider status", error);
+        controller.abort();
+        setSettingsError(providerSettingsLoadErrorMessage(error));
+      } finally {
+        if (!isCancelled) {
+          setIsLoading(false);
+        }
       }
     }
 
-    loadProviderStatus().catch((error) => {
-      console.error("Failed to load provider status", error);
-    });
+    loadProviderStatus();
 
     return () => {
       isCancelled = true;
+      controller.abort();
     };
-  }, [providerStatusRefreshTick, selectedDirectory]);
+  }, [isSessionLive, providerStatusRefreshTick]);
 
   return {
     authLoginNotice,
     configuredProviderIDs,
+    isLoading,
+    providerStatusRefreshTick,
+    settingsError,
     connectedProviderCount: providerStatus.filter(
       (provider) => provider.connected
     ).length,
     providerStatus,
     refreshProviderStatus: () => {
+      providerCatalogInvalidator.invalidate();
       setProviderStatusRefreshTick((tick) => tick + 1);
     },
     async configureCredentialProvider(providerID: string) {
-      const response = await fetch("/api/opencode/configure-provider", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          directory: selectedDirectory ?? undefined,
-          providerID,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to configure OpenCode provider");
-      }
-
-      const payload = (await response.json()) as {
-        configured: boolean;
-        providerIDs?: string[];
-      };
-
-      if (payload.providerIDs) {
+      try {
+        const payload = await configureOpenCodeProvider(providerID);
         setConfiguredProviderIDs(payload.providerIDs);
+        setAuthLoginNotice(
+          `Enabled ${providerID} in global OpenCode settings.`
+        );
+        setSettingsError(null);
+        providerCatalogInvalidator.invalidate();
+        setProviderStatusRefreshTick((tick) => tick + 1);
+      } catch (error) {
+        setSettingsError(
+          "Could not enable this provider. Check its credentials and retry."
+        );
+        throw error;
       }
-
-      setAuthLoginNotice(
-        `Configured ${providerID} globally for Chorus and reloaded the current board instance.`
-      );
-      setProviderStatusRefreshTick((tick) => tick + 1);
     },
     async openOpencodeAuthLogin() {
-      if (!selectedDirectory) {
+      let response: ReturnType<typeof opencodeAuthLoginResponseSchema.parse>;
+      try {
+        response = opencodeAuthLoginResponseSchema.parse(
+          await postOpenCodeAction("/api/opencode/auth-login")
+        );
+      } catch (error) {
+        setSettingsError(
+          "Could not start provider authentication on this host."
+        );
+        throw error;
+      }
+      if (!response.launched) {
+        setSettingsError(
+          "This host could not open provider authentication. Enable a stored credential or use OpenCode on the host."
+        );
         return;
       }
-
-      await postOpenCodeAction("/api/opencode/auth-login", selectedDirectory);
+      setSettingsError(null);
       setAuthLoginNotice(
         "Auth login completed. If no provider appears yet, enable one of the stored global credentials below for Chorus."
       );
+      providerCatalogInvalidator.invalidate();
       setProviderStatusRefreshTick((tick) => tick + 1);
     },
     async openOpencodeModels() {
-      if (!selectedDirectory) {
+      let response: ReturnType<typeof opencodeModelsDialogResponseSchema.parse>;
+      try {
+        response = opencodeModelsDialogResponseSchema.parse(
+          await postOpenCodeAction("/api/opencode/models")
+        );
+      } catch (error) {
+        setSettingsError("Could not open the host model selector.");
+        throw error;
+      }
+      if (!response.opened) {
+        setSettingsError(
+          "The host model selector is unavailable. Choose an available model from Settings instead."
+        );
         return;
       }
-
-      await postOpenCodeAction("/api/opencode/models", selectedDirectory);
+      setSettingsError(null);
     },
     storedCredentials,
   };
@@ -534,8 +509,10 @@ function ProviderSettingsPanel({
   authLoginNotice,
   configuredProviderIDs,
   connectedProviderCount,
+  isLoading,
+  catalogRefreshToken,
   providerStatus,
-  selectedDirectory,
+  settingsError,
   storedCredentials,
   onConfigureCredentialProvider,
   onOpenOpencodeAuthLogin,
@@ -545,20 +522,39 @@ function ProviderSettingsPanel({
   authLoginNotice: string | null;
   configuredProviderIDs: string[];
   connectedProviderCount: number;
+  isLoading: boolean;
+  catalogRefreshToken: number;
   onConfigureCredentialProvider: (providerID: string) => Promise<void>;
   onOpenOpencodeAuthLogin: () => Promise<void>;
   onOpenOpencodeModels: () => Promise<void>;
   onRefreshProviderStatus: () => void;
   providerStatus: OpencodeProviderStatus[];
-  selectedDirectory: string | null;
+  settingsError: string | null;
   storedCredentials: OpencodeCredentialSummary[];
 }) {
   return (
     <>
-      {selectedDirectory && connectedProviderCount === 0 ? (
+      {!(isLoading || settingsError) && connectedProviderCount === 0 ? (
         <div className="mt-2 border border-amber-400/12 bg-amber-400/[0.08] px-2.5 py-2 text-[10px] text-amber-100/78 leading-4">
-          No providers are active yet. Enable one of the stored credentials
-          below and Chorus will reload the current board instance.
+          No providers are authenticated yet. Enable a stored credential or
+          authenticate a provider here.
+        </div>
+      ) : null}
+      {settingsError ? (
+        <div
+          className="mt-2 flex items-start justify-between gap-2 border border-rose-400/15 bg-rose-400/[0.06] px-2.5 py-2"
+          role="alert"
+        >
+          <span className="text-[10px] text-rose-100/85 leading-4">
+            {settingsError}
+          </span>
+          <button
+            className="shrink-0 text-[10px] text-rose-100 underline underline-offset-2"
+            onClick={onRefreshProviderStatus}
+            type="button"
+          >
+            Retry
+          </button>
         </div>
       ) : null}
       {authLoginNotice ? (
@@ -571,17 +567,27 @@ function ProviderSettingsPanel({
           Providers
         </div>
         <div className="mt-1 flex max-h-52 flex-col gap-1 overflow-y-auto pr-0.5">
-          {providerStatus.length === 0 ? (
+          {isLoading ? (
+            <div
+              aria-live="polite"
+              className="border border-white/8 bg-white/[0.025] px-2.5 py-2 text-[10px] text-white/42"
+            >
+              Loading provider status…
+            </div>
+          ) : null}
+          {!(isLoading || settingsError) && providerStatus.length === 0 ? (
             <div className="border border-white/8 bg-white/[0.025] px-2.5 py-2 text-[10px] text-white/42">
               No providers are currently loaded.
             </div>
-          ) : (
-            providerStatus.map((provider) => (
-              <ProviderStatusRow key={provider.id} provider={provider} />
-            ))
-          )}
+          ) : null}
+          {!isLoading && providerStatus.length > 0
+            ? providerStatus.map((provider) => (
+                <ProviderStatusRow key={provider.id} provider={provider} />
+              ))
+            : null}
         </div>
       </div>
+      <GlobalModelSettings key={catalogRefreshToken} />
       {storedCredentials.length > 0 ? (
         <div className="mt-2 border-white/6 border-t pt-2">
           <div className="px-1 text-[10px] text-white/32 uppercase tracking-[0.2em]">
@@ -614,7 +620,6 @@ function ProviderSettingsPanel({
         </div>
         <div className="mt-1 flex flex-col gap-1">
           <SettingsActionItem
-            disabled={!selectedDirectory}
             onClick={() => {
               onOpenOpencodeModels().catch((error) => {
                 console.error("Failed to open OpenCode models", error);
@@ -629,12 +634,11 @@ function ProviderSettingsPanel({
                 Open model selector
               </span>
               <span className="truncate text-[10px] text-white/40">
-                {selectedDirectory ?? "Select a board first"}
+                Configure models for every board
               </span>
             </div>
           </SettingsActionItem>
           <SettingsActionItem
-            disabled={!selectedDirectory}
             onClick={() => {
               onOpenOpencodeAuthLogin().catch((error) => {
                 console.error("Failed to launch auth login", error);
@@ -649,9 +653,7 @@ function ProviderSettingsPanel({
                 Launch auth login
               </span>
               <span className="truncate text-[10px] text-white/40">
-                {selectedDirectory
-                  ? "Run auth login, then reload this board instance"
-                  : "Select a board first"}
+                Authenticate a provider for every board
               </span>
             </div>
           </SettingsActionItem>
@@ -824,6 +826,10 @@ function MobileMenuDrawer({
   onOpenFolder,
   boardViewMode,
   isOpeningFolder,
+  isLoadingRecentProjects,
+  recentProjectsError,
+  recentProjectsLoaded,
+  loadProjects,
   previousWorkspaces,
   recentProjects,
   createBoardFromHistory,
@@ -835,6 +841,10 @@ function MobileMenuDrawer({
   onOpenFolder: () => void;
   boardViewMode: BoardViewMode;
   isOpeningFolder: boolean;
+  isLoadingRecentProjects: boolean;
+  recentProjectsError: string | null;
+  recentProjectsLoaded: boolean;
+  loadProjects: ReturnType<typeof useWorkspace>["loadProjects"];
   previousWorkspaces: ReturnType<typeof useWorkspace>["previousWorkspaces"];
   recentProjects: ReturnType<typeof useWorkspace>["recentProjects"];
   createBoardFromHistory: ReturnType<
@@ -955,33 +965,64 @@ function MobileMenuDrawer({
               </>
             )}
 
-            {recentProjects.length > 0 && (
-              <>
-                <p className="mt-3 mb-1 px-2 font-semibold text-[0.6rem] text-white/25 uppercase tracking-widest">
-                  Known Projects
-                </p>
-                {recentProjects.map((project) => (
-                  <button
-                    className="flex w-full flex-col rounded-xs px-3 py-2 transition-colors hover:bg-white/6"
-                    key={`${project.projectId ?? project.directory}`}
-                    onClick={() => {
-                      createBoardFromProject(project);
-                      onClose();
-                    }}
-                    type="button"
-                  >
-                    <span className="truncate font-medium text-sm text-white/85">
-                      {project.projectName ??
-                        project.directory.split("/").filter(Boolean).at(-1) ??
-                        project.directory}
-                    </span>
-                    <span className="truncate text-[0.67rem] text-white/35">
-                      {project.directory}
-                    </span>
-                  </button>
-                ))}
-              </>
+            <p className="mt-3 mb-1 px-2 font-semibold text-[0.6rem] text-white/25 uppercase tracking-widest">
+              Known Projects
+            </p>
+            {(isLoadingRecentProjects ||
+              !(recentProjectsLoaded || recentProjectsError)) && (
+              <p
+                className="px-3 py-2 text-[0.67rem] text-white/40"
+                role="status"
+              >
+                {recentProjects.length > 0
+                  ? "Refreshing known projects…"
+                  : "Loading known projects…"}
+              </p>
             )}
+            {recentProjectsError && (
+              <div
+                className="flex flex-col gap-2 rounded-xs border border-rose-500/15 bg-rose-500/[0.03] px-3 py-2 text-[0.67rem] text-rose-200/80"
+                role="alert"
+              >
+                <span>{recentProjectsError}</span>
+                <button
+                  className="self-start underline underline-offset-2 disabled:opacity-50"
+                  disabled={isLoadingRecentProjects}
+                  onClick={loadProjects}
+                  type="button"
+                >
+                  {isLoadingRecentProjects ? "Retrying…" : "Retry"}
+                </button>
+              </div>
+            )}
+            {recentProjects.length === 0 &&
+              recentProjectsLoaded &&
+              !isLoadingRecentProjects &&
+              !recentProjectsError && (
+                <p className="px-3 py-2 text-[0.67rem] text-white/40">
+                  No known projects yet
+                </p>
+              )}
+            {recentProjects.map((project) => (
+              <button
+                className="flex w-full flex-col rounded-xs px-3 py-2 transition-colors hover:bg-white/6"
+                key={`${project.projectId ?? project.directory}`}
+                onClick={() => {
+                  createBoardFromProject(project);
+                  onClose();
+                }}
+                type="button"
+              >
+                <span className="truncate font-medium text-sm text-white/85">
+                  {project.projectName ??
+                    project.directory.split("/").filter(Boolean).at(-1) ??
+                    project.directory}
+                </span>
+                <span className="truncate text-[0.67rem] text-white/35">
+                  {project.directory}
+                </span>
+              </button>
+            ))}
           </div>
 
           <div className="my-1 h-px bg-white/6" />
@@ -1071,7 +1112,7 @@ function SettingsMenu() {
     "devices" | "providers" | "voice"
   >("providers");
 
-  const { preferences, selectedBoard, setSpeechVoiceId } = useWorkspace();
+  const { preferences, sessionStatus, setSpeechVoiceId } = useWorkspace();
   const {
     defaultModelId,
     defaultVoiceId,
@@ -1079,18 +1120,20 @@ function SettingsMenu() {
     voices,
   } = useVoiceConfig();
 
-  const selectedDirectory = selectedBoard?.repo.directory ?? null;
   const {
     authLoginNotice,
     configuredProviderIDs,
     connectedProviderCount,
     configureCredentialProvider,
+    isLoading: isLoadingProviderStatus,
     openOpencodeAuthLogin,
     openOpencodeModels,
     providerStatus,
+    providerStatusRefreshTick,
     refreshProviderStatus,
+    settingsError,
     storedCredentials,
-  } = useProviderSettings(selectedDirectory);
+  } = useProviderSettings(isWorkspaceSessionLive(sessionStatus));
   const selectedSpeechVoiceId =
     preferences.speechVoiceId ?? defaultVoiceId ?? null;
   const resolvedSpeechVoiceValue =
@@ -1105,9 +1148,7 @@ function SettingsMenu() {
     "System default";
   const settingsDescriptionByTab = {
     devices: "Connect a phone or another browser",
-    providers:
-      selectedBoard?.repo.directory ??
-      "Select a board to manage provider tools",
+    providers: "One model and provider for every board",
     voice: "Microphone and speech preferences",
   };
   const settingsTitleByTab = {
@@ -1120,14 +1161,16 @@ function SettingsMenu() {
     settingsContent = (
       <ProviderSettingsPanel
         authLoginNotice={authLoginNotice}
+        catalogRefreshToken={providerStatusRefreshTick}
         configuredProviderIDs={configuredProviderIDs}
         connectedProviderCount={connectedProviderCount}
+        isLoading={isLoadingProviderStatus}
         onConfigureCredentialProvider={configureCredentialProvider}
         onOpenOpencodeAuthLogin={openOpencodeAuthLogin}
         onOpenOpencodeModels={openOpencodeModels}
         onRefreshProviderStatus={refreshProviderStatus}
         providerStatus={providerStatus}
-        selectedDirectory={selectedDirectory}
+        settingsError={settingsError}
         storedCredentials={storedCredentials}
       />
     );
@@ -1196,14 +1239,17 @@ function SettingsMenu() {
             </div>
             {settingsTab === "providers" ? (
               <div className="mt-2 grid grid-cols-3 gap-1.5">
-                <SettingsMetric label="Live" value={connectedProviderCount} />
+                <SettingsMetric
+                  label="Authenticated"
+                  value={settingsError ? "—" : connectedProviderCount}
+                />
                 <SettingsMetric
                   label="Providers"
-                  value={providerStatus.length}
+                  value={settingsError ? "—" : providerStatus.length}
                 />
                 <SettingsMetric
                   label="Stored"
-                  value={storedCredentials.length}
+                  value={settingsError ? "—" : storedCredentials.length}
                 />
               </div>
             ) : null}
@@ -1279,11 +1325,15 @@ export function AppHeader() {
     boards,
     createBoardFromHistory,
     createBoardFromProject,
+    isLoadingRecentProjects,
     isOpeningFolder,
+    loadProjects,
     openFolder,
     preferences,
     previousWorkspaces,
     recentProjects,
+    recentProjectsError,
+    recentProjectsLoaded,
     setBoardViewMode,
   } = useWorkspace();
 
@@ -1310,7 +1360,9 @@ export function AppHeader() {
         boardViewMode={preferences.boardViewMode}
         createBoardFromHistory={createBoardFromHistory}
         createBoardFromProject={createBoardFromProject}
+        isLoadingRecentProjects={isLoadingRecentProjects}
         isOpeningFolder={isOpeningFolder}
+        loadProjects={loadProjects}
         onClose={() => setMobileMenuOpen(false)}
         onOpenFolder={() => {
           openFolder().catch((error) => {
@@ -1320,6 +1372,8 @@ export function AppHeader() {
         open={mobileMenuOpen}
         previousWorkspaces={previousWorkspaces}
         recentProjects={recentProjects}
+        recentProjectsError={recentProjectsError}
+        recentProjectsLoaded={recentProjectsLoaded}
         setBoardViewMode={setBoardViewMode}
       />
 
@@ -1439,39 +1493,71 @@ export function AppHeader() {
                       <DropdownMenuSubContent
                         className={headerSubmenuContentClass}
                       >
-                        {recentProjects.length === 0 ? (
+                        {recentProjectsError && (
                           <DropdownMenuGroup>
                             <DropdownMenuLabel
                               className={headerMenuEmptyStateLabelClass}
                             >
-                              No known projects yet
+                              {recentProjectsError}
                             </DropdownMenuLabel>
-                          </DropdownMenuGroup>
-                        ) : (
-                          recentProjects.map((project) => (
                             <DropdownMenuItem
                               className={headerMenuItemClass}
-                              key={`${project.projectId ?? project.directory}`}
-                              onClick={() => {
-                                createBoardFromProject(project);
-                              }}
+                              disabled={isLoadingRecentProjects}
+                              onClick={loadProjects}
                             >
-                              <div className="flex min-w-0 flex-col">
-                                <span className="truncate font-medium text-sm text-white/90">
-                                  {project.projectName ??
-                                    project.directory
-                                      .split("/")
-                                      .filter(Boolean)
-                                      .at(-1) ??
-                                    project.directory}
-                                </span>
-                                <span className="truncate text-white/40 text-xs">
-                                  {project.directory}
-                                </span>
-                              </div>
+                              {isLoadingRecentProjects
+                                ? "Retrying…"
+                                : "Retry loading projects"}
                             </DropdownMenuItem>
-                          ))
+                          </DropdownMenuGroup>
                         )}
+                        {isLoadingRecentProjects &&
+                          recentProjects.length > 0 && (
+                            <DropdownMenuGroup>
+                              <DropdownMenuLabel
+                                className={headerMenuEmptyStateLabelClass}
+                                role="status"
+                              >
+                                Refreshing known projects…
+                              </DropdownMenuLabel>
+                            </DropdownMenuGroup>
+                          )}
+                        {recentProjects.length === 0 &&
+                          !recentProjectsError && (
+                            <DropdownMenuGroup>
+                              <DropdownMenuLabel
+                                className={headerMenuEmptyStateLabelClass}
+                              >
+                                {isLoadingRecentProjects ||
+                                !recentProjectsLoaded
+                                  ? "Loading known projects…"
+                                  : "No known projects yet"}
+                              </DropdownMenuLabel>
+                            </DropdownMenuGroup>
+                          )}
+                        {recentProjects.map((project) => (
+                          <DropdownMenuItem
+                            className={headerMenuItemClass}
+                            key={`${project.projectId ?? project.directory}`}
+                            onClick={() => {
+                              createBoardFromProject(project);
+                            }}
+                          >
+                            <div className="flex min-w-0 flex-col">
+                              <span className="truncate font-medium text-sm text-white/90">
+                                {project.projectName ??
+                                  project.directory
+                                    .split("/")
+                                    .filter(Boolean)
+                                    .at(-1) ??
+                                  project.directory}
+                              </span>
+                              <span className="truncate text-white/40 text-xs">
+                                {project.directory}
+                              </span>
+                            </div>
+                          </DropdownMenuItem>
+                        ))}
                       </DropdownMenuSubContent>
                     </DropdownMenuSub>
                   </DropdownMenuContent>

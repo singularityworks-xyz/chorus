@@ -10,7 +10,7 @@ import type {
   SessionForkInput,
   SessionPromptInput,
 } from "@chorus/oc-adapter";
-import { normalizeSessionHistory, OpenCodeAdapter } from "@chorus/oc-adapter";
+import { OpenCodeAdapter } from "@chorus/oc-adapter";
 import { EngineUnavailableError } from "../../opencode/process-manager";
 
 const MAX_RECONCILIATION_RETRIES = 5;
@@ -383,7 +383,7 @@ export class OpenCodeBridge {
                 directory,
                 limit: 200,
               });
-              return normalizeSessionHistory(sessionID, messages, directory);
+              return adapter.normalizeHistory(sessionID, messages);
             } catch (error) {
               this.#logger.warn("session-history-reconciliation-failed", {
                 directory,
@@ -492,10 +492,15 @@ export class OpenCodeBridge {
     engineDirectory?: string;
     sessionID: string;
   }) {
-    const adapter = await this.#adapterFor(
-      input.engineDirectory ?? input.directory ?? this.#defaultDirectory
-    );
-    return adapter.sessions.get(input.sessionID, input.directory);
+    const directory =
+      input.directory ?? input.engineDirectory ?? this.#defaultDirectory;
+    const adapter = await this.#adapterFor(directory);
+    return adapter.sessions.get(input.sessionID, directory);
+  }
+
+  async sessionMessages(sessionID: string, directory: string) {
+    const adapter = await this.#adapterFor(directory);
+    return adapter.sessions.messages(sessionID, { directory, limit: 200 });
   }
 
   async promptSession(input: SessionPromptInput) {
@@ -521,6 +526,26 @@ export class OpenCodeBridge {
     const target = directory ?? this.#defaultDirectory;
     const adapter = await this.#adapterFor(target);
     return adapter.sessions.diff(sessionID, target);
+  }
+
+  async listAutocompleteCommands(directory: string) {
+    const adapter = await this.#adapterFor(directory);
+    return adapter.references.listCommands(directory);
+  }
+
+  async listAutocompleteSkills(directory: string) {
+    const adapter = await this.#adapterFor(directory);
+    return adapter.references.listSkills(directory);
+  }
+
+  async findAutocompleteFiles(query: string, directory: string) {
+    const adapter = await this.#adapterFor(directory);
+    return adapter.references.findFiles(query, directory);
+  }
+
+  async listAutocompleteDirectory(path: string, directory: string) {
+    const adapter = await this.#adapterFor(directory);
+    return adapter.references.listDirectory(path, directory);
   }
 
   async waitForSessionIdle(

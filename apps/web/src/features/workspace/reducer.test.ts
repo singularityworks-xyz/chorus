@@ -57,6 +57,7 @@ describe("snapshot handling", () => {
       preferences: {
         boardViewMode: "stacked",
         composerHintDismissed: true,
+        defaultModelSelection: null,
         recentlyUsedModels: [],
         speechVoiceId: "daniel",
       },
@@ -122,6 +123,39 @@ describe("applying events through the shared projector", () => {
     });
 
     expect(state.boards[0]?.position).toEqual({ x: 420, y: 380 });
+  });
+
+  test("removing the selected board selects the first remaining board", () => {
+    const state = workspaceReducer(
+      {
+        ...withBoards([board("board-1"), board("board-2")]),
+        selectedBoardId: "board-2",
+      },
+      {
+        events: [{ boardId: "board-2", ts: 1000, type: "board.removed" }],
+        type: "server/events",
+      }
+    );
+
+    expect(state.boards.map((candidate) => candidate.boardId)).toEqual([
+      "board-1",
+    ]);
+    expect(state.selectedBoardId).toBe("board-1");
+  });
+
+  test("removing a different board preserves the current selection", () => {
+    const state = workspaceReducer(
+      {
+        ...withBoards([board("board-1"), board("board-2")]),
+        selectedBoardId: "board-2",
+      },
+      {
+        events: [{ boardId: "board-1", ts: 1000, type: "board.removed" }],
+        type: "server/events",
+      }
+    );
+
+    expect(state.selectedBoardId).toBe("board-2");
   });
 
   test("an event for an unknown board is ignored by the projector", () => {

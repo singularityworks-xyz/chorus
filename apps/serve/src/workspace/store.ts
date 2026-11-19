@@ -2,10 +2,11 @@
 
 import { constants as fsConstants } from "node:fs";
 import { access, copyFile, readFile, rename, unlink } from "node:fs/promises";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import {
   applyEventToBoard,
   type BoardSeed,
+  type ModelSelection,
   type WorkspaceBoard,
   type WorkspaceEvent,
   type WorkspaceHistoryEntry,
@@ -25,6 +26,7 @@ import {
   type PushSubscriptionRow,
   type StoredEvent,
   type StoredPushSubscription,
+  WORKSPACE_ID_KEY,
 } from "./db";
 import { attachSessionToBoard, toWorkspaceEvents } from "./projector";
 import {
@@ -71,8 +73,25 @@ export interface StoreCommit {
   lastSeq: number;
 }
 
+export type PendingApprovalActionResult<T> =
+  | { status: "accepted"; value: T }
+  | { status: "already_resolving" }
+  | { status: "not_pending" }
+  | { status: "rejected" };
+
+export function pendingApprovalConflictMessage(
+  status: "already_resolving" | "not_pending"
+): string {
+  return status === "already_resolving"
+    ? "Another client is already responding to this request. Wait for the board to sync before trying again."
+    : "This request is no longer waiting for a response. Refresh the board to see the current task state.";
+}
+
 /** Beyond this many distinct boards/sessions, the drop-warning map resets. */
 const MAX_DROPPED_WARNING_KEYS = 256;
+const AGENT_DELTA_BATCH_WINDOW_MS = 50;
+const MAX_AGENT_DELTA_BATCH_EVENTS = 256;
+const MAX_AGENT_DELTA_BATCH_CHARS = 256 * 1024;
 
 const BOARD_X_OFFSET = 180;
 const BOARD_Y_OFFSET = 120;
@@ -130,6 +149,7 @@ function canonical<T>(value: T): T {
 const EMPTY_PREFERENCES: WorkspaceSnapshotInput["preferences"] = {
   boardViewMode: "relaxed",
   composerHintDismissed: false,
+  defaultModelSelection: null,
   recentlyUsedModels: [],
   speechVoiceId: null,
 };
@@ -137,6 +157,23 @@ const EMPTY_PREFERENCES: WorkspaceSnapshotInput["preferences"] = {
 interface PersistedBlob {
   snapshot: WorkspaceSnapshot;
   v: number;
+}
+
+interface PendingAgentDelta {
+  event: NormalizedAgentEvent;
+  reject: (error: unknown) => void;
+  resolve: (commit: StoreCommit | null) => void;
+}
+
+type StepDeltaWorkspaceEvent = Extract<
+  WorkspaceEvent,
+  { type: "step.delta_appended" }
+>;
+
+function isStepDeltaWorkspaceEvent(
+  event: WorkspaceEvent
+): event is StepDeltaWorkspaceEvent {
+  return event.type === "step.delta_appended";
 }
 
 /**
@@ -206,6 +243,8 @@ interface ProducedMutation {
 }
 
 export class WorkspaceStore {
+  readonly workspaceId: string;
+
   readonly #db: ChorusDatabase;
   readonly #options: Required<RetentionOptions>;
   readonly #queue: { promise: Promise<void> } = { promise: Promise.resolve() };
@@ -222,6 +261,11 @@ export class WorkspaceStore {
 
   /** Subscribers notified once per commit, after memory is swapped. */
   readonly #commitListeners = new Set<(commit: StoreCommit) => void>();
+  readonly #pendingApprovalActions = new Set<string>();
+  #agentEventTail: Promise<void> = Promise.resolve();
+  #pendingAgentDeltas: PendingAgentDelta[] = [];
+  #pendingAgentDeltaChars = 0;
+  #agentDeltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
   #closing = false;
   #closePromise: Promise<void> | null = null;
 
@@ -250,6 +294,20 @@ export class WorkspaceStore {
     this.#restorePersistedRepositoryRoots =
       options.restorePersistedRepositoryRoots !== false;
     this.#db = new ChorusDatabase(dataDir);
+    const persistedWorkspaceId = this.#db.getOrCreateMeta(
+      WORKSPACE_ID_KEY,
+      crypto.randomUUID()
+    );
+    const parsedWorkspaceId = z.uuid().safeParse(persistedWorkspaceId);
+    if (parsedWorkspaceId.success) {
+      this.workspaceId = parsedWorkspaceId.data;
+    } else {
+      this.workspaceId = crypto.randomUUID();
+      this.#db.setMeta(WORKSPACE_ID_KEY, this.workspaceId);
+      logger.warn("workspace-sync-identity-reset", {
+        reason: "invalid-persisted-value",
+      });
+    }
     this.#options = {
       dbSizeCapMb: options.dbSizeCapMb ?? 512,
       retentionDays: options.retentionDays ?? DEFAULT_RETENTION_DAYS,
@@ -295,6 +353,7 @@ export class WorkspaceStore {
         headSeq: this.#db.headSeq(),
       });
       await this.#reconcileWorktreeIntents();
+      await this.#migrateLegacyGlobalModelSelection();
       return;
     }
 
@@ -314,10 +373,53 @@ export class WorkspaceStore {
       await this.#parkLegacySnapshot(legacySnapshotPath);
     }
     await this.#reconcileWorktreeIntents();
+    await this.#migrateLegacyGlobalModelSelection();
+  }
+
+  /**
+   * Promote one unambiguous historical board model to the application default.
+   * Conflicting legacy selections stay unset so Settings can ask for one choice;
+   * no board is allowed to keep controlling future runs independently.
+   */
+  async #migrateLegacyGlobalModelSelection(): Promise<void> {
+    if (this.#snapshot.preferences.defaultModelSelection) {
+      return;
+    }
+
+    const selections = new Map<string, ModelSelection>();
+    for (const board of this.#snapshot.boards) {
+      const model = board.modelSelection;
+      if (model) {
+        selections.set(`${model.providerID}/${model.modelID}`, model);
+      }
+    }
+
+    if (selections.size !== 1) {
+      return;
+    }
+
+    const model = selections.values().next().value;
+    if (!model) {
+      return;
+    }
+
+    this.#db.createVerifiedBackup(
+      join(this.#db.dataDir, "backups", "before-global-model-selection-v1.db")
+    );
+
+    await this.applyMutation({
+      baseRevision: null,
+      clientId: "chorus:global-model-migration",
+      mutationId: "migration:global-model-selection:v1",
+      payload: { model },
+      type: "preference.default_model.set",
+    });
   }
 
   /** Resolves when every queued state change has committed. */
   async drain(): Promise<void> {
+    this.#flushPendingAgentDeltas();
+    await this.#agentEventTail;
     await this.#enqueue(async () => undefined);
   }
 
@@ -332,15 +434,14 @@ export class WorkspaceStore {
     }
 
     this.#closing = true;
-    const closePromise = this.#queue.promise.then(() => {
-      this.#writeSnapshotNow();
-      this.#db.checkpointTruncate();
-      this.#db.close();
-    });
-    this.#queue.promise = closePromise.then(
-      () => undefined,
-      () => undefined
-    );
+    this.#flushPendingAgentDeltas();
+    const closePromise = this.#agentEventTail
+      .then(() => this.#queue.promise)
+      .then(() => {
+        this.#writeSnapshotNow();
+        this.#db.checkpointTruncate();
+        this.#db.close();
+      });
     this.#closePromise = closePromise;
     return closePromise;
   }
@@ -484,7 +585,8 @@ export class WorkspaceStore {
 
   async resolvePendingApproval(
     sessionId: string,
-    requestId: string
+    requestId: string,
+    resume = false
   ): Promise<boolean> {
     return this.#enqueue(async () => {
       const board = this.#snapshot.boards.find(
@@ -504,21 +606,99 @@ export class WorkspaceStore {
       if (!task) {
         return false;
       }
-      this.#commit(
-        [
-          {
-            boardId: board.boardId,
-            requestId,
-            taskId: task.id,
-            ts: Date.now(),
-            type: "card.approval_resolved",
-          },
-        ],
-        board.boardId,
-        null
+      const ts = Date.now();
+      const events: WorkspaceEvent[] = [
+        {
+          boardId: board.boardId,
+          requestId,
+          taskId: task.id,
+          ts,
+          type: "card.approval_resolved",
+        },
+      ];
+      const pendingApprovals =
+        task.pendingApprovals ??
+        (task.pendingApproval ? [task.pendingApproval] : []);
+      const hasOtherPendingApprovals = pendingApprovals.some(
+        (request) => request.requestId !== requestId
       );
+      if (resume && !hasOtherPendingApprovals) {
+        events.push({
+          boardId: board.boardId,
+          taskId: task.id,
+          ts,
+          type: "card.started",
+        });
+      }
+      this.#commit(events, board.boardId, null);
       return true;
     });
+  }
+
+  /**
+   * Runs one provider response for a pending approval/question request.
+   *
+   * The reservation is made inside the workspace write queue so requests from
+   * separate HTTP and WebSocket clients cannot both pass a stale-state check.
+   * Provider I/O happens outside the queue; other board events keep flowing
+   * while the engine processes the answer. Failed or declined provider calls
+   * release the reservation and leave the request available for a retry.
+   */
+  async runPendingApprovalAction<T>(
+    sessionId: string,
+    requestId: string,
+    action: () => Promise<T>,
+    options: {
+      accepts?: (value: T) => boolean;
+      resume?: boolean;
+    } = {}
+  ): Promise<PendingApprovalActionResult<T>> {
+    const actionKey = JSON.stringify([sessionId, requestId]);
+    const claim = await this.#enqueue(async () => {
+      if (this.#pendingApprovalActions.has(actionKey)) {
+        return "already_resolving" as const;
+      }
+
+      const board = this.#snapshot.boards.find(
+        (entry) => entry.session.sessionId === sessionId
+      );
+      const isPending = board
+        ? Object.values(board.columns)
+            .flat()
+            .some((task) =>
+              (
+                task.pendingApprovals ??
+                (task.pendingApproval ? [task.pendingApproval] : [])
+              ).some((request) => request.requestId === requestId)
+            )
+        : false;
+      if (!isPending) {
+        return "not_pending" as const;
+      }
+
+      this.#pendingApprovalActions.add(actionKey);
+      return "claimed" as const;
+    });
+
+    if (claim !== "claimed") {
+      return { status: claim };
+    }
+
+    try {
+      const value = await action();
+      if (options.accepts && !options.accepts(value)) {
+        return { status: "rejected" };
+      }
+
+      await this.resolvePendingApproval(
+        sessionId,
+        requestId,
+        options.resume ?? false
+      );
+      return { status: "accepted", value };
+    } finally {
+      this.#pendingApprovalActions.delete(actionKey);
+    }
   }
 
   /**
@@ -633,7 +813,208 @@ export class WorkspaceStore {
       return null;
     }
 
-    return this.#enqueue(async () => this.#applyAgentEventToStore(agentEvent));
+    if (this.#closing) {
+      throw new Error("workspace store is closing or closed");
+    }
+
+    if (typeof agentEvent.delta === "string") {
+      return this.#queueAgentDelta(agentEvent);
+    }
+
+    this.#flushPendingAgentDeltas();
+    return this.#queueAgentWork(() =>
+      Promise.resolve(this.#applyAgentEventToStore(agentEvent))
+    );
+  }
+
+  #queueAgentDelta(event: NormalizedAgentEvent): Promise<StoreCommit | null> {
+    return new Promise((resolve, reject) => {
+      this.#pendingAgentDeltas.push({ event, reject, resolve });
+      this.#pendingAgentDeltaChars += event.delta?.length ?? 0;
+
+      if (
+        this.#pendingAgentDeltas.length >= MAX_AGENT_DELTA_BATCH_EVENTS ||
+        this.#pendingAgentDeltaChars >= MAX_AGENT_DELTA_BATCH_CHARS
+      ) {
+        this.#flushPendingAgentDeltas();
+        return;
+      }
+
+      if (this.#agentDeltaFlushTimer === null) {
+        this.#agentDeltaFlushTimer = setTimeout(() => {
+          this.#agentDeltaFlushTimer = null;
+          this.#flushPendingAgentDeltas();
+        }, AGENT_DELTA_BATCH_WINDOW_MS);
+        this.#agentDeltaFlushTimer.unref?.();
+      }
+    });
+  }
+
+  #flushPendingAgentDeltas(): void {
+    if (this.#agentDeltaFlushTimer !== null) {
+      clearTimeout(this.#agentDeltaFlushTimer);
+      this.#agentDeltaFlushTimer = null;
+    }
+
+    if (this.#pendingAgentDeltas.length === 0) {
+      return;
+    }
+
+    const pending = this.#pendingAgentDeltas;
+    this.#pendingAgentDeltas = [];
+    this.#pendingAgentDeltaChars = 0;
+    const commit = this.#queueAgentWork(() =>
+      Promise.resolve(
+        this.#applyAgentDeltaBatchToStore(pending.map(({ event }) => event))
+      )
+    );
+    commit.then(
+      (value) => {
+        for (const item of pending) {
+          item.resolve(value);
+        }
+      },
+      (error: unknown) => {
+        for (const item of pending) {
+          item.reject(error);
+        }
+      }
+    );
+  }
+
+  #queueAgentWork<T>(work: () => Promise<T>): Promise<T> {
+    const result = this.#agentEventTail.then(() =>
+      this.#enqueueNow(work, true)
+    );
+    this.#agentEventTail = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+
+  #applyAgentDeltaBatchToStore(
+    agentEvents: NormalizedAgentEvent[]
+  ): StoreCommit | null {
+    const receipts = new Map<string, { id: string; ts: number }>();
+    const deltas = new Map<
+      string,
+      {
+        event: StepDeltaWorkspaceEvent;
+        chunks: string[];
+        timestamp: number;
+      }
+    >();
+
+    for (const agentEvent of agentEvents) {
+      this.#collectAgentDelta(agentEvent, receipts, deltas);
+    }
+
+    const events = [...deltas.values()].map(({ event, chunks, timestamp }) => ({
+      ...event,
+      delta: chunks.join(""),
+      ts: timestamp,
+    }));
+    const persistedReceipts = [...receipts.values()];
+    if (events.length === 0) {
+      this.#persistAgentReceipts(persistedReceipts);
+      return null;
+    }
+
+    const boardIds = new Set(events.map((event) => event.boardId));
+    const boardId = boardIds.size === 1 ? (events[0]?.boardId ?? null) : null;
+    const commit = this.#commit(events, boardId, null, [], persistedReceipts);
+    this.#pruneAgentReceiptsPeriodically(persistedReceipts.length);
+    return commit;
+  }
+
+  #collectAgentDelta(
+    agentEvent: NormalizedAgentEvent,
+    receipts: Map<string, { id: string; ts: number }>,
+    deltas: Map<
+      string,
+      {
+        event: StepDeltaWorkspaceEvent;
+        chunks: string[];
+        timestamp: number;
+      }
+    >
+  ): void {
+    const sessionId = agentEvent.sessionID;
+    if (!sessionId) {
+      return;
+    }
+
+    const board = this.#snapshot.boards.find(
+      (entry) => entry.session.sessionId === sessionId
+    );
+    if (!board) {
+      return;
+    }
+
+    const receipt = this.#agentReceipt(board.boardId, sessionId, agentEvent);
+    if (receipt && this.#hasAgentReceipt(receipt, receipts)) {
+      return;
+    }
+
+    const converted = toWorkspaceEvents(agentEvent, {
+      boardId: board.boardId,
+      taskId: board.session.currentTaskId ?? "",
+    });
+    const delta = converted.find(isStepDeltaWorkspaceEvent);
+    if (!delta || delta.taskId === "") {
+      if (converted.length > 0) {
+        this.#warnDroppedOnce(board.boardId, agentEvent);
+      }
+      this.#recordAgentReceipt(receipt, receipts);
+      return;
+    }
+
+    const key = JSON.stringify([delta.boardId, delta.taskId, delta.stepId]);
+    const existing = deltas.get(key);
+    if (existing) {
+      existing.chunks.push(delta.delta);
+      existing.timestamp = delta.ts;
+    } else {
+      deltas.set(key, {
+        event: delta,
+        chunks: [delta.delta],
+        timestamp: delta.ts,
+      });
+    }
+    this.#recordAgentReceipt(receipt, receipts);
+  }
+
+  #agentReceipt(
+    boardId: string,
+    sessionId: string,
+    event: NormalizedAgentEvent
+  ): { id: string; ts: number } | undefined {
+    if (!event.sourceEventId) {
+      return undefined;
+    }
+    return {
+      id: JSON.stringify([boardId, sessionId, event.sourceEventId]),
+      ts: Date.now(),
+    };
+  }
+
+  #hasAgentReceipt(
+    receipt: { id: string; ts: number },
+    batchReceipts: Map<string, { id: string; ts: number }>
+  ): boolean {
+    return (
+      batchReceipts.has(receipt.id) || this.#db.hasAgentReceipt(receipt.id)
+    );
+  }
+
+  #recordAgentReceipt(
+    receipt: { id: string; ts: number } | undefined,
+    receipts: Map<string, { id: string; ts: number }>
+  ): void {
+    if (receipt) {
+      receipts.set(receipt.id, receipt);
+    }
   }
 
   #applyAgentEventToStore(
@@ -695,12 +1076,19 @@ export class WorkspaceStore {
     if (!receipt) {
       return;
     }
-    this.#db.appendEvents([], null, [], receipt);
-    this.#pruneAgentReceiptsPeriodically();
+    this.#persistAgentReceipts([receipt]);
   }
 
-  #pruneAgentReceiptsPeriodically(): void {
-    this.#agentReceiptsSincePrune += 1;
+  #persistAgentReceipts(receipts: Array<{ id: string; ts: number }>): void {
+    if (receipts.length === 0) {
+      return;
+    }
+    this.#db.appendEvents([], null, [], receipts);
+    this.#pruneAgentReceiptsPeriodically(receipts.length);
+  }
+
+  #pruneAgentReceiptsPeriodically(receiptCount = 1): void {
+    this.#agentReceiptsSincePrune += receiptCount;
     if (this.#agentReceiptsSincePrune < AGENT_RECEIPT_PRUNE_INTERVAL) {
       return;
     }
@@ -1233,6 +1621,18 @@ export class WorkspaceStore {
           ],
         };
 
+      case "preference.default_model.set":
+        return {
+          boardId: null,
+          events: [
+            {
+              type: "preference.default_model_set",
+              ts: now,
+              model: mutation.payload.model,
+            },
+          ],
+        };
+
       case "preference.dismiss_composer_hint":
         return {
           boardId: null,
@@ -1298,6 +1698,20 @@ export class WorkspaceStore {
       return Promise.reject(new Error("workspace store is closing or closed"));
     }
 
+    this.#flushPendingAgentDeltas();
+    return this.#agentEventTail.then(() =>
+      // Once accepted above, preserve this operation through close. close()
+      // waits for the event tail and then the queue; rejecting here would drop
+      // a pre-close write that was waiting behind a buffered stream batch.
+      this.#enqueueNow(work, true)
+    );
+  }
+
+  #enqueueNow<T>(work: () => Promise<T>, allowClosing = false): Promise<T> {
+    if (this.#closing && !allowClosing) {
+      return Promise.reject(new Error("workspace store is closing or closed"));
+    }
+
     const result = this.#queue.promise.then(work);
     this.#queue.promise = result.then(
       () => undefined,
@@ -1316,7 +1730,9 @@ export class WorkspaceStore {
     boardId: string | null,
     mutationKey: { id: string; ts: number } | null,
     metaChanges: MetaChange[] = [],
-    agentReceipt?: { id: string; ts: number }
+    agentReceipt?:
+      | { id: string; ts: number }
+      | Array<{ id: string; ts: number }>
   ): StoreCommit {
     let candidate = this.#snapshot;
     for (const event of events) {
@@ -1462,6 +1878,7 @@ export class WorkspaceStore {
       case "preference.composer_hint_dismissed":
       case "preference.speech_voice_set":
       case "preference.board_view_mode_set":
+      case "preference.default_model_set":
         return applyWorkspacePreference(snapshot, event);
 
       default: {
@@ -1684,6 +2101,16 @@ function applyWorkspacePreference(
     return {
       ...snapshot,
       preferences: { ...snapshot.preferences, boardViewMode: event.mode },
+    };
+  }
+
+  if (event.type === "preference.default_model_set") {
+    return {
+      ...snapshot,
+      preferences: {
+        ...snapshot.preferences,
+        defaultModelSelection: event.model,
+      },
     };
   }
 

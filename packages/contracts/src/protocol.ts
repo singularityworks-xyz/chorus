@@ -22,6 +22,8 @@ export const MAX_REPLAY_GAP = 500;
 // ── Client → server ─────────────────────────────────────────────────────────
 
 export const clientHelloSchema = z.object({
+  /** Identity of the database that produced the cached cursor, when known. */
+  workspaceId: z.uuid().optional(),
   since: z.number().int().nonnegative(),
   type: z.literal("hello"),
 });
@@ -86,6 +88,8 @@ export function createVersionedSnapshot(
 
 export const serverReadySchema = z.object({
   head: z.number().int().nonnegative(),
+  /** Optional for compatibility with older Serve processes. */
+  workspaceId: z.uuid().optional(),
   type: z.literal("ready"),
 });
 
