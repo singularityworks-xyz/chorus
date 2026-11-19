@@ -1,4 +1,4 @@
-import type { WorkspaceBoard } from "../base";
+import type { WorkspaceBoard } from "../base/boards";
 import { type CardRunStepEvent, unhandledBoardEvent } from "./routing";
 import {
   appendDelta,

@@ -1,4 +1,4 @@
-import type { WorkspaceBoard } from "../base";
+import type { WorkspaceBoard } from "../base/boards";
 import { type BoardLifecycleEvent, unhandledBoardEvent } from "./routing";
 import { normalizeColumns, withTaskUpdated } from "./task-state";
 

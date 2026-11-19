@@ -1,8 +1,5 @@
-import type {
-  ModelSelection,
-  WorkspaceBoard,
-  WorkspaceSnapshotInput,
-} from "./base";
+import type { WorkspaceBoard, WorkspaceSnapshotInput } from "./base/boards";
+import type { ModelSelection } from "./base/models";
 import type { WorkspaceEvent } from "./events";
 import { isBoardScopedEvent } from "./events";
 import { applyBoardScopedEvent } from "./projector/board-events";

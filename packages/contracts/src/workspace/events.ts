@@ -1,16 +1,18 @@
 import { z } from "zod";
 import {
-  agentStepSchema,
   boardViewModeSchema,
+  workspaceBoardSchema,
+  workspaceBoardSessionSchema,
+} from "./base/boards";
+import { modelSelectionSchema } from "./base/models";
+import {
+  agentStepSchema,
   columnsSchema,
-  modelSelectionSchema,
   pendingApprovalRequestSchema,
   reviewModeSchema,
   taskSchema,
-  workspaceBoardSchema,
-  workspaceBoardSessionSchema,
   workspaceColumnIdSchema,
-} from "./base";
+} from "./base/tasks";
 
 /** The four board lanes used by task transitions. */
 export const WORKSPACE_COLUMN_IDS = [

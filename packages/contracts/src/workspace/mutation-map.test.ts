@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { workspaceMutationSchema } from "./base";
+import { workspaceMutationSchema } from "./base/mutations";
 import type { WorkspaceEventType } from "./events";
 import { BOARD_SCOPED_EVENT_TYPES, workspaceEventSchema } from "./events";
 import {

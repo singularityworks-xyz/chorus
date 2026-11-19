@@ -1,4 +1,5 @@
-import type { Columns, Task, WorkspaceBoard } from "../base";
+import type { WorkspaceBoard } from "../base/boards";
+import type { Columns, Task } from "../base/tasks";
 import type { WorkspaceColumnId } from "../events";
 import { WORKSPACE_COLUMN_IDS } from "../events";
 

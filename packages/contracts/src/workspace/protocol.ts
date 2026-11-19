@@ -3,7 +3,7 @@ import {
   type WorkspaceSnapshotInput,
   workspaceBoardSchema,
   workspacePreferencesSchema,
-} from "./base";
+} from "./base/boards";
 import type { WorkspaceEvent } from "./events";
 import { WORKSPACE_SNAPSHOT_VERSION, workspaceEventSchema } from "./events";
 

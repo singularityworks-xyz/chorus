@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { Task, WorkspaceBoard } from "./base";
-import { workspaceBoardSchema } from "./base";
+import type { WorkspaceBoard } from "./base/boards";
+import { workspaceBoardSchema } from "./base/boards";
+import type { Task } from "./base/tasks";
 import type { WorkspaceColumnId, WorkspaceEvent } from "./events";
 import {
   applyEventToBoard,

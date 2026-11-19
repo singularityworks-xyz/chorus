@@ -1,4 +1,4 @@
-import type { WorkspaceBoard } from "../base";
+import type { WorkspaceBoard } from "../base/boards";
 import type { BoardScopedEvent } from "../events";
 
 export type SessionScopedEvent = Extract<

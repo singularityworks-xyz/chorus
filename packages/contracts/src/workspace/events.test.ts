@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { agentStepSchema, workspaceBoardSchema } from "./base";
+import { workspaceBoardSchema } from "./base/boards";
+import { agentStepSchema } from "./base/tasks";
 import type { WorkspaceEvent } from "./events";
 import {
   boardCreatedEventSchema,

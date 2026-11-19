@@ -1,12 +1,14 @@
 import { z } from "zod";
 import {
-  agentRunContextSchema,
-  agentStepSchema,
-  taskSchema,
   workspaceBoardSchema,
   workspaceHistoryEntrySchema,
   workspacePreferencesSchema,
-} from "../../workspace/base";
+} from "../../workspace/base/boards";
+import {
+  agentRunContextSchema,
+  agentStepSchema,
+  taskSchema,
+} from "../../workspace/base/tasks";
 import { workspaceAuthoritySchema } from "../contracts";
 import { portableRepositoryPathSchema } from "./repository";
 

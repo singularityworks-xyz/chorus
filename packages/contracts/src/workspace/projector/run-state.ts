@@ -1,4 +1,5 @@
-import type { AgentRunContext, AgentStep, Task, WorkspaceBoard } from "../base";
+import type { WorkspaceBoard } from "../base/boards";
+import type { AgentRunContext, AgentStep, Task } from "../base/tasks";
 import { withTaskUpdated } from "./task-state";
 
 const SUMMARY_MAX = 72;
