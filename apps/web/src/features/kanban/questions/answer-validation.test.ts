@@ -3,7 +3,7 @@ import type { PendingQuestion } from "@chorus/contracts";
 import {
   questionAnswerKey,
   validateQuestionAnswers,
-} from "./question-answer-validation";
+} from "./answer-validation";
 
 function makePendingQuestion(
   questions: PendingQuestion["questions"]
