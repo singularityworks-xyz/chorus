@@ -14,22 +14,11 @@ import type {
 } from "./events";
 import { isBoardScopedEvent, WORKSPACE_COLUMN_IDS } from "./events";
 
-/**
- * The single shared projector (spec §4 / plan Phase 1).
- *
- * Pure by construction: no clock reads, no randomness, no mutation of inputs.
- * Run elapsed time is derived from `event.ts`, never `Date.now()`, so replaying
- * the same event log always produces the same board.
- *
- * Before this module existed, `apps/serve/src/workspace/projector.ts` and
- * `apps/web/src/features/workspace/state.ts` each carried their own copy — and
- * the copies had already drifted (delta step-id prefixing, `session.timeout`
- * handling). Neither app may define board-reduction logic again.
- */
+/** Pure event projector shared by Serve and Web. */
 
 const SUMMARY_MAX = 72;
 
-/** Placeholder run model until `run.started` reports the real one. */
+/** Fallback until the first run event supplies its model. */
 const DEFAULT_RUN_MODEL = "OpenCode";
 
 function emptyColumns(): Columns {
@@ -106,10 +95,7 @@ function makeLabelVariant(columnId: WorkspaceColumnId): Task["labelVariant"] {
   }
 }
 
-/**
- * Moves a card between lanes. Returns the original object when the card is
- * absent or already in the target lane so callers can cheaply detect no-ops.
- */
+/** Moves a task to another lane, preserving identity for no-ops. */
 function moveCard(
   columns: Columns,
   taskId: string,
@@ -225,14 +211,7 @@ function upsertStep(
   return { ...run, elapsed: formatElapsed(run.startedAt ?? now, now), steps };
 }
 
-/**
- * Appends streamed text to a step, opening the step if it does not exist yet.
- *
- * Creating on demand matters: a delta can legitimately arrive before the event
- * that would have upserted its step (a stream starting mid-part, or a replay
- * resuming between the two log entries). Dropping it loses the first tokens of
- * the response, which is exactly what the pre-Phase-1 copy did.
- */
+/** Creates the step when streamed text arrives before its upsert event. */
 function appendDelta(
   run: AgentRunContext,
   stepId: string,
@@ -291,12 +270,7 @@ function extractPlanFromSteps(steps: AgentStep[]): string | null {
   return plan.length > 0 ? plan : null;
 }
 
-/**
- * Runs a step mutation against a card, creating the run context if this is the
- * card's first step. The lazy default mirrors pre-Phase-1 behaviour, where the
- * serve projector opened `run` with a placeholder model on the first event
- * rather than requiring an explicit `run.started`.
- */
+/** Updates a task run, creating fallback context when its first step arrives. */
 function withRun(
   board: WorkspaceBoard,
   taskId: string,

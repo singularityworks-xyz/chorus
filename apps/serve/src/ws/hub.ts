@@ -21,39 +21,7 @@ import type {
   WorkspaceStore,
 } from "../workspace/store";
 
-/**
- * WebSocket hub for the native `/ws` event log (spec §4).
- *
- * Single owner of every downstream byte. Routes and the bridge do not touch
- * sockets — the store hands the hub a commit and the hub decides what goes out.
- * That is the whole point: one emit path from the store's commit point.
- *
- * ## Backpressure — measured on the layer we actually run
- *
- * The Day-1 spike (`.context/ws-backpressure-spike.md`, harness
- * `src/ws/spike.ts`) measures Elysia's `.ws()`, not `Bun.serve`. That matters
- * more than it sounds: an earlier spike drove `Bun.serve` directly and reported
- * that `send()`'s return value was useless (always a positive byte count).
- * On Elysia it is the *primary* signal — the context documents `-1` for
- * backpressure and `0` for dropped, and a 3 000-message burst into a stalled
- * reader produced `-1` 2 242 times and `0` 435 times.
- *
- * So congestion is read two ways:
- *
- * 1. `send()` returning `< 0` — immediate, and free (no extra syscall).
- * 2. `raw.getBufferedAmount()` above `HIGH_WATER_MARK` — the magnitude guard,
- *    because 16 MiB still accumulates silently and 323 of those sends returned a
- *    positive count against that backlog, so a positive send proves nothing.
- *
- * ## Connection identity
- *
- * Clients are keyed by the context's `id` string, never by socket object. Elysia
- * hands `open`, `message`, and `close` a *different wrapper object* for the same
- * connection, so an identity-keyed registry misses every lookup — the first cut
- * of this hub had exactly that bug and the handshake silently produced zero
- * frames with nothing logged.
- */
-/** ~30x a typical step-delta patch, 64x below the 16 MiB the spike observed. */
+/** Maximum queued socket data before a client is marked backpressured. */
 export const HIGH_WATER_MARK = 262_144;
 
 /** Coalescing bucket for workspace-scoped (non-board) events. */
@@ -62,29 +30,13 @@ const WORKSPACE_SCOPE_KEY = "__workspace__";
 /** Control frames per client per minute before the socket is dropped. */
 export const WS_CONTROL_LIMIT_PER_MINUTE = 60;
 
-/**
- * Positive sends needed to clear critical-only on transports with no buffer
- * gauge. With a gauge, a low buffer is sufficient — see `#hasRecovered`.
- */
+/** Successful sends required to recover when buffer depth is unavailable. */
 export const RECOVERY_SENDS = 2;
 
-/**
- * Hard cap on records held in one coalescing window.
- *
- * Merging only collapses records for the *same* step, and a busy run streams
- * many distinct parts, so the window grows with the event rate rather than with
- * the merge rate. Without a bound, a long window during a replay accumulates
- * thousands of entries that congested clients are about to skip anyway.
- */
+/** Maximum number of records buffered for one coalescing window. */
 export const MAX_COALESCE_BUFFER = 2000;
 
-/**
- * Consecutive frames a transport may discard before the socket is closed.
- *
- * Backpressure clears on its own once the peer drains. A discarded frame does
- * not, so a peer that keeps returning 0 is gone and every subsequent control
- * event would be discarded too.
- */
+/** Consecutive discarded frames allowed before closing a socket. */
 export const MAX_CONSECUTIVE_DROPS = 5;
 
 /** Viewport frames allowed per minute. */
@@ -97,28 +49,18 @@ export const PING_INTERVAL_MS = 30_000;
 export const PONG_TIMEOUT_MS = 10_000;
 export const COALESCE_MS = 100;
 
-/**
- * Transport-agnostic view of a socket, so the hub is unit-testable without an
- * HTTP server and Bun-specific wiring stays at the edge.
- */
+/** Transport-neutral socket interface used by the hub. */
 export interface HubSocket {
   close?: (code?: number, reason?: string) => void;
-  /**
-   * Byte depth, when the transport exposes it. Elysia does not put this on the
-   * context — only on `ctx.raw` — so it is optional by design.
-   */
+  /** Pending bytes, when available from the transport. */
   getBufferedAmount?: () => number;
-  /** Stable per-connection id. Object identity is NOT stable across Elysia handlers. */
+  /** Stable connection identifier shared across Elysia callbacks. */
   id: string;
-  /**
-   * Sends a frame and returns the transport's status: `< 0` backpressure,
-   * `0` dropped, `> 0` bytes accepted. Transports that do not report a status
-   * may return `undefined`.
-   */
+  /** Negative means backpressure, zero dropped, positive bytes accepted. */
   send: (data: string) => unknown;
 }
 
-/** Identity under which two buffered records describe the same work. */
+/** Key used to coalesce records for the same streamed step. */
 function mergeKeyFor(record: BufferedRecord): string {
   const event = record.event;
   if (event.type === "step.delta_appended") {
@@ -583,12 +525,7 @@ export class WorkspaceHub {
     }
   }
 
-  /**
-   * Resume handshake (spec §4).
-   *
-   * Sends `ready` with the current head, then either the exact gap, nothing at
-   * all, or a fresh snapshot — decided by `decideResume`.
-   */
+  /** Sends the current head and resumes from the supplied cursor or a snapshot. */
   #handleHello(
     client: Client,
     since: number,
@@ -928,10 +865,7 @@ export class WorkspaceHub {
     }
   }
 
-  /**
-   * The one sanctioned passthrough (spec §4): viewport relay is ephemeral,
-   * unsequenced, unpersisted, and never touches the event log.
-   */
+  /** Relays ephemeral viewport telemetry outside the event log. */
   #relayViewport(
     origin: Client,
     payload: Record<string, unknown>,

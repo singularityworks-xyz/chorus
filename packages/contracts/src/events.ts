@@ -12,11 +12,7 @@ import {
   workspaceColumnIdSchema,
 } from "./base";
 
-/**
- * The four fixed kanban lanes (spec §2). `columnsSchema` is a loose record for
- * forward compatibility, but every transition in the vocabulary names one of
- * these explicitly so the projector never has to guess a lane.
- */
+/** The four board lanes used by task transitions. */
 export const WORKSPACE_COLUMN_IDS = [
   "queue",
   "in_progress",
@@ -29,12 +25,7 @@ export type WorkspaceColumnId = z.infer<typeof workspaceColumnIdSchema>;
 /** Snapshot blob version. Bump when a persisted shape changes incompatibly. */
 export const WORKSPACE_SNAPSHOT_VERSION = 1;
 
-/**
- * Every event carries the timestamp it was appended at. The projector derives
- * run elapsed time from this rather than `Date.now()`, which keeps
- * `applyEventToBoard` a pure, deterministic function (spec §4 determinism
- * requirement; the pre-Phase-1 projector read the wall clock).
- */
+/** Timestamp recorded when the event is appended. */
 const workspaceEventBaseSchema = z.object({
   ts: z.number().int().nonnegative(),
 });
@@ -43,15 +34,10 @@ const boardScopedSchema = workspaceEventBaseSchema.extend({
   boardId: z.string().min(1),
 });
 
-/**
- * Why a card moved to `approve`. Kept explicit so the UI and the push payload
- * (spec §10) can describe the request without re-deriving it.
- */
+/** Why a task entered the approval lane. */
 export const approvalRequestKindSchema = z.enum(["permission", "question"]);
 
 export type ApprovalRequestKind = z.infer<typeof approvalRequestKindSchema>;
-
-// ── Board lifecycle ─────────────────────────────────────────────────────────
 
 export const boardCreatedEventSchema = workspaceEventBaseSchema.extend({
   board: workspaceBoardSchema,
@@ -68,7 +54,6 @@ export const boardRemovedEventSchema = boardScopedSchema.extend({
   type: z.literal("board.removed"),
 });
 
-/** Workspace-scoped: selecting a board is not a property of one board. */
 export const boardSelectedEventSchema = workspaceEventBaseSchema.extend({
   boardId: z.string().min(1).nullable(),
   type: z.literal("board.selected"),
@@ -110,8 +95,6 @@ export const boardTaskPlanUpdatedEventSchema = boardScopedSchema.extend({
   taskId: z.string().min(1),
   type: z.literal("board.task_plan_updated"),
 });
-
-// ── Card lifecycle ──────────────────────────────────────────────────────────
 
 export const cardCreatedEventSchema = boardScopedSchema.extend({
   column: workspaceColumnIdSchema,
@@ -169,8 +152,6 @@ export const cardAbortedEventSchema = boardScopedSchema.extend({
   type: z.literal("card.aborted"),
 });
 
-// ── Run / step ──────────────────────────────────────────────────────────────
-
 export const runStartedEventSchema = boardScopedSchema.extend({
   model: z.string().min(1),
   sessionId: z.string().min(1).optional(),
@@ -192,8 +173,6 @@ export const stepDeltaAppendedEventSchema = boardScopedSchema.extend({
   taskId: z.string().min(1),
   type: z.literal("step.delta_appended"),
 });
-
-// ── Session ─────────────────────────────────────────────────────────────────
 
 export const sessionAttachedEventSchema = boardScopedSchema.extend({
   sessionId: z.string().min(1),
@@ -220,8 +199,6 @@ export const sessionTimeoutEventSchema = boardScopedSchema.extend({
 export const sessionStartingEventSchema = boardScopedSchema.extend({
   type: z.literal("session.starting"),
 });
-
-// ── Preferences (workspace-scoped) ───────────────────────────────────────────
 
 export const preferenceRecentModelAddedEventSchema =
   workspaceEventBaseSchema.extend({
@@ -251,8 +228,6 @@ export const preferenceBoardViewModeSetEventSchema =
     mode: boardViewModeSchema,
     type: z.literal("preference.board_view_mode_set"),
   });
-
-// ── Union ───────────────────────────────────────────────────────────────────
 
 export const workspaceEventSchema = z.discriminatedUnion("type", [
   boardCreatedEventSchema,
@@ -292,7 +267,7 @@ export const workspaceEventSchema = z.discriminatedUnion("type", [
 export type WorkspaceEvent = z.infer<typeof workspaceEventSchema>;
 export type WorkspaceEventType = WorkspaceEvent["type"];
 
-/** Events that describe one board. `board.selected` is workspace-scoped. */
+/** Events whose state belongs to one board. */
 export type BoardScopedEvent = Extract<WorkspaceEvent, { boardId: string }>;
 
 export const BOARD_SCOPED_EVENT_TYPES = [
@@ -328,14 +303,7 @@ const BOARD_SCOPED_EVENT_TYPE_SET: ReadonlySet<string> = new Set(
   BOARD_SCOPED_EVENT_TYPES
 );
 
-/**
- * Narrows to `BoardScopedEvent`.
- *
- * Membership is checked against `BOARD_SCOPED_EVENT_TYPES` rather than merely
- * testing for a `boardId` key, because `board.selected` also carries a
- * `boardId` while being workspace-scoped (its id is `string | null`, so it is
- * excluded from `BoardScopedEvent`). A key-presence test would wrongly claim it.
- */
+/** Narrows by event type because workspace selection also carries `boardId`. */
 export function isBoardScopedEvent(
   event: WorkspaceEvent
 ): event is BoardScopedEvent {
