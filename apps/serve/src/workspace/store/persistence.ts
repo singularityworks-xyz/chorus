@@ -9,7 +9,8 @@ import {
 } from "@chorus/contracts";
 import { createLogger } from "@chorus/logger";
 import type { RepositoryRegistry } from "../../projects/repository-registry";
-import type { ChorusDatabase, StoredEvent } from "../db";
+import type { StoredEvent } from "../database/types";
+import type { ChorusDatabase } from "../db";
 import { retentionCutoff, stripTerminalRunDetails } from "../retention";
 import { projectWorkspaceEvent } from "./projection";
 

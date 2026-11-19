@@ -3,7 +3,9 @@ import { describe, expect, test } from "bun:test";
 import { copyFileSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ChorusDatabase, resolveDbPath, restoreDatabaseFile } from "./db";
+import { resolveDbPath } from "./database/connection";
+import { restoreDatabaseFile } from "./database/restore";
+import { ChorusDatabase } from "./db";
 import { WorkspaceStore } from "./store";
 
 /**

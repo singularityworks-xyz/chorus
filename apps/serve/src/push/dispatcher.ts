@@ -7,7 +7,7 @@ import {
 import { createLogger } from "@chorus/logger";
 import { generateRequestDetails } from "web-push-neo";
 import { z } from "zod";
-import type { StoredPushSubscription } from "../workspace/db";
+import type { StoredPushSubscription } from "../workspace/database/types";
 import type { StoreCommit } from "../workspace/store";
 import type { PushConfiguration } from "./config";
 import { waitForRetry, withDeliverySignal } from "./delivery-control";

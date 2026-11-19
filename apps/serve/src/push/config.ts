@@ -1,6 +1,6 @@
 import { generateVAPIDKeys } from "web-push-neo";
 import { z } from "zod";
-import type { MetaChange } from "../workspace/db";
+import type { MetaChange } from "../workspace/database/types";
 
 const PERSISTED_KEYS_KEY = "push:v1:vapid-keys";
 const BASE64URL_KEY_PATTERN = /^[A-Za-z0-9_-]+$/;

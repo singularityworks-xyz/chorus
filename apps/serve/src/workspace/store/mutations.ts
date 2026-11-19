@@ -8,7 +8,8 @@ import type {
 import { createLogger } from "@chorus/logger";
 import { z } from "zod";
 import type { RepositoryRegistry } from "../../projects/repository-registry";
-import type { ChorusDatabase, MetaChange } from "../db";
+import type { MetaChange } from "../database/types";
+import type { ChorusDatabase } from "../db";
 import type { WorktreeProvisioner } from "../store";
 import { createBoardFromSeed } from "./projection";
 

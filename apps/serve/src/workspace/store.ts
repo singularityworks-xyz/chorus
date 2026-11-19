@@ -12,13 +12,13 @@ import { createLogger } from "@chorus/logger";
 import type { NormalizedAgentEvent } from "@chorus/oc-adapter";
 import { z } from "zod";
 import { RepositoryRegistry } from "../projects/repository-registry";
-import {
-  ChorusDatabase,
-  type MetaChange,
-  type PushSubscriptionRow,
-  type StoredPushSubscription,
-  WORKSPACE_ID_KEY,
-} from "./db";
+import { WORKSPACE_ID_KEY } from "./database/connection";
+import type {
+  MetaChange,
+  PushSubscriptionRow,
+  StoredPushSubscription,
+} from "./database/types";
+import { ChorusDatabase } from "./db";
 import { attachSessionToBoard } from "./projector";
 import {
   DEFAULT_RETENTION_DAYS,

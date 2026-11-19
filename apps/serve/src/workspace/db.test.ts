@@ -3,12 +3,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  ChorusDatabase,
-  HEAD_SEQ_KEY,
-  resolveDbPath,
-  restoreDatabaseFile,
-} from "./db";
+import { HEAD_SEQ_KEY, resolveDbPath } from "./database/connection";
+import { restoreDatabaseFile } from "./database/restore";
+import { ChorusDatabase } from "./db";
 
 const dirs: string[] = [];
 const databases: ChorusDatabase[] = [];
@@ -55,8 +52,6 @@ describe("ChorusDatabase", () => {
     db.appendEvents([event(1)], null);
     db.close();
 
-    // Queried out-of-band rather than via a new accessor: the schema is the
-    // contract, but it is not worth widening the production API to assert it.
     const probe = new Database(resolveDbPath(db.dataDir));
     const tables = probe
       .query<{ name: string }, []>(
@@ -95,7 +90,7 @@ describe("ChorusDatabase", () => {
     db.close();
   });
 
-  test("rolls back event rows when an agent receipt cannot be inserted", () => {
+  test("rolls back a partially inserted event batch", () => {
     const db = open();
     const receipt = { id: "stable-agent-event", ts: 10 };
     db.appendEvents([event(1)], null, [], receipt);
@@ -247,15 +242,26 @@ describe("ChorusDatabase", () => {
   });
 
   test("an IMMEDIATE transaction that throws rolls back every row", () => {
-    // The store's commit-then-swap invariant rests on this: a failed append
-    // must leave the log untouched, not half-written.
     const db = open();
+    const probe = new Database(db.path);
+    probe.exec(`
+      CREATE TRIGGER reject_second_event
+      BEFORE INSERT ON events
+      WHEN NEW.seq = 2
+      BEGIN
+        SELECT RAISE(ABORT, 'injected commit failure');
+      END;
+    `);
+    probe.close();
 
     expect(() =>
-      db.appendFailingBatch([
-        { boardId: "b1", payload: "{}", ts: 1, type: "card.started" },
-        { boardId: "b1", payload: "{}", ts: 2, type: "card.started" },
-      ])
+      db.appendEvents(
+        [
+          { boardId: "b1", payload: "{}", ts: 1, type: "card.started" },
+          { boardId: "b1", payload: "{}", ts: 2, type: "card.started" },
+        ],
+        null
+      )
     ).toThrow("injected commit failure");
 
     expect(db.eventCount()).toBe(0);
@@ -348,10 +354,6 @@ describe("restoreDatabaseFile", () => {
   });
 
   test("a stale WAL sidecar does not leak into the restored database", () => {
-    // The reason sidecars are cleared: a leftover -wal belongs to the *previous*
-    // database and would otherwise be replayed over the replacement. The
-    // invariant is about content, not about the file's absence — SQLite
-    // legitimately recreates a -wal when a WAL database is opened.
     const source = open();
     source.appendEvents([event(1), event(2)], null);
     source.checkpointTruncate();
@@ -361,8 +363,6 @@ describe("restoreDatabaseFile", () => {
     const targetDir = mkdtempSync(join(tmpdir(), "chorus-stalewal-"));
     dirs.push(targetDir);
 
-    // Give the target its own (different) history, then poison it with a stale
-    // sidecar, then restore over the top.
     const targetPath = resolveDbPath(targetDir);
     const victim = openAt(targetDir);
     victim.appendEvents([event(999)], null);
@@ -380,7 +380,6 @@ describe("restoreDatabaseFile", () => {
       .sort((a, b) => a - b);
     restored.close();
 
-    // Exactly the source's events: the victim's row and the stale WAL are gone.
     expect(ts).toEqual([1, 2]);
   });
 

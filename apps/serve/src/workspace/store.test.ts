@@ -15,7 +15,8 @@ import {
   workspaceSnapshotSchema,
 } from "@chorus/contracts";
 import type { NormalizedAgentEvent } from "@chorus/oc-adapter";
-import { restoreDatabaseFile, WORKSPACE_ID_KEY } from "./db";
+import { WORKSPACE_ID_KEY } from "./database/connection";
+import { restoreDatabaseFile } from "./database/restore";
 import { WorkspaceStore } from "./store";
 
 const dirs: string[] = [];
