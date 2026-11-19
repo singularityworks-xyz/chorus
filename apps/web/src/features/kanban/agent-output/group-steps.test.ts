@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentStep } from "@/features/kanban/components/agent-output-card";
 import { groupSteps } from "./group-steps";
+import type { AgentStep } from "./types";
 
 function makeStep(
   id: string,

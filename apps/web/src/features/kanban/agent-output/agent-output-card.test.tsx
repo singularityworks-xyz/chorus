@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
+import { AgentOutputCard } from "./agent-output-card";
 import {
-  AgentOutputCard,
-  type AgentStep,
   FileContentUnavailable,
   FileEditContents,
   getFilePreviewContent,
-} from "./agent-output-card";
+} from "./file-edits";
+import type { AgentStep } from "./types";
 
 describe("file edit output", () => {
   const step: AgentStep = {

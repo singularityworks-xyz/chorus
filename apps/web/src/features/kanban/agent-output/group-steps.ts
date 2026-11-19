@@ -1,4 +1,4 @@
-import type { AgentStep } from "@/features/kanban/components/agent-output-card";
+import type { AgentStep } from "./types";
 
 export interface GroupedThinkingStep {
   content: string;

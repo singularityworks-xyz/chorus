@@ -4,12 +4,12 @@ import { ArrowDownIcon } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { cn } from "@/lib/utils";
 import {
   getEarlierStreamContentRange,
   getLatestStreamContentRange,
   type StreamContentRange,
-} from "@/features/kanban/utils/stream-content-page";
-import { cn } from "@/lib/utils";
+} from "./stream-content-page";
 
 const MARKDOWN_PLUGINS = [remarkGfm];
 const MAX_SCROLL_DISTANCE_FROM_LATEST = 48;

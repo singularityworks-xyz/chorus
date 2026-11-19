@@ -17,15 +17,13 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import {
-  AgentOutputCard,
-  type AgentStep,
-} from "@/features/kanban/components/agent-output-card";
 import type { KanbanTaskActionState } from "@/features/kanban/hooks/use-kanban-card-actions";
 import { cn } from "@/lib/utils";
+import { AgentOutputCard } from "../agent-output/agent-output-card";
+import { type GroupedStep, groupSteps } from "../agent-output/group-steps";
+import type { AgentStep } from "../agent-output/types";
 import type { ChangedFile } from "../types";
 import { getBoardTaskCommandButtonState } from "../utils/board-task-state";
-import { type GroupedStep, groupSteps } from "../utils/group-steps";
 import {
   getPendingQuestionApprovals,
   hasPendingQuestion,
