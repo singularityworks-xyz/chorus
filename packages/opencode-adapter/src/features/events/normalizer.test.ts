@@ -5,7 +5,7 @@ import {
   normalizeSessionHistory,
   resetMessageTracking,
   type SessionMessageWithParts,
-} from "./event-stream";
+} from "./normalizer";
 
 // Real opencode streams deliver message.updated (role=assistant) before any
 // of that message's part events; the normalizer relies on it to classify

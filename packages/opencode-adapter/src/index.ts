@@ -3,13 +3,13 @@ import { createRequire } from "node:module";
 import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2";
 import { createClient as createAdapterClient } from "./features/client/client";
 import { ConfigManager } from "./features/config/config-manager";
-import type { SessionMessageWithParts } from "./features/events/event-stream";
+import { EventStream } from "./features/events/event-stream";
+import type { SessionMessageWithParts } from "./features/events/normalizer";
 import {
-  EventStream,
   normalizeEvent,
   normalizeSessionHistory,
   resetMessageTracking,
-} from "./features/events/event-stream";
+} from "./features/events/normalizer";
 import { InstanceManager } from "./features/instance/instance-manager";
 import { PermissionHandler } from "./features/permissions/permission-handler";
 import { ProjectManager } from "./features/projects/project-manager";
@@ -38,10 +38,12 @@ export type {
   EventStreamHandle,
   EventStreamOptions,
   EventStreamStatus,
+} from "./features/events/event-stream";
+export type {
   NormalizedActivity,
   NormalizedAgentEvent,
   SessionMessageWithParts,
-} from "./features/events/event-stream";
+} from "./features/events/normalizer";
 /**
  * The normalizer and its reset, exported so a server-side replay test can drive
  * the boundary without standing up an engine. Reaching into the package's
@@ -53,7 +55,7 @@ export {
   normalizeEvent,
   normalizeSessionHistory,
   resetMessageTracking,
-} from "./features/events/event-stream";
+} from "./features/events/normalizer";
 export type {
   PermissionHandlerInput,
   PermissionReply,
