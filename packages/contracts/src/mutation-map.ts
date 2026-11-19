@@ -19,7 +19,7 @@ import type { WorkspaceEventType } from "./events";
  * | board.remove                            | board.removed                        |
  * | board.select                            | board.selected                       |
  * | board.move                              | board.moved                          |
- * | board.columns.replace                   | board.columns_replaced               |
+ * | board.task.reorder                      | card.reordered                       |
  * | board.session.patch                     | board.session_patched                |
  * | board.model.set                         | board.model_set                      |
  * | board.review_mode.set                   | board.review_mode_set                |
@@ -40,7 +40,7 @@ export const MUTATION_EVENT_MAP = {
   "board.remove": "board.removed",
   "board.select": "board.selected",
   "board.move": "board.moved",
-  "board.columns.replace": "board.columns_replaced",
+  "board.task.reorder": "card.reordered",
   "board.session.patch": "board.session_patched",
   "board.model.set": "board.model_set",
   "board.review_mode.set": "board.review_mode_set",

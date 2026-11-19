@@ -1,6 +1,6 @@
 "use client";
 
-import type { Columns, Task } from "@chorus/contracts";
+import type { Columns, Task, WorkspaceColumnId } from "@chorus/contracts";
 import posthog from "posthog-js";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useWorkspace } from "@/features/workspace/workspace-context";
@@ -51,10 +51,14 @@ export interface KanbanCardActions {
     plan: string,
     answers: string[]
   ) => Promise<void>;
-  handleColumnsChange: (columns: Columns) => void;
   handlePlanChange: (taskId: string, plan: string) => void;
   handleQuestionsAnswered: (taskId: string, answers: string[]) => void;
   handleReject: (taskId: string) => Promise<void>;
+  handleReorderTask: (
+    taskId: string,
+    column: WorkspaceColumnId,
+    beforeTaskId: string | null
+  ) => void;
   handleRetry: (taskId: string) => Promise<void>;
   handleReviewModeChange: (mode: "manual" | "auto") => Promise<void>;
   handleRun: (taskId: string) => Promise<void>;
@@ -227,13 +231,11 @@ async function submitTaskRejection({
 export function useKanbanCardActions({
   boardId,
   columns,
-  onUpdateColumns,
   reviewMode,
   sessionId,
 }: {
   boardId: string;
   columns: Columns;
-  onUpdateColumns: (boardId: string, columns: Columns) => void;
   reviewMode: "manual" | "auto";
   sessionId?: string | undefined;
 }): KanbanCardActions {
@@ -248,7 +250,7 @@ export function useKanbanCardActions({
   const reviewModeCommandRef = useRef(0);
   const inFlightTaskActionRef = useRef(new Set<string>());
   const inFlightBoardTaskCommandRef = useRef(false);
-  const { updateBoardReviewMode } = useWorkspace();
+  const { reorderBoardTask, updateBoardReviewMode } = useWorkspace();
   const boardBusy = isBoardTaskCommandBusy(localColumns, actionStates);
 
   // Server events own lifecycle columns. The hook keeps no optimistic lifecycle
@@ -375,13 +377,17 @@ export function useKanbanCardActions({
     []
   );
 
-  const handleColumnsChange = useCallback(
-    (nextColumns: Columns) => {
-      setLocalColumns(nextColumns);
-
-      onUpdateColumns(boardId, nextColumns);
+  const handleReorderTask = useCallback(
+    (
+      taskId: string,
+      column: WorkspaceColumnId,
+      beforeTaskId: string | null
+    ) => {
+      reorderBoardTask(boardId, taskId, column, beforeTaskId).catch(
+        () => undefined
+      );
     },
-    [boardId, onUpdateColumns]
+    [boardId, reorderBoardTask]
   );
 
   const handleApprove = useCallback(
@@ -628,7 +634,7 @@ export function useKanbanCardActions({
     actionStates,
     boardBusy,
     handleApprove,
-    handleColumnsChange,
+    handleReorderTask,
     handlePlanChange,
     handleQuestionsAnswered,
     handleReject,

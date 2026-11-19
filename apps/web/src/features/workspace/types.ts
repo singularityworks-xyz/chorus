@@ -8,8 +8,9 @@ import type {
   ProjectListResponse,
   QueueBoardPromptResponse,
   RepoProject,
+  WorkspaceColumnId,
 } from "@chorus/contracts";
-import type { Columns, Task } from "@/features/kanban/components/kanban";
+import type { Task } from "@/features/kanban/components/kanban";
 import type { PendingDrag } from "./reducer";
 import type { WorkspaceSessionStatus } from "./session-status";
 
@@ -91,6 +92,12 @@ export interface WorkspaceContextValue {
   recentProjectsError: string | null;
   recentProjectsLoaded: boolean;
   removeBoard: (boardId: string) => Promise<void>;
+  reorderBoardTask: (
+    boardId: string,
+    taskId: string,
+    column: WorkspaceColumnId,
+    beforeTaskId: string | null
+  ) => Promise<void>;
   restoredPrompt: string;
   restorePrompt: (text: string) => void;
   selectBoard: (boardId: string) => void;
@@ -107,7 +114,6 @@ export interface WorkspaceContextValue {
   setBoardViewMode: (mode: WorkspacePreferences["boardViewMode"]) => void;
   setDefaultModelSelection: (model: ModelSelection | null) => Promise<void>;
   setSpeechVoiceId: (voiceId: string | null) => void;
-  updateBoardColumns: (boardId: string, columns: Columns) => void;
   updateBoardPosition: (
     boardId: string,
     position: { x: number; y: number }

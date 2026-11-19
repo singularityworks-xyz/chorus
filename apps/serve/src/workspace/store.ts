@@ -1567,12 +1567,14 @@ export class WorkspaceStore {
           position: mutation.payload.position,
         });
 
-      case "board.columns.replace":
+      case "board.task.reorder":
         return this.#existingBoardMutation(mutation.payload.boardId, {
-          type: "board.columns_replaced",
+          type: "card.reordered",
           boardId: mutation.payload.boardId,
           ts: now,
-          columns: mutation.payload.columns,
+          taskId: mutation.payload.taskId,
+          column: mutation.payload.column,
+          beforeTaskId: mutation.payload.beforeTaskId,
         });
 
       case "board.session.patch":

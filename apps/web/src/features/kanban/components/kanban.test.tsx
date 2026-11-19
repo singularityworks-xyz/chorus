@@ -33,7 +33,7 @@ function renderTaskColumn(
     <Kanban
       getItemValue={(item) => item.id}
       id="board-test"
-      onValueChange={() => undefined}
+      onReorderTask={() => undefined}
       value={columns}
     >
       <KanbanColumnBody

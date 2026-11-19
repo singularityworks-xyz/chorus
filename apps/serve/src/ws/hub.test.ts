@@ -116,28 +116,21 @@ async function seedSession(store: WorkspaceStore): Promise<string> {
   });
   const boardId = created?.boardId as string;
 
-  await store.applyMutation({
-    baseRevision: null,
-    clientId: "repro",
-    mutationId: "cols",
-    payload: {
+  await store.applyBoardEvents(boardId, [
+    {
       boardId,
-      columns: {
-        approve: [],
-        done: [],
-        in_progress: [
-          {
-            id: "task-1",
-            label: "repo",
-            labelVariant: "primary-light",
-            title: "T",
-          },
-        ],
-        queue: [],
+      column: "in_progress",
+      task: {
+        id: "task-1",
+        label: "repo",
+        labelVariant: "primary-light",
+        title: "T",
       },
+      taskId: "task-1",
+      ts: Date.now(),
+      type: "card.created",
     },
-    type: "board.columns.replace",
-  });
+  ]);
   await store.applyMutation({
     baseRevision: null,
     clientId: "repro",

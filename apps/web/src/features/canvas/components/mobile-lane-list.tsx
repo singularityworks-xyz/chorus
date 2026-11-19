@@ -28,13 +28,8 @@ import { useWorkspace } from "@/features/workspace/workspace-context";
 const LANES = ["queue", "in_progress", "approve", "done"] as const;
 
 export function MobileLaneList() {
-  const {
-    boards,
-    focusBoardLocally,
-    selectBoard,
-    selectedBoardId,
-    updateBoardColumns,
-  } = useWorkspace();
+  const { boards, focusBoardLocally, selectBoard, selectedBoardId } =
+    useWorkspace();
 
   const active =
     boards.find((board) => board.boardId === selectedBoardId) ?? boards[0];
@@ -121,7 +116,6 @@ export function MobileLaneList() {
             document.getElementById("chorus-prompt-input")?.focus();
           });
         }}
-        onUpdateColumns={updateBoardColumns}
         reviewMode={active.reviewMode ?? "auto"}
         sessionId={active.session?.sessionId}
       />
@@ -139,14 +133,12 @@ export function MobileLaneList() {
 function MobileBoardBody({
   boardId,
   columns,
-  onUpdateColumns,
   reviewMode,
   sessionId,
   onCreateTask,
 }: {
   boardId: string;
   columns: Columns;
-  onUpdateColumns: (boardId: string, columns: Columns) => void;
   reviewMode: "manual" | "auto";
   sessionId: string | undefined;
   onCreateTask: () => void;
@@ -154,7 +146,6 @@ function MobileBoardBody({
   const actions = useKanbanCardActions({
     boardId,
     columns,
-    onUpdateColumns,
     reviewMode,
     sessionId,
   });
@@ -172,7 +163,7 @@ function MobileBoardBody({
       <Kanban
         getItemValue={(item) => item.id}
         id={boardId}
-        onValueChange={actions.handleColumnsChange}
+        onReorderTask={actions.handleReorderTask}
         value={actions.localColumns}
       >
         {LANES.map((lane) => (

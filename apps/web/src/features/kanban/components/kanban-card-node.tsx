@@ -49,7 +49,6 @@ export interface KanbanCardNodeData {
   hasMobilePrompt?: boolean;
   isRemoving?: boolean;
   onRemove: (id: string) => void;
-  onUpdateColumns: (id: string, columns: KanbanCardData["columns"]) => void;
   projectName?: string;
   reviewMode?: "manual" | "auto";
   sessionId?: string;
@@ -364,7 +363,7 @@ function KanbanCardNodeComponent({
     actionStates,
     boardBusy,
     handleApprove,
-    handleColumnsChange,
+    handleReorderTask,
     handlePlanChange,
     handleQuestionsAnswered,
     handleReject,
@@ -377,7 +376,6 @@ function KanbanCardNodeComponent({
   } = useKanbanCardActions({
     boardId: cardData.boardId,
     columns: cardData.columns,
-    onUpdateColumns: cardData.onUpdateColumns,
     reviewMode: configuredReviewMode,
     sessionId: cardData.sessionId,
   });
@@ -604,11 +602,11 @@ function KanbanCardNodeComponent({
                 reviewMode,
               }}
               onApprove={handleApprove}
-              onColumnsChange={handleColumnsChange}
               onCreateTask={handleCreateTask}
               onPlanChange={handlePlanChange}
               onQuestionsAnswered={handleQuestionsAnswered}
               onReject={handleReject}
+              onReorderTask={handleReorderTask}
               onRetry={handleRetry}
               onReviewModeChange={handleReviewModeChange}
               onRun={handleRun}

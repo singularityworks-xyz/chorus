@@ -146,16 +146,6 @@ export function updateBoardPosition(
   };
 }
 
-export function updateBoardColumns(
-  board: WorkspaceBoard,
-  columns: Columns
-): WorkspaceBoard {
-  return {
-    ...board,
-    columns,
-  };
-}
-
 export function updateBoardReviewMode(
   board: WorkspaceBoard,
   reviewMode: "manual" | "auto"

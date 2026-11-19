@@ -367,6 +367,13 @@ export const taskSchema = z.object({
 
 export const columnsSchema = z.record(z.string(), z.array(taskSchema));
 
+export const workspaceColumnIdSchema = z.enum([
+  "queue",
+  "in_progress",
+  "approve",
+  "done",
+]);
+
 export const boardSessionStateSchema = z.union([
   z.literal("uninitialized"),
   z.literal("starting"),
@@ -462,10 +469,12 @@ export const workspaceMutationSchema = z.discriminatedUnion("type", [
     }),
   }),
   workspaceMutationBaseSchema.extend({
-    type: z.literal("board.columns.replace"),
+    type: z.literal("board.task.reorder"),
     payload: z.object({
+      beforeTaskId: z.string().min(1).nullable(),
       boardId: z.string().min(1),
-      columns: columnsSchema,
+      column: workspaceColumnIdSchema,
+      taskId: z.string().min(1),
     }),
   }),
   workspaceMutationBaseSchema.extend({

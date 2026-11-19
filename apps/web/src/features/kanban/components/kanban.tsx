@@ -1,12 +1,15 @@
 "use client";
 
-import type { Task as ContractTask } from "@chorus/contracts";
+import {
+  type Task as ContractTask,
+  type WorkspaceColumnId,
+  workspaceColumnIdSchema,
+} from "@chorus/contracts";
 import { BorderlessFileView, ChorusMonaco } from "@chorus/monaco";
 import {
   closestCorners,
   DndContext,
   type DragEndEvent,
-  type DragOverEvent,
   DragOverlay,
   type DragStartEvent,
   KeyboardSensor,
@@ -134,7 +137,6 @@ export interface KanbanCardData {
 interface KanbanContextValue {
   activeId: string | null;
   getItemValue: (item: Task) => string;
-  onValueChange: (columns: Columns) => void;
   value: Columns;
 }
 
@@ -203,13 +205,17 @@ export function Badge({
 export function Kanban({
   id,
   value,
-  onValueChange,
+  onReorderTask,
   getItemValue,
   children,
 }: {
   id?: string;
   value: Columns;
-  onValueChange: (columns: Columns) => void;
+  onReorderTask: (
+    taskId: string,
+    column: WorkspaceColumnId,
+    beforeTaskId: string | null
+  ) => void;
   getItemValue: (item: Task) => string;
   children: React.ReactNode;
 }) {
@@ -248,44 +254,6 @@ export function Kanban({
     setActiveTask(findTaskById(value, id));
   }
 
-  function handleDragOver(event: DragOverEvent) {
-    const { active, over } = event;
-    if (!over) {
-      return;
-    }
-
-    const activeId = active.id.toString();
-    const overId = over.id.toString();
-
-    if (activeId === overId) {
-      return;
-    }
-
-    const activeContainer = Object.entries(value).find(([, tasks]) =>
-      tasks.some((t) => getItemValue(t) === activeId)
-    );
-    const overContainer = Object.entries(value).find(([, tasks]) =>
-      tasks.some((t) => getItemValue(t) === overId)
-    );
-
-    if (!(activeContainer && overContainer)) {
-      return;
-    }
-
-    const [activeColId, activeTasks] = activeContainer;
-    const [overColId, overTasks] = overContainer;
-
-    const activeIndex = activeTasks.findIndex(
-      (t) => getItemValue(t) === activeId
-    );
-    const overIndex = overTasks.findIndex((t) => getItemValue(t) === overId);
-
-    if (activeColId === overColId) {
-      const newTasks = arrayMove(activeTasks, activeIndex, overIndex);
-      onValueChange({ ...value, [activeColId]: newTasks });
-    }
-  }
-
   function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event;
     setActiveId(null);
@@ -322,20 +290,30 @@ export function Kanban({
     const overIndex = overTasks.findIndex((t) => getItemValue(t) === overId);
 
     if (activeColId === overColId) {
-      const newTasks = arrayMove(activeTasks, activeIndex, overIndex);
-      onValueChange({ ...value, [activeColId]: newTasks });
+      const parsedColumn = workspaceColumnIdSchema.safeParse(activeColId);
+      if (!parsedColumn.success) {
+        return;
+      }
+
+      const reordered = arrayMove(activeTasks, activeIndex, overIndex);
+      const reorderedIndex = reordered.findIndex(
+        (task) => getItemValue(task) === activeId
+      );
+      const nextTask = reordered[reorderedIndex + 1];
+      onReorderTask(
+        activeId,
+        parsedColumn.data,
+        nextTask ? getItemValue(nextTask) : null
+      );
     }
   }
 
   return (
-    <KanbanContext.Provider
-      value={{ value, onValueChange, getItemValue, activeId }}
-    >
+    <KanbanContext.Provider value={{ value, getItemValue, activeId }}>
       <DndContext
         collisionDetection={closestCorners}
         id={dndContextId}
         onDragEnd={handleDragEnd}
-        onDragOver={handleDragOver}
         onDragStart={handleDragStart}
         sensors={sensors}
       >
@@ -1585,7 +1563,7 @@ export function KanbanCardContent({
   boardBusy,
   reviewModeError,
   reviewModePending,
-  onColumnsChange,
+  onReorderTask,
   onReviewModeChange,
   onApprove,
   onReject,
@@ -1600,7 +1578,11 @@ export function KanbanCardContent({
   boardBusy: boolean;
   reviewModeError: string | null;
   reviewModePending: boolean;
-  onColumnsChange: (columns: Columns) => void;
+  onReorderTask: (
+    taskId: string,
+    column: WorkspaceColumnId,
+    beforeTaskId: string | null
+  ) => void;
   onReviewModeChange: (mode: "manual" | "auto") => void | Promise<void>;
   onApprove: (
     taskId: string,
@@ -1620,7 +1602,7 @@ export function KanbanCardContent({
     <Kanban
       getItemValue={(item) => item.id}
       id={data.id}
-      onValueChange={onColumnsChange}
+      onReorderTask={onReorderTask}
       value={data.columns}
     >
       <KanbanBoard className="flex h-full min-h-0 w-full min-w-0">

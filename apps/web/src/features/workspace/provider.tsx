@@ -663,22 +663,21 @@ export function ChorusWorkspaceProvider({
     [mutateWorkspace]
   );
 
-  const updateBoardColumns = useCallback(
+  const reorderBoardTask = useCallback(
     (
       boardId: string,
-      columns: Parameters<WorkspaceContextValue["updateBoardColumns"]>[1]
-    ) => {
+      taskId: string,
+      column: Parameters<WorkspaceContextValue["reorderBoardTask"]>[2],
+      beforeTaskId: string | null
+    ) =>
       mutateWorkspace(
         createWorkspaceMutation(
           clientIdRef.current,
           revisionRef.current,
-          "board.columns.replace",
-          { boardId, columns }
+          "board.task.reorder",
+          { beforeTaskId, boardId, column, taskId }
         )
-      ).catch((error: unknown) => {
-        console.error("Failed to update board columns:", error);
-      });
-    },
+      ),
     [mutateWorkspace]
   );
 
@@ -829,7 +828,7 @@ export function ChorusWorkspaceProvider({
     setDefaultModelSelection,
     setBoardViewMode,
     setSpeechVoiceId,
-    updateBoardColumns,
+    reorderBoardTask,
     updateBoardPosition,
     updateBoardReviewMode,
     workspaceActionError,

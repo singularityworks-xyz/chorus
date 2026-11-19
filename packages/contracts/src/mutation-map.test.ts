@@ -46,11 +46,16 @@ const MINIMAL_PAYLOADS: Record<string, unknown> = {
     mutationId: "m1",
     payload: { boardId: "b1", position: { x: 1, y: 2 } },
   },
-  "board.columns.replace": {
+  "board.task.reorder": {
     baseRevision: null,
     clientId: "c1",
     mutationId: "m1",
-    payload: { boardId: "b1", columns: {} },
+    payload: {
+      beforeTaskId: null,
+      boardId: "b1",
+      column: "queue",
+      taskId: "t1",
+    },
   },
   "board.session.patch": {
     baseRevision: null,
@@ -205,6 +210,18 @@ describe("mutation to event mapping", () => {
       });
       expect(parsed.type).toBe(type);
     }
+  });
+
+  test("whole-column replacement is not a client mutation", () => {
+    expect(
+      workspaceMutationSchema.safeParse({
+        baseRevision: null,
+        clientId: "c1",
+        mutationId: "m1",
+        payload: { boardId: "b1", columns: {} },
+        type: "board.columns.replace",
+      }).success
+    ).toBe(false);
   });
 });
 

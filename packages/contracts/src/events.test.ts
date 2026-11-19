@@ -118,6 +118,14 @@ const EVENT_CORPUS: Record<WorkspaceEvent["type"], WorkspaceEvent> = {
     taskId: "task-1",
     column: "approve",
   },
+  "card.reordered": {
+    type: "card.reordered",
+    ts: TS,
+    boardId: "board-1",
+    taskId: "task-1",
+    column: "queue",
+    beforeTaskId: null,
+  },
   "card.waiting_for_approval": {
     type: "card.waiting_for_approval",
     ts: TS,

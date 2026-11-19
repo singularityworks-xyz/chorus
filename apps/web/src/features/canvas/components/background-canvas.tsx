@@ -34,7 +34,6 @@ import {
 } from "@/features/canvas/lib/board-layout";
 import { focusBoardOnCanvas } from "@/features/canvas/lib/board-navigation";
 import { hasCanvasViewport } from "@/features/canvas/lib/canvas-viewport";
-import type { Columns } from "@/features/kanban/components/kanban";
 import {
   KANBAN_CARD_NODE_TYPE,
   KanbanCardNode,
@@ -316,7 +315,6 @@ function createKanbanCardNode(
   layout: ReturnType<typeof computeBoardLayout>,
   selected: boolean,
   onRemove: (id: string) => void,
-  onUpdateColumns: (id: string, columns: Columns) => void,
   removingBoardId: string | null,
   // The optimistic guess wins over `board.position` until the server confirms,
   // otherwise the board snaps back to its old spot for the length of the
@@ -342,7 +340,6 @@ function createKanbanCardNode(
       sessionState: board.session.state,
       isRemoving: board.boardId === removingBoardId,
       onRemove,
-      onUpdateColumns,
     },
     selected,
     draggable: true,
@@ -363,7 +360,6 @@ function reconcileNodes(
   layout: ReturnType<typeof computeBoardLayout>,
   selectedBoardId: string | null,
   onRemove: (id: string) => void,
-  onUpdateColumns: (id: string, columns: Columns) => void,
   removingBoardId: string | null,
   positionOf: (board: WorkspaceBoard) => { x: number; y: number }
 ): Node<KanbanCardNodeData>[] {
@@ -375,7 +371,6 @@ function reconcileNodes(
       layout,
       board.boardId === selectedBoardId,
       onRemove,
-      onUpdateColumns,
       removingBoardId,
       positionOf(board)
     );
@@ -412,7 +407,6 @@ export function BackgroundCanvas() {
     removeBoard,
     selectedBoardId,
     selectBoard,
-    updateBoardColumns,
     updateBoardPosition,
   } = useWorkspace();
   const [nodes, setNodes] = useState<Node<KanbanCardNodeData>[]>([]);
@@ -549,13 +543,6 @@ export function BackgroundCanvas() {
     (board: WorkspaceBoard) =>
       displayedPosition(board, pendingDrags, Date.now()),
     [pendingDrags]
-  );
-
-  const handleUpdateColumns = useCallback(
-    (id: string, columns: Columns) => {
-      updateBoardColumns(id, columns);
-    },
-    [updateBoardColumns]
   );
 
   useEffect(() => {
@@ -696,7 +683,6 @@ export function BackgroundCanvas() {
           layout,
           selectedBoardId,
           handleRemoveBoard,
-          handleUpdateColumns,
           removingBoardId,
           positionOfBoard
         )
@@ -707,7 +693,6 @@ export function BackgroundCanvas() {
     boards,
     canvasSize.width,
     handleRemoveBoard,
-    handleUpdateColumns,
     positionOfBoard,
     removingBoardId,
     selectedBoardId,

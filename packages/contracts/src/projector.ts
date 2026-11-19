@@ -139,6 +139,36 @@ function moveCard(
   return next;
 }
 
+function reorderCard(
+  columns: Columns,
+  taskId: string,
+  columnId: WorkspaceColumnId,
+  beforeTaskId: string | null
+): Columns {
+  const tasks = columns[columnId] ?? [];
+  const taskIndex = tasks.findIndex((task) => task.id === taskId);
+  if (taskIndex === -1 || beforeTaskId === taskId) {
+    return columns;
+  }
+
+  const reordered = [...tasks];
+  const [task] = reordered.splice(taskIndex, 1);
+  const insertionIndex =
+    beforeTaskId === null
+      ? reordered.length
+      : reordered.findIndex((entry) => entry.id === beforeTaskId);
+  if (!task || insertionIndex === -1) {
+    return columns;
+  }
+
+  reordered.splice(insertionIndex, 0, task);
+  if (reordered.every((entry, index) => entry === tasks[index])) {
+    return columns;
+  }
+
+  return { ...columns, [columnId]: reordered };
+}
+
 function formatElapsed(startedAt: number, now: number): string {
   const elapsedMs = Math.max(now - startedAt, 0);
   const totalSeconds = Math.floor(elapsedMs / 1000);
@@ -471,6 +501,17 @@ function applyCardEvent(
       return withColumns(
         board,
         moveCard(board.columns, event.taskId, event.column)
+      );
+
+    case "card.reordered":
+      return withColumns(
+        board,
+        reorderCard(
+          board.columns,
+          event.taskId,
+          event.column,
+          event.beforeTaskId
+        )
       );
 
     case "card.waiting_for_approval":

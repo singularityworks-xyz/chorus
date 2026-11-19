@@ -267,6 +267,57 @@ describe("board lifecycle events", () => {
     expect(columnOf(next, "done")).toHaveLength(0);
   });
 
+  test("card.reordered moves a task before its lane anchor", () => {
+    const taskA = makeTask({ id: "task-a" });
+    const taskB = makeTask({ id: "task-b" });
+    const taskC = makeTask({ id: "task-c" });
+    const board = makeBoard({
+      columns: {
+        queue: [taskA, taskB, taskC],
+        in_progress: [],
+        approve: [],
+        done: [],
+      },
+    });
+
+    const next = applyEventToBoard(board, {
+      type: "card.reordered",
+      ts: T0,
+      boardId: BOARD,
+      taskId: "task-c",
+      column: "queue",
+      beforeTaskId: "task-a",
+    });
+
+    expect(columnOf(next, "queue").map((task) => task.id)).toEqual([
+      "task-c",
+      "task-a",
+      "task-b",
+    ]);
+  });
+
+  test("card.reordered ignores tasks that have left the source lane", () => {
+    const board = makeBoard({
+      columns: {
+        queue: [makeTask({ id: "task-b" })],
+        in_progress: [makeTask({ id: TASK })],
+        approve: [],
+        done: [],
+      },
+    });
+
+    const next = applyEventToBoard(board, {
+      type: "card.reordered",
+      ts: T0,
+      boardId: BOARD,
+      taskId: TASK,
+      column: "queue",
+      beforeTaskId: "task-b",
+    });
+
+    expect(next).toBe(board);
+  });
+
   test("board.task_plan_updated sets plan and questions", () => {
     const next = applyEventToBoard(makeBoard(), {
       type: "board.task_plan_updated",

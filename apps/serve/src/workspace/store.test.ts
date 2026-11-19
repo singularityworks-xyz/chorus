@@ -96,24 +96,21 @@ async function seedBoard(store: WorkspaceStore, title = "Repo") {
 async function seedActiveBoard(store: WorkspaceStore) {
   const boardId = await seedBoard(store);
 
-  await store.applyMutation(
-    mutation("board.columns.replace", {
+  await store.applyBoardEvents(boardId, [
+    {
       boardId,
-      columns: {
-        approve: [],
-        done: [],
-        in_progress: [
-          {
-            id: "task-1",
-            label: "repo",
-            labelVariant: "primary-light",
-            title: "Do the thing",
-          },
-        ],
-        queue: [],
+      column: "in_progress",
+      task: {
+        id: "task-1",
+        label: "repo",
+        labelVariant: "primary-light",
+        title: "Do the thing",
       },
-    })
-  );
+      taskId: "task-1",
+      ts: Date.now(),
+      type: "card.created",
+    },
+  ]);
 
   await store.applyMutation(
     mutation("board.session.patch", {
@@ -193,6 +190,63 @@ describe("WorkspaceStore persistence", () => {
     expect(commit?.lastSeq).toBe(1);
     expect(store.headSeq()).toBe(1);
     expect(store.getSnapshot().boards).toHaveLength(1);
+  });
+
+  test("a stale reorder cannot move a task after it starts", async () => {
+    const store = createStore();
+    await store.load();
+    const boardId = await seedBoard(store);
+    await store.applyBoardEvents(boardId, [
+      {
+        type: "board.columns_replaced",
+        ts: Date.now(),
+        boardId,
+        columns: {
+          queue: [
+            {
+              id: "task-a",
+              label: "repo",
+              labelVariant: "primary-light",
+              title: "First task",
+            },
+            {
+              id: "task-b",
+              label: "repo",
+              labelVariant: "primary-light",
+              title: "Second task",
+            },
+          ],
+          in_progress: [],
+          approve: [],
+          done: [],
+        },
+      },
+    ]);
+
+    await store.applyBoardEvents(boardId, [
+      {
+        type: "card.started",
+        ts: Date.now(),
+        boardId,
+        taskId: "task-a",
+      },
+    ]);
+    const commit = await store.applyMutation(
+      mutation("board.task.reorder", {
+        boardId,
+        taskId: "task-a",
+        column: "queue",
+        beforeTaskId: "task-b",
+      })
+    );
+
+    expect(commit?.events[0].type).toBe("card.reordered");
+    expect(
+      store.getBoard(boardId)?.columns.in_progress?.map((task) => task.id)
+    ).toEqual(["task-a"]);
+    expect(
+      store.getBoard(boardId)?.columns.queue?.map((task) => task.id)
+    ).toEqual(["task-b"]);
   });
 
   test("a reload replays the log into identical state", async () => {
@@ -362,8 +416,10 @@ describe("WorkspaceStore persistence", () => {
         position: { x: 640, y: 280 },
       })
     );
-    await initial.applyMutation(
-      mutation("board.columns.replace", {
+    await initial.applyBoardEvents(gammaId, [
+      {
+        type: "board.columns_replaced",
+        ts: Date.now(),
         boardId: gammaId,
         columns: {
           approve: [],
@@ -394,8 +450,8 @@ describe("WorkspaceStore persistence", () => {
           in_progress: [],
           queue: [],
         },
-      })
-    );
+      },
+    ]);
     await initial.applyMutation(
       mutation("preference.dismiss_composer_hint", {})
     );
@@ -545,7 +601,12 @@ describe("WorkspaceStore persistence", () => {
       mutation("board.move", { boardId, position: { x: 1, y: 2 } }),
       mutation("board.model.set", { boardId, model: null }),
       mutation("board.review_mode.set", { boardId, reviewMode: "manual" }),
-      mutation("board.columns.replace", { boardId, columns: {} }),
+      mutation("board.task.reorder", {
+        boardId,
+        column: "queue",
+        taskId: "task-missing",
+        beforeTaskId: null,
+      }),
       mutation("board.session.patch", {
         boardId,
         session: { state: "active" },
@@ -924,8 +985,10 @@ describe("WorkspaceStore snapshots and retention", () => {
     const boardId = await seedBoard(store);
 
     const old = Date.now() - 40 * 24 * 60 * 60 * 1000;
-    await store.applyMutation(
-      mutation("board.columns.replace", {
+    await store.applyBoardEvents(boardId, [
+      {
+        type: "board.columns_replaced",
+        ts: Date.now(),
         boardId,
         columns: {
           approve: [],
@@ -950,8 +1013,8 @@ describe("WorkspaceStore snapshots and retention", () => {
           in_progress: [],
           queue: [],
         },
-      })
-    );
+      },
+    ]);
 
     await store.runRetention();
 
@@ -966,8 +1029,10 @@ describe("WorkspaceStore snapshots and retention", () => {
     await store.load();
     const boardId = await seedBoard(store);
 
-    await store.applyMutation(
-      mutation("board.columns.replace", {
+    await store.applyBoardEvents(boardId, [
+      {
+        type: "board.columns_replaced",
+        ts: Date.now(),
         boardId,
         columns: {
           approve: [],
@@ -992,8 +1057,8 @@ describe("WorkspaceStore snapshots and retention", () => {
           in_progress: [],
           queue: [],
         },
-      })
-    );
+      },
+    ]);
 
     await store.runRetention();
 

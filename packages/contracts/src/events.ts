@@ -9,6 +9,7 @@ import {
   taskSchema,
   workspaceBoardSchema,
   workspaceBoardSessionSchema,
+  workspaceColumnIdSchema,
 } from "./base";
 
 /**
@@ -22,8 +23,6 @@ export const WORKSPACE_COLUMN_IDS = [
   "approve",
   "done",
 ] as const;
-
-export const workspaceColumnIdSchema = z.enum(WORKSPACE_COLUMN_IDS);
 
 export type WorkspaceColumnId = z.infer<typeof workspaceColumnIdSchema>;
 
@@ -88,6 +87,13 @@ export const boardModelSetEventSchema = boardScopedSchema.extend({
 export const boardColumnsReplacedEventSchema = boardScopedSchema.extend({
   columns: columnsSchema,
   type: z.literal("board.columns_replaced"),
+});
+
+export const cardReorderedEventSchema = boardScopedSchema.extend({
+  beforeTaskId: z.string().min(1).nullable(),
+  column: workspaceColumnIdSchema,
+  taskId: z.string().min(1),
+  type: z.literal("card.reordered"),
 });
 
 export const boardSessionPatchedEventSchema = boardScopedSchema.extend({
@@ -262,6 +268,7 @@ export const workspaceEventSchema = z.discriminatedUnion("type", [
   cardQueuedEventSchema,
   cardStartedEventSchema,
   cardMovedEventSchema,
+  cardReorderedEventSchema,
   cardWaitingForApprovalEventSchema,
   cardApprovalResolvedEventSchema,
   cardCompletedEventSchema,
@@ -301,6 +308,7 @@ export const BOARD_SCOPED_EVENT_TYPES = [
   "card.queued",
   "card.started",
   "card.moved",
+  "card.reordered",
   "card.waiting_for_approval",
   "card.approval_resolved",
   "card.completed",
