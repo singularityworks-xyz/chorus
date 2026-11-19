@@ -36,7 +36,6 @@ function withBoards(boards: WorkspaceBoard[]): WorkspaceState {
   return { ...INITIAL_WORKSPACE_STATE, boards };
 }
 
-/** `board.created` carries the whole board under `event.board`. */
 function created(target: WorkspaceBoard, ts = 1): WorkspaceEvent {
   return { board: target, boardId: target.boardId, ts, type: "board.created" };
 }
@@ -109,8 +108,6 @@ describe("snapshot handling", () => {
       type: "server/snapshot",
     });
 
-    // Clearing here would empty the recents list the first time the server
-    // answered, since the versioned snapshot has no such field.
     expect(state.previousWorkspaces).toHaveLength(1);
   });
 });
@@ -249,7 +246,7 @@ describe("applying events through the shared projector", () => {
   });
 });
 
-describe("optimistic drag (plan P5 task 4)", () => {
+describe("optimistic board positions", () => {
   test("a drag is shown immediately, before the server confirms", () => {
     const state = workspaceReducer(withBoards([board("board-1")]), {
       boardId: "board-1",
@@ -269,7 +266,6 @@ describe("optimistic drag (plan P5 task 4)", () => {
       x: 800,
       y: 600,
     });
-    // The authoritative state is untouched until the event lands.
     expect(state.boards[0]?.position).toEqual({ x: 0, y: 0 });
   });
 
@@ -291,8 +287,7 @@ describe("optimistic drag (plan P5 task 4)", () => {
   });
 
   test("a server patch that contradicts the guess wins anyway", () => {
-    // Two devices, or one device that guessed wrong. The plan is explicit: if
-    // the server patch contradicts the pending drag, the server wins.
+    // A server position overrides a stale local guess.
     const dragged = workspaceReducer(withBoards([board("board-1")]), {
       boardId: "board-1",
       mutationId: "m1",
@@ -318,7 +313,7 @@ describe("optimistic drag (plan P5 task 4)", () => {
     });
   });
 
-  test("an event with no position does not settle the drag", () => {
+  test("a non-position event does not settle the drag", () => {
     const dragged = workspaceReducer(withBoards([board("board-1")]), {
       boardId: "board-1",
       mutationId: "m1",
@@ -338,12 +333,7 @@ describe("optimistic drag (plan P5 task 4)", () => {
       type: "server/events",
     });
 
-    // Server events are ordered, so an event with no position was emitted before
-    // the server saw the `board.move` and says nothing about it. Settling here
-    // would snap the card back to its old position while `board.position` still
-    // holds the old value, then jump forward again when `board.moved` arrives --
-    // the exact flicker the guess exists to prevent. A mutation that never
-    // arrives is covered by the sweeper instead.
+    // Only a position event can confirm a pending drag.
     expect(state.pendingDrags.size).toBe(1);
   });
 
@@ -426,7 +416,6 @@ describe("optimistic drag (plan P5 task 4)", () => {
       type: "optimistic/drag",
     });
 
-    // Nothing ever confirmed it, which is what happens when the mutation fails.
     const expired = expirePendingDrags(dragged, now + DRAG_TIMEOUT_MS + 1);
 
     expect(expired.pendingDrags.size).toBe(0);
@@ -460,7 +449,6 @@ describe("optimistic drag (plan P5 task 4)", () => {
       type: "optimistic/drag",
     });
 
-    // Even before the sweeper runs, the renderer stops trusting it.
     expect(
       displayedPosition(
         dragged.boards[0] as WorkspaceBoard,
@@ -566,9 +554,6 @@ describe("recent boards", () => {
       });
     }
 
-    // Recents is keyed on the repo directory, so a second board over the same
-    // repository replaces its entry instead of stacking a duplicate the operator
-    // would see twice in the picker.
     expect(state.previousWorkspaces).toHaveLength(1);
   });
 
@@ -656,16 +641,7 @@ describe("local optimistic preferences", () => {
   });
 });
 
-/**
- * The shared projector is deliberately NOT idempotent, and this pins that so
- * nobody "hardens" it by accident.
- *
- * `card.created` appends and `step.delta_appended` concatenates, so applying the
- * same event twice produces visible duplicated state. That is what makes the
- * transport's `eventsAfterSnapshot` filter load-bearing: a snapshot already
- * contains every buffered event, so replaying the buffer would double them.
- * The filter itself is covered in `protocol.test.ts`.
- */
+// Duplicate events append content, so the sync layer must deduplicate them.
 describe("the projector is not idempotent", () => {
   test("card.created appends rather than deduping", () => {
     const snapshotBoard = board("board-1", {

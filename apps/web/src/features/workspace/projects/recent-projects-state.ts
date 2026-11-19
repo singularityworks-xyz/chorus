@@ -1,4 +1,4 @@
-import type { WorkspaceProject } from "./types";
+import type { WorkspaceProject } from "../types";
 
 export interface RecentProjectsState {
   error: string | null;

@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import type { WorkspaceProject } from "../types";
 import {
   INITIAL_RECENT_PROJECTS_STATE,
   recentProjectsReducer,
 } from "./recent-projects-state";
-import type { WorkspaceProject } from "./types";
 
 const project: WorkspaceProject = {
   directory: "/repo",

@@ -3,53 +3,24 @@
 import {
   apiErrorSchema,
   type BoardSessionHistoryCommand,
-  boardSeedSchema,
   type ModelSelection,
   queueBoardPromptResponseSchema,
-  type SequencedEvent,
-  type VersionedSnapshot,
-  type WorkspaceEvent,
-  type WorkspaceMutation,
 } from "@chorus/contracts";
 import posthog from "posthog-js";
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { sendBoardSessionHistoryCommand } from "@/features/kanban/board-session-history-client";
-import { useChorusSync } from "@/features/sync/use-chorus-sync";
 import { ChorusApiError } from "@/lib/chorus-api-error";
-import { PROJECT_LIST_ERROR, requestRecentProjects } from "./projects-client";
 import {
-  INITIAL_RECENT_PROJECTS_STATE,
-  recentProjectsReducer,
-} from "./recent-projects-state";
-import {
-  DRAG_TIMEOUT_MS,
-  INITIAL_WORKSPACE_STATE,
-  workspaceReducer,
-} from "./reducer";
+  createWorkspaceMutation,
+  useWorkspaceMutation,
+  type WorkspaceMutationFactory,
+  type WorkspaceMutationInput,
+} from "./actions/use-workspace-mutation";
+import { useWorkspaceSession } from "./hooks/use-workspace-session";
+import { useProjectActions } from "./projects/use-project-actions";
 import { isCurrentBoardSelection } from "./state";
 import type { WorkspaceContextValue } from "./types";
-import {
-  OPEN_FOLDER_ERROR,
-  WORKSPACE_MUTATION_ERROR,
-  workspaceActionErrorMessage,
-  workspaceApiError,
-} from "./workspace-action-error";
 import { WorkspaceContext } from "./workspace-context";
-
-/**
- * Workspace provider (plan P5 task 4).
- *
- * The important change from the previous version is that there is no longer a
- * second state channel. State arrives as sequenced patches over one socket, is
- * folded in by the shared `applyEventToBoard` inside the reducer, and the only
- * thing this file does optimistically is board dragging.
- *
- * The old provider held boards in component state and reassigned the whole array
- * from an HTTP snapshot and again from a full-state frame — the dual-channel
- * drift the spec calls out as the thing to delete. There is no longer any
- * wholesale-replacement setter in this file; state only moves through the
- * reducer.
- */
 
 function getModelLabel(model?: {
   modelID: string;
@@ -58,30 +29,22 @@ function getModelLabel(model?: {
   return model ? `${model.providerID}/${model.modelID}` : "OpenCode default";
 }
 
-function createWorkspaceMutation<T extends WorkspaceMutation["type"]>(
-  clientId: string,
-  baseRevision: number,
-  type: T,
-  payload: Extract<WorkspaceMutation, { type: T }>["payload"]
-): WorkspaceMutation {
-  return {
-    baseRevision,
-    clientId,
-    mutationId: crypto.randomUUID(),
-    type,
-    payload,
-  } as Extract<WorkspaceMutation, { type: T }>;
-}
-
 export function ChorusWorkspaceProvider({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const [state, dispatch] = useReducer(
-    workspaceReducer,
-    INITIAL_WORKSPACE_STATE
-  );
+  const {
+    authExpired,
+    connectionError,
+    dispatch,
+    hydrated,
+    lastSeq,
+    reportUnauthorized,
+    revisionRef,
+    state,
+    status,
+  } = useWorkspaceSession();
   const {
     boards,
     pendingDrags,
@@ -92,25 +55,8 @@ export function ChorusWorkspaceProvider({
 
   const [localBoardFocus, setLocalBoardFocus] = useState<string | null>(null);
   const selectedBoardId = localBoardFocus ?? persistedSelectedBoardId;
-
   const [boardLayoutVersion, setBoardLayoutVersion] = useState(0);
-  const [isOpeningFolder, setIsOpeningFolder] = useState(false);
   const [isQueueingPrompt, setIsQueueingPrompt] = useState(false);
-  const [authExpired, setAuthExpired] = useState(false);
-  const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [workspaceActionError, setWorkspaceActionError] = useState<
-    string | null
-  >(null);
-  const [recentProjectsState, dispatchRecentProjects] = useReducer(
-    recentProjectsReducer,
-    INITIAL_RECENT_PROJECTS_STATE
-  );
-  const {
-    error: recentProjectsError,
-    hasLoaded: recentProjectsLoaded,
-    isLoading: isLoadingRecentProjects,
-    projects: recentProjects,
-  } = recentProjectsState;
   const [restoredPrompt, setRestoredPrompt] = useState("");
   const [sessionHistoryChange, setSessionHistoryChange] = useState<{
     boardId: string;
@@ -118,10 +64,24 @@ export function ChorusWorkspaceProvider({
   } | null>(null);
 
   const clientIdRef = useRef(crypto.randomUUID());
-  const revisionRef = useRef(0);
   const sessionHistoryRevisionRef = useRef(0);
-  const projectsLoadControllerRef = useRef<AbortController | null>(null);
-
+  const createMutation = useRef<WorkspaceMutationFactory>(
+    (input: WorkspaceMutationInput) =>
+      createWorkspaceMutation(clientIdRef.current, revisionRef.current, input)
+  ).current;
+  const {
+    dismissWorkspaceActionError,
+    mutateWorkspace,
+    setWorkspaceActionError,
+    workspaceActionError,
+  } = useWorkspaceMutation(reportUnauthorized);
+  const projectActions = useProjectActions({
+    createMutation,
+    mutateWorkspace,
+    reportUnauthorized,
+    setWorkspaceActionError,
+    sessionStatus: status,
+  });
   const selectedBoard = boards.find(
     (board) => board.boardId === selectedBoardId
   );
@@ -135,324 +95,13 @@ export function ChorusWorkspaceProvider({
     }
   }, [boards, localBoardFocus]);
 
-  // ── sync ──────────────────────────────────────────────────────────────────
-
-  const applySnapshot = useCallback(
-    (snapshot: VersionedSnapshot, buffered: WorkspaceEvent[]) => {
-      revisionRef.current = 0;
-      dispatch({
-        boards: snapshot.boards,
-        preferences: snapshot.preferences,
-        selectedBoardId: snapshot.selectedBoardId,
-        type: "server/snapshot",
-      });
-
-      // `buffered` is already filtered to sequences the snapshot does not
-      // contain, so this cannot duplicate anything the snapshot just supplied.
-      if (buffered.length > 0) {
-        dispatch({ events: buffered, type: "server/events" });
-      }
-      setConnectionError(null);
-    },
-    []
-  );
-
-  const applyEvent = useCallback((frame: SequencedEvent) => {
-    dispatch({ events: [frame.event], type: "server/events" });
-  }, []);
-
-  const {
-    error: syncError,
-    hydrated,
-    lastSeq,
-    reportUnauthorized: reportSyncUnauthorized,
-    status,
-  } = useChorusSync({
-    onAuthExpired: () => {
-      // Stop here rather than reconnecting: a dead cookie does not resolve
-      // without a human, and retrying is an infinite loop.
-      setAuthExpired(true);
-    },
-    onEvent: applyEvent,
-    onRestoredSnapshot: (snapshot) => {
-      // Repaint immediately from what the last session persisted, so a reload
-      // shows the workspace before the socket has said anything.
-      dispatch({
-        boards: snapshot.boards,
-        preferences: snapshot.preferences,
-        selectedBoardId: snapshot.selectedBoardId,
-        type: "server/snapshot",
-      });
-    },
-    onSnapshot: applySnapshot,
-  });
-
-  useEffect(() => {
-    setConnectionError(syncError);
-  }, [syncError]);
-
-  /**
-   * Abandons optimistic guesses that never got a confirming event.
-   *
-   * Without this a dropped mutation would pin a board in the wrong place for the
-   * rest of the session.
-   */
-  // The timer is created once and left running, rather than being re-created
-  // whenever `pendingDrags.size` changes. Re-creating it restarted the countdown
-  // each time a drag was added, so a drag arriving just after a tick had to wait
-  // a whole interval for its first sweep -- and the interval was torn down
-  // exactly when the last drag settled. A no-op dispatch is cheap; `expirePendingDrags`
-  // only touches entries whose deadline has passed.
-  const hasPendingDrags = pendingDrags.size > 0;
-  const pendingDragsRef = useRef(hasPendingDrags);
-  pendingDragsRef.current = hasPendingDrags;
-
-  useEffect(() => {
-    const timer = setInterval(
-      () => {
-        if (pendingDragsRef.current) {
-          dispatch({ now: Date.now(), type: "optimistic/expire-drags" });
-        }
-      },
-      Math.max(1000, Math.floor(DRAG_TIMEOUT_MS / 2))
-    );
-
-    return () => {
-      clearInterval(timer);
-    };
-  }, []);
-
-  // ── commands (HTTP) ───────────────────────────────────────────────────────
-
-  const reportUnauthorized = useCallback(
-    (response: Response): boolean => {
-      if (response.status !== 401) {
-        return false;
-      }
-
-      // Stop the socket too. A 4401 close already does this, but a 401
-      // discovered by a command would otherwise leave the client reconnecting
-      // against a server that will keep refusing the same dead cookie.
-      reportSyncUnauthorized();
-      setAuthExpired(true);
-      return true;
-    },
-    [reportSyncUnauthorized]
-  );
-
-  const dismissWorkspaceActionError = useCallback(() => {
-    setWorkspaceActionError(null);
-  }, []);
-
-  /**
-   * Sends one mutation.
-   *
-   * No snapshot is read back: the socket delivers the resulting event, and
-   * reading a snapshot here would reintroduce the second state channel.
-   */
-  const mutateWorkspace = useCallback(
-    async (mutation: WorkspaceMutation): Promise<void> => {
-      try {
-        const response = await fetch("/api/workspace", {
-          body: JSON.stringify(mutation),
-          headers: { "content-type": "application/json" },
-          method: "POST",
-          signal: AbortSignal.timeout(10_000),
-        });
-
-        if (reportUnauthorized(response)) {
-          throw new ChorusApiError("unauthorized", "unauthorized");
-        }
-
-        if (!response.ok) {
-          const payload: unknown = await response.json().catch(() => undefined);
-          throw workspaceApiError(payload, WORKSPACE_MUTATION_ERROR);
-        }
-
-        setWorkspaceActionError(null);
-      } catch (error) {
-        if (
-          !(error instanceof ChorusApiError && error.code === "unauthorized")
-        ) {
-          setWorkspaceActionError(
-            workspaceActionErrorMessage(error, WORKSPACE_MUTATION_ERROR)
-          );
-        }
-        throw error;
-      }
-    },
-    [reportUnauthorized]
-  );
-
-  const loadProjects = useCallback(async () => {
-    projectsLoadControllerRef.current?.abort();
-    const controller = new AbortController();
-    projectsLoadControllerRef.current = controller;
-    dispatchRecentProjects({ type: "request-started" });
-
-    try {
-      const projects = await requestRecentProjects({
-        onUnauthorized: reportUnauthorized,
-        signal: controller.signal,
-      });
-
-      if (controller.signal.aborted) {
-        return;
-      }
-
-      if (projects === null) {
-        dispatchRecentProjects({ type: "request-unauthorized" });
-        return;
-      }
-
-      dispatchRecentProjects({ projects, type: "request-succeeded" });
-    } catch (error) {
-      if (controller.signal.aborted) {
-        return;
-      }
-      dispatchRecentProjects({
-        message: error instanceof Error ? error.message : PROJECT_LIST_ERROR,
-        type: "request-failed",
-      });
-    } finally {
-      if (projectsLoadControllerRef.current === controller) {
-        projectsLoadControllerRef.current = null;
-      }
-    }
-  }, [reportUnauthorized]);
-
-  useEffect(() => {
-    // Credential bootstrap and the first socket handshake own initial auth.
-    // Reading protected routes in parallel can receive a 401 before the fresh
-    // local session cookie lands, which would cancel the successful handshake.
-    if (status !== "live" || recentProjectsLoaded) {
-      return;
-    }
-
-    loadProjects().catch((error: unknown) => {
-      dispatchRecentProjects({
-        message: error instanceof Error ? error.message : PROJECT_LIST_ERROR,
-        type: "request-failed",
-      });
-    });
-    return () => {
-      const controller = projectsLoadControllerRef.current;
-      projectsLoadControllerRef.current = null;
-      controller?.abort();
-    };
-  }, [loadProjects, recentProjectsLoaded, status]);
-
-  // ── handlers ──────────────────────────────────────────────────────────────
-
-  const openFolder = useCallback(async () => {
-    setIsOpeningFolder(true);
-    setWorkspaceActionError(null);
-
-    try {
-      const response = await fetch("/api/projects/open-folder", {
-        method: "POST",
-      });
-
-      if (reportUnauthorized(response)) {
-        return;
-      }
-
-      if (!response.ok) {
-        const payload: unknown = await response.json().catch(() => undefined);
-        setWorkspaceActionError(
-          workspaceApiError(payload, OPEN_FOLDER_ERROR).message
-        );
-        return;
-      }
-
-      const responseText = await response.text();
-      const payload =
-        responseText.trim().length === 0 ? null : JSON.parse(responseText);
-
-      if (payload === null) {
-        return;
-      }
-
-      await mutateWorkspace(
-        createWorkspaceMutation(
-          clientIdRef.current,
-          revisionRef.current,
-          "board.create",
-          {
-            seed: boardSeedSchema.parse(payload),
-          }
-        )
-      );
-
-      await loadProjects();
-    } catch (error) {
-      console.error("Failed to open folder:", error);
-      if (!(error instanceof ChorusApiError && error.code === "unauthorized")) {
-        setWorkspaceActionError(
-          workspaceActionErrorMessage(error, OPEN_FOLDER_ERROR)
-        );
-      }
-    } finally {
-      setIsOpeningFolder(false);
-    }
-  }, [loadProjects, mutateWorkspace, reportUnauthorized]);
-
-  const createBoardFromRecentProject = useCallback(
-    (project: WorkspaceContextValue["recentProjects"][number]) => {
-      mutateWorkspace(
-        createWorkspaceMutation(
-          clientIdRef.current,
-          revisionRef.current,
-          "board.create",
-          {
-            seed: {
-              repo: { ...project },
-              title:
-                project.projectName ??
-                project.directory.split("/").filter(Boolean).at(-1) ??
-                project.directory,
-            },
-          }
-        )
-      ).catch((error: unknown) => {
-        console.error("Failed to create board from project:", error);
-      });
-    },
-    [mutateWorkspace]
-  );
-
-  const createBoardFromHistory = useCallback(
-    (entry: WorkspaceContextValue["previousWorkspaces"][number]) => {
-      mutateWorkspace(
-        createWorkspaceMutation(
-          clientIdRef.current,
-          revisionRef.current,
-          "board.create",
-          {
-            seed: { repo: entry.repo, title: entry.title },
-          }
-        )
-      ).catch((error: unknown) => {
-        console.error("Failed to create board from history:", error);
-      });
-    },
-    [mutateWorkspace]
-  );
-
   const removeBoard = useCallback(
     (boardId: string) => {
       return mutateWorkspace(
-        createWorkspaceMutation(
-          clientIdRef.current,
-          revisionRef.current,
-          "board.remove",
-          {
-            boardId,
-          }
-        )
+        createMutation({ type: "board.remove", payload: { boardId } })
       );
     },
-    [mutateWorkspace]
+    [createMutation, mutateWorkspace]
   );
 
   const selectBoard = useCallback(
@@ -463,19 +112,12 @@ export function ChorusWorkspaceProvider({
         return;
       }
       mutateWorkspace(
-        createWorkspaceMutation(
-          clientIdRef.current,
-          revisionRef.current,
-          "board.select",
-          {
-            boardId,
-          }
-        )
+        createMutation({ type: "board.select", payload: { boardId } })
       ).catch((error: unknown) => {
         console.error("Failed to select board:", error);
       });
     },
-    [mutateWorkspace, persistedSelectedBoardId]
+    [createMutation, dispatch, mutateWorkspace, persistedSelectedBoardId]
   );
 
   const focusBoardLocally = useCallback((boardId: string) => {
@@ -484,27 +126,12 @@ export function ChorusWorkspaceProvider({
 
   const clearSelection = useCallback(() => {
     mutateWorkspace(
-      createWorkspaceMutation(
-        clientIdRef.current,
-        revisionRef.current,
-        "board.select",
-        {
-          boardId: null,
-        }
-      )
+      createMutation({ type: "board.select", payload: { boardId: null } })
     ).catch((error: unknown) => {
       console.error("Failed to clear selection:", error);
     });
-  }, [mutateWorkspace]);
+  }, [createMutation, mutateWorkspace]);
 
-  /**
-   * Queues a prompt.
-   *
-   * No optimistic card is inserted. Spec §9 permits optimism only for cosmetic
-   * mutations such as a drag, and a locally-fabricated task would need its own
-   * projector — the exact drift the shared reducer exists to prevent. The card
-   * appears when the server's `card.queued` event arrives.
-   */
   const queuePrompt = useCallback(
     async (
       input: Parameters<WorkspaceContextValue["queuePrompt"]>[0]
@@ -553,9 +180,7 @@ export function ChorusWorkspaceProvider({
           await response.json()
         );
 
-        // The authoritative card arrives as a `card.queued` event over the
-        // socket. This placeholder exists only so the composer can clear itself
-        // and show the board it queued against.
+        // The queued event creates the card; this response only clears the composer.
         return {
           ...payload,
           task: {
@@ -585,32 +210,28 @@ export function ChorusWorkspaceProvider({
   const dismissComposerHint = useCallback(() => {
     dispatch({ composerHintDismissed: true, type: "local/hint-dismissed" });
     mutateWorkspace(
-      createWorkspaceMutation(
-        clientIdRef.current,
-        revisionRef.current,
-        "preference.dismiss_composer_hint",
-        {}
-      )
+      createMutation({
+        type: "preference.dismiss_composer_hint",
+        payload: {},
+      })
     ).catch((error: unknown) => {
       console.error("Failed to dismiss composer hint:", error);
     });
-  }, [mutateWorkspace]);
+  }, [createMutation, dispatch, mutateWorkspace]);
 
   const setSpeechVoiceId = useCallback(
     (voiceId: string | null) => {
       dispatch({ type: "local/voice", voiceId });
       mutateWorkspace(
-        createWorkspaceMutation(
-          clientIdRef.current,
-          revisionRef.current,
-          "preference.speech_voice.set",
-          { voiceId }
-        )
+        createMutation({
+          type: "preference.speech_voice.set",
+          payload: { voiceId },
+        })
       ).catch((error: unknown) => {
         console.error("Failed to update speech voice:", error);
       });
     },
-    [mutateWorkspace]
+    [createMutation, dispatch, mutateWorkspace]
   );
 
   const setBoardViewMode = useCallback(
@@ -618,34 +239,23 @@ export function ChorusWorkspaceProvider({
       dispatch({ mode, type: "local/view-mode" });
       setBoardLayoutVersion((current) => current + 1);
       mutateWorkspace(
-        createWorkspaceMutation(
-          clientIdRef.current,
-          revisionRef.current,
-          "preference.board_view_mode.set",
-          { mode }
-        )
+        createMutation({
+          type: "preference.board_view_mode.set",
+          payload: { mode },
+        })
       ).catch((error: unknown) => {
         console.error("Failed to update board view mode:", error);
       });
     },
-    [mutateWorkspace]
+    [createMutation, dispatch, mutateWorkspace]
   );
 
-  /**
-   * Board position.
-   *
-   * The only optimistic mutation in the app: applied locally so the card does not
-   * snap back to its old spot while the mutation is in flight, and abandoned by
-   * the sweeper or by any confirming event if it never lands.
-   */
   const updateBoardPosition = useCallback(
     (boardId: string, position: { x: number; y: number }) => {
-      const mutation = createWorkspaceMutation(
-        clientIdRef.current,
-        revisionRef.current,
-        "board.move",
-        { boardId, position }
-      );
+      const mutation = createMutation({
+        type: "board.move",
+        payload: { boardId, position },
+      });
 
       dispatch({
         boardId,
@@ -660,7 +270,7 @@ export function ChorusWorkspaceProvider({
         console.error("Failed to update board position:", error);
       });
     },
-    [mutateWorkspace]
+    [createMutation, dispatch, mutateWorkspace]
   );
 
   const reorderBoardTask = useCallback(
@@ -671,14 +281,12 @@ export function ChorusWorkspaceProvider({
       beforeTaskId: string | null
     ) =>
       mutateWorkspace(
-        createWorkspaceMutation(
-          clientIdRef.current,
-          revisionRef.current,
-          "board.task.reorder",
-          { beforeTaskId, boardId, column, taskId }
-        )
+        createMutation({
+          type: "board.task.reorder",
+          payload: { beforeTaskId, boardId, column, taskId },
+        })
       ),
-    [mutateWorkspace]
+    [createMutation, mutateWorkspace]
   );
 
   const updateBoardReviewMode = useCallback(
@@ -687,15 +295,13 @@ export function ChorusWorkspaceProvider({
       reviewMode: Parameters<WorkspaceContextValue["updateBoardReviewMode"]>[1]
     ) => {
       return mutateWorkspace(
-        createWorkspaceMutation(
-          clientIdRef.current,
-          revisionRef.current,
-          "board.review_mode.set",
-          { boardId, reviewMode }
-        )
+        createMutation({
+          type: "board.review_mode.set",
+          payload: { boardId, reviewMode },
+        })
       );
     },
-    [mutateWorkspace]
+    [createMutation, mutateWorkspace]
   );
 
   const setBoardModel = useCallback(
@@ -704,50 +310,38 @@ export function ChorusWorkspaceProvider({
       model: Parameters<WorkspaceContextValue["setBoardModel"]>[1]
     ) => {
       mutateWorkspace(
-        createWorkspaceMutation(
-          clientIdRef.current,
-          revisionRef.current,
-          "board.model.set",
-          {
-            boardId,
-            model,
-          }
-        )
+        createMutation({ type: "board.model.set", payload: { boardId, model } })
       ).catch((error: unknown) => {
         console.error("Failed to set board model:", error);
       });
     },
-    [mutateWorkspace]
+    [createMutation, mutateWorkspace]
   );
 
   const setDefaultModelSelection = useCallback(
     async (model: ModelSelection | null): Promise<void> => {
       await mutateWorkspace(
-        createWorkspaceMutation(
-          clientIdRef.current,
-          revisionRef.current,
-          "preference.default_model.set",
-          { model }
-        )
+        createMutation({
+          type: "preference.default_model.set",
+          payload: { model },
+        })
       );
     },
-    [mutateWorkspace]
+    [createMutation, mutateWorkspace]
   );
 
   const addRecentModel = useCallback(
     (model: Parameters<WorkspaceContextValue["addRecentModel"]>[0]) => {
       mutateWorkspace(
-        createWorkspaceMutation(
-          clientIdRef.current,
-          revisionRef.current,
-          "preference.recently_used_models.add",
-          { model }
-        )
+        createMutation({
+          type: "preference.recently_used_models.add",
+          payload: { model },
+        })
       ).catch((error: unknown) => {
         console.error("Failed to add recent model:", error);
       });
     },
-    [mutateWorkspace]
+    [createMutation, mutateWorkspace]
   );
 
   const sessionCommand = useCallback(
@@ -790,6 +384,7 @@ export function ChorusWorkspaceProvider({
   );
 
   const value: WorkspaceContextValue = {
+    ...projectActions,
     addRecentModel,
     authExpired,
     boardLayoutVersion,
@@ -798,23 +393,14 @@ export function ChorusWorkspaceProvider({
     connectionError,
     dismissWorkspaceActionError,
     hydrated,
-    createBoardFromHistory,
-    createBoardFromProject: createBoardFromRecentProject,
     dismissComposerHint,
     focusBoardLocally,
-    isLoadingRecentProjects,
-    isOpeningFolder,
     isQueueingPrompt,
     lastSeq,
-    loadProjects,
-    openFolder,
     pendingDrags,
     preferences,
     previousWorkspaces,
     queuePrompt,
-    recentProjects,
-    recentProjectsError,
-    recentProjectsLoaded,
     removeBoard,
     restoredPrompt,
     restorePrompt: setRestoredPrompt,
