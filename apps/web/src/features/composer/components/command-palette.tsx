@@ -1,6 +1,6 @@
 import { ArrowUp, Book, FileText, Folder, Terminal } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AutocompleteItem } from "@/hooks/use-autocomplete";
+import type { AutocompleteItem } from "../types";
 
 interface CommandPaletteProps {
   anchorRect: { top: number; left: number; width: number } | null;
@@ -150,12 +150,7 @@ export function CommandPalette({
           <div ref={listRef} role="listbox">
             {items.map((item, index) => {
               const isDirectory = item.isDirectory === true;
-              let Icon: typeof FileText = FileText;
-              if (isDirectory) {
-                Icon = Folder;
-              } else if (item.type != null && item.type in ICONS) {
-                Icon = ICONS[item.type];
-              }
+              const Icon = isDirectory ? Folder : ICONS[item.type];
 
               return (
                 <div

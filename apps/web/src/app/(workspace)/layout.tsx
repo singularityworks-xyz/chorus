@@ -1,8 +1,8 @@
 import { AppHeader } from "@/components/app-header";
 import { AuthGate } from "@/components/auth-gate";
 import { ConnectionStrip } from "@/components/connection-strip";
-import { PromptInput } from "@/components/prompt-input";
 import { PostHogProvider } from "@/components/providers/posthog-provider";
+import { PromptInput } from "@/features/composer/components/prompt-input";
 import { ChorusWorkspaceProvider } from "@/features/workspace/provider";
 
 /**
