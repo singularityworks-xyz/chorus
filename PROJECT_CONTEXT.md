@@ -14,7 +14,7 @@ Chorus is a local-first workspace for coordinating OpenCode tasks across boards.
 | `packages/monaco`, `packages/voice` | Editor and voice features shared by the web app. |
 | `packages/security`, `packages/logger` | Shared security and logging code. |
 
-## How workspace changes move
+## Workspace workflow
 
 The web app sends user commands to Serve. Serve validates and records workspace changes, then publishes updates through the shared workspace event stream. The web app applies those updates to its board and canvas views. OpenCode data passes through the adapter before it enters Chorus state.
 
@@ -24,13 +24,17 @@ The shared task states are `queue`, `in_progress`, `approve`, and `done`. Human 
 
 The web app groups user-facing behavior under `apps/web/src/features/`, including `canvas`, `kanban`, `composer`, `settings`, `workspace`, `sync`, `notifications`, `models`, and `auth`. Kanban subfeatures such as columns, questions, task cards, and task actions live in their own folders.
 
-Serve groups backend behavior under `apps/serve/src/`, including `auth`, `bridge`, `hosting`, `opencode`, `projects`, `push`, `routes`, `tasks`, `workspace`, and `ws`. The workspace store composes persistence, projections, commands, agent events, and pending approvals.
+Serve groups backend behavior under `apps/serve/src/`, including `auth`, `bridge`, `hosting`, `opencode`, `projects`, `push`, `routes`, `tasks`, `workspace`, and `ws`. Larger areas have child folders for work such as task queues and review, OpenCode sessions, workspace persistence and projection, WebSocket delivery, and host transfers.
 
-## Refactor guide
+Relay groups remote access behavior under `apps/relay/src/`, including authentication, enrollment, rate limits, registry, tunnel, deployment, and its portal.
 
-- Keep durable workspace state and event handling in Serve; keep UI projection and interaction state in the web app.
-- Keep shared payloads in `packages/contracts` and third-party OpenCode shapes inside `packages/opencode-adapter`.
-- Put each user or service feature in its domain folder, with subfeatures in child folders when they have their own behavior and tests.
-- Preserve behavioral boundaries around persistence order, event sequencing, authentication, filesystem trust, and shutdown.
+Shared packages hold workspace contracts and projectors, OpenCode translation, editor and voice features, and common security and logging code. The adapter is the boundary where OpenCode data becomes Chorus-owned state.
 
-This file is a project map, not an API reference. Check current source and tests before relying on implementation details.
+## Project boundaries
+
+- Serve owns durable workspace state, commands, and event processing; the web app owns browser interaction and UI projection.
+- Shared workspace payloads belong in `packages/contracts`.
+- OpenCode protocol details stay at the adapter boundary before entering Chorus state.
+- Human decisions remain explicit parts of task and workspace workflows.
+
+This file gives project context and ownership. Use current source and tests for implementation details.
