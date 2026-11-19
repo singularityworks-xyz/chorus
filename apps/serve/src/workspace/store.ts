@@ -4,16 +4,12 @@ import { constants as fsConstants } from "node:fs";
 import { access, copyFile, readFile, rename, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
-  applyEventToBoard,
   type BoardSeed,
   type ModelSelection,
   type WorkspaceBoard,
   type WorkspaceEvent,
-  type WorkspaceHistoryEntry,
   type WorkspaceMutation,
   type WorkspaceSnapshot,
-  type WorkspaceSnapshotInput,
-  workspaceBoardSchema,
   workspaceSnapshotSchema,
 } from "@chorus/contracts";
 import { createLogger } from "@chorus/logger";
@@ -38,6 +34,13 @@ import {
   shouldSnapshot,
   stripTerminalRunDetails,
 } from "./retention";
+import {
+  boardIdOf,
+  createBoardFromSeed,
+  diffSessionEvent,
+  EMPTY_PREFERENCES,
+  projectWorkspaceEvent,
+} from "./store/projection";
 
 const logger = createLogger(
   {
@@ -48,17 +51,7 @@ const logger = createLogger(
 
 const SNAPSHOT_BLOB_VERSION = 1;
 
-/**
- * Result of a committed mutation or agent event.
- *
- * Pre-implementation decision #1 specified `{ boardId, event }`. This carries an
- * `events` array instead because one agent event legitimately expands into
- * several domain events (a completed tool call appends a step *and* moves the
- * card). Collapsing that to a single event would either drop the step or
- * require synthesising a fake one. Client mutations are still exactly one
- * event — enforced by `mutation-map.test.ts` and asserted here at runtime.
- */
-/** One log entry, decoded, for replay and diagnostics. */
+/** A decoded event log entry. */
 export interface SequencedRecord {
   boardId: string | null;
   event: WorkspaceEvent;
@@ -87,72 +80,10 @@ export function pendingApprovalConflictMessage(
     : "This request is no longer waiting for a response. Refresh the board to see the current task state.";
 }
 
-/** Beyond this many distinct boards/sessions, the drop-warning map resets. */
 const MAX_DROPPED_WARNING_KEYS = 256;
 const AGENT_DELTA_BATCH_WINDOW_MS = 50;
 const MAX_AGENT_DELTA_BATCH_EVENTS = 256;
 const MAX_AGENT_DELTA_BATCH_CHARS = 256 * 1024;
-
-const BOARD_X_OFFSET = 180;
-const BOARD_Y_OFFSET = 120;
-const BOARD_X_START = 120;
-const BOARD_Y_START = 120;
-
-function createHistoryId(board: Pick<WorkspaceBoard, "repo">): string {
-  return board.repo.projectId ?? board.repo.worktree ?? board.repo.directory;
-}
-
-function createHistoryEntry(board: WorkspaceBoard): WorkspaceHistoryEntry {
-  return {
-    id: createHistoryId(board),
-    title: board.title,
-    lastOpenedAt: Date.now(),
-    repo: board.repo,
-  };
-}
-
-function sortHistory(
-  entries: WorkspaceHistoryEntry[]
-): WorkspaceHistoryEntry[] {
-  return [...entries].sort((a, b) => b.lastOpenedAt - a.lastOpenedAt);
-}
-
-function createBoardFromSeed(seed: BoardSeed, index: number): WorkspaceBoard {
-  // Parse so zod defaults (repo.sandboxes, board.reviewMode) are applied here
-  // rather than appearing only after a reload. In-memory state has to be the
-  // same shape a rehydrated snapshot produces, or replay-equality never holds.
-  return workspaceBoardSchema.parse({
-    boardId: crypto.randomUUID(),
-    title: seed.title,
-    repo: seed.repo,
-    position: {
-      x: BOARD_X_START + index * BOARD_X_OFFSET,
-      y: BOARD_Y_START + index * BOARD_Y_OFFSET,
-    },
-    columns: { queue: [], in_progress: [], approve: [], done: [] },
-    reviewMode: "auto",
-    modelSelection: null,
-    session: { state: "uninitialized" },
-  });
-}
-
-/**
- * Drops `undefined`-valued keys so in-memory state matches what a snapshot
- * round-trip yields. Without this, a field explicitly set to `undefined`
- * (e.g. clearing `session.errorMessage`) survives in memory but disappears on
- * reload, and replay-equality assertions fail on a semantic no-op.
- */
-function canonical<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
-}
-
-const EMPTY_PREFERENCES: WorkspaceSnapshotInput["preferences"] = {
-  boardViewMode: "relaxed",
-  composerHintDismissed: false,
-  defaultModelSelection: null,
-  recentlyUsedModels: [],
-  speechVoiceId: null,
-};
 
 interface PersistedBlob {
   snapshot: WorkspaceSnapshot;
@@ -176,49 +107,18 @@ function isStepDeltaWorkspaceEvent(
   return event.type === "step.delta_appended";
 }
 
-/**
- * Single-writer, append-only workspace store backed by SQLite (spec §5).
- *
- * Three invariants this class exists to hold:
- *
- * 1. **Commit then swap.** A candidate state is computed, appended inside an
- *    IMMEDIATE transaction, and only assigned to memory once the write
- *    succeeds. A failed INSERT leaves memory untouched, so in-memory state can
- *    never run ahead of the durable log. (The pre-Phase-2 store wrote the whole
- *    snapshot to JSON and silently reset to empty on a parse failure.)
- * 2. **One writer.** Every state change chains onto a single promise, so there
- *    is no read-modify-write race between mutations, agent events, and session
- *    updates. `Promise.all` over state-mutating work is never correct here.
- * 3. **One projection path.** Live application and boot replay both go through
- *    `#project`, so a state reconstructed from the log is identical to one built
- *    live — which is only true because the shared projector is pure.
- */
-/**
- * What the store needs from worktree provisioning (plan P6 task 2).
- *
- * Declared structurally rather than imported from `projects/worktree-manager` so
- * the store keeps no git dependency and no coupling to the module that happens to
- * implement it. `WorktreeManager` satisfies it as-is.
- */
+/** Provisions board worktrees without coupling the store to git commands. */
 export interface WorktreeProvisioner {
   assertRemovable?(repoDirectory: string, boardId: string): Promise<void>;
-  /** Creates (or adopts) the worktree for `boardId` and resolves to its path. */
   ensureWorktree(
     repoDirectory: string,
     boardId: string,
     branch?: string
   ): Promise<string>;
-  /**
-   * Whether a *new* board for this repo needs its own checkout.
-   *
-   * Called with the boards that already exist, so the first board for a repo is
-   * never given a worktree.
-   */
   needsWorktree(
     boards: ReadonlyArray<{ repo: { directory: string } }>,
     repoDirectory: string
   ): boolean;
-  /** Optional: removes a board's worktree when the board is removed. */
   removeWorktree?(repoDirectory: string, boardId: string): Promise<void>;
 }
 
@@ -242,24 +142,17 @@ interface ProducedMutation {
   metaChanges?: MetaChange[];
 }
 
+/** Owns workspace state, durable event writes, replay, and commit ordering. */
 export class WorkspaceStore {
   readonly workspaceId: string;
 
   readonly #db: ChorusDatabase;
   readonly #options: Required<RetentionOptions>;
   readonly #queue: { promise: Promise<void> } = { promise: Promise.resolve() };
-  /**
-   * Optional worktree provisioning for `board.create` (plan P6 task 2).
-   *
-   * Injected rather than constructed here so the store keeps no git dependency,
-   * and so tests can supply a stub. When absent, board creation behaves exactly
-   * as before: no worktree, and every board shares the repo's primary checkout.
-   */
   readonly #worktreeProvisioner: WorktreeProvisioner | undefined;
   readonly #repositoryRegistry: RepositoryRegistry | undefined;
   readonly #restorePersistedRepositoryRoots: boolean;
 
-  /** Subscribers notified once per commit, after memory is swapped. */
   readonly #commitListeners = new Set<(commit: StoreCommit) => void>();
   readonly #pendingApprovalActions = new Set<string>();
   #agentEventTail: Promise<void> = Promise.resolve();
@@ -277,7 +170,6 @@ export class WorkspaceStore {
     selectedBoardId: null,
   };
 
-  /** Events appended since the last snapshot, for the N-event snapshot trigger. */
   #eventsSinceSnapshot = 0;
   #agentReceiptsSincePrune = 0;
 
@@ -344,7 +236,10 @@ export class WorkspaceStore {
       this.#snapshot = this.#parseBlob(snapshot.blob);
       const tail = this.#db.readEventsSince(snapshot.seq);
       for (const stored of tail) {
-        this.#snapshot = this.#project(this.#snapshot, this.#decode(stored));
+        this.#snapshot = projectWorkspaceEvent(
+          this.#snapshot,
+          this.#decode(stored)
+        );
       }
       this.#eventsSinceSnapshot = tail.length;
       logger.info("workspace-rehydrated", {
@@ -1058,7 +953,7 @@ export class WorkspaceStore {
 
     let projected = this.#snapshot;
     for (const event of events) {
-      projected = this.#project(projected, event);
+      projected = projectWorkspaceEvent(projected, event);
     }
     if (projected === this.#snapshot) {
       this.#persistAgentReceipt(receipt);
@@ -1727,7 +1622,7 @@ export class WorkspaceStore {
   ): StoreCommit {
     let candidate = this.#snapshot;
     for (const event of events) {
-      candidate = this.#project(candidate, event);
+      candidate = projectWorkspaceEvent(candidate, event);
     }
     candidate = {
       ...candidate,
@@ -1799,95 +1694,6 @@ export class WorkspaceStore {
     this.#snapshot = snapshot;
     this.#db.pruneEventsBefore(head);
     this.#eventsSinceSnapshot = 0;
-  }
-
-  /**
-   * The only place an event becomes state.
-   *
-   * Boot replay and live application both land here, which is what guarantees a
-   * board rebuilt from the log is byte-identical to one built incrementally.
-   * Collection-level events (create/remove/select) are handled here because
-   * `applyEventToBoard` deliberately ignores them.
-   */
-  #project(
-    snapshot: WorkspaceSnapshot,
-    event: WorkspaceEvent
-  ): WorkspaceSnapshot {
-    switch (event.type) {
-      case "board.created":
-        return {
-          ...snapshot,
-          boards: [...snapshot.boards, event.board],
-          selectedBoardId: event.board.boardId,
-        };
-
-      case "board.removed": {
-        const boards = snapshot.boards.filter(
-          (board) => board.boardId !== event.boardId
-        );
-        return {
-          ...snapshot,
-          boards,
-          selectedBoardId:
-            snapshot.selectedBoardId === event.boardId
-              ? (boards[0]?.boardId ?? null)
-              : snapshot.selectedBoardId,
-        };
-      }
-
-      case "board.selected":
-        return { ...snapshot, selectedBoardId: event.boardId };
-
-      case "board.task_plan_updated": {
-        // Plan text is board-scoped but the projector's copy lives in the
-        // contracts package; route through it rather than duplicating.
-        const boards = snapshot.boards.map((board) =>
-          board.boardId === event.boardId
-            ? applyEventToBoard(board, event)
-            : board
-        );
-        return withHistory(snapshot, boards);
-      }
-
-      case "preference.recent_model_added": {
-        const withoutDuplicate = (
-          snapshot.preferences.recentlyUsedModels ?? []
-        ).filter(
-          (model) =>
-            model.providerID !== event.model.providerID ||
-            model.modelID !== event.model.modelID
-        );
-        return {
-          ...snapshot,
-          preferences: {
-            ...snapshot.preferences,
-            recentlyUsedModels: [event.model, ...withoutDuplicate].slice(0, 5),
-          },
-        };
-      }
-
-      case "preference.composer_hint_dismissed":
-      case "preference.speech_voice_set":
-      case "preference.board_view_mode_set":
-      case "preference.default_model_set":
-        return applyWorkspacePreference(snapshot, event);
-
-      default: {
-        if (!("boardId" in event) || event.boardId === null) {
-          return snapshot;
-        }
-
-        const boards = snapshot.boards.map((board) =>
-          board.boardId === event.boardId
-            ? canonical(applyEventToBoard(board, event))
-            : board
-        );
-
-        return boards.some((board, index) => board !== snapshot.boards[index])
-          ? withHistory(snapshot, boards)
-          : snapshot;
-      }
-    }
   }
 
   #applyRetention(snapshot: WorkspaceSnapshot): WorkspaceSnapshot {
@@ -2001,7 +1807,7 @@ export class WorkspaceStore {
       });
     }
 
-    const migrated = this.#project(
+    const migrated = projectWorkspaceEvent(
       { ...parsed, boards: importedBoards },
       {
         type: "board.selected",
@@ -2045,89 +1851,3 @@ function withoutKeys<T extends object>(
   }
   return copy;
 }
-
-function boardIdOf(event: WorkspaceEvent): string | null {
-  return "boardId" in event ? event.boardId : null;
-}
-
-/** Keeps the "recently opened workspaces" rail populated as boards change. */
-function withHistory(
-  snapshot: WorkspaceSnapshot,
-  boards: WorkspaceBoard[]
-): WorkspaceSnapshot {
-  const historyById = new Map(
-    snapshot.previousWorkspaces.map((entry) => [entry.id, entry])
-  );
-
-  for (const board of boards) {
-    historyById.set(createHistoryId(board), createHistoryEntry(board));
-  }
-
-  return {
-    ...snapshot,
-    boards,
-    previousWorkspaces: sortHistory([...historyById.values()]),
-  };
-}
-
-function applyWorkspacePreference(
-  snapshot: WorkspaceSnapshot,
-  event: WorkspaceEvent
-): WorkspaceSnapshot {
-  if (event.type === "preference.composer_hint_dismissed") {
-    return {
-      ...snapshot,
-      preferences: { ...snapshot.preferences, composerHintDismissed: true },
-    };
-  }
-
-  if (event.type === "preference.speech_voice_set") {
-    return {
-      ...snapshot,
-      preferences: { ...snapshot.preferences, speechVoiceId: event.voiceId },
-    };
-  }
-
-  if (event.type === "preference.board_view_mode_set") {
-    return {
-      ...snapshot,
-      preferences: { ...snapshot.preferences, boardViewMode: event.mode },
-    };
-  }
-
-  if (event.type === "preference.default_model_set") {
-    return {
-      ...snapshot,
-      preferences: {
-        ...snapshot.preferences,
-        defaultModelSelection: event.model,
-      },
-    };
-  }
-
-  return snapshot;
-}
-
-/**
- * Derives the `session.attached` event from an attach call, so binding a
- * session goes through the shared projector instead of hand-rolling the board
- * rewrite the way the pre-Phase-2 store did.
- */
-function diffSessionEvent(
-  before: WorkspaceBoard,
-  after: WorkspaceBoard
-): WorkspaceEvent | null {
-  if (after.session.sessionId === before.session.sessionId) {
-    return null;
-  }
-
-  return {
-    type: "session.attached",
-    boardId: before.boardId,
-    sessionId: after.session.sessionId ?? "",
-    taskId: before.session.currentTaskId,
-    ts: Date.now(),
-  };
-}
-
-export { createBoardFromSeed };
