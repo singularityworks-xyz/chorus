@@ -6,7 +6,7 @@ import {
   OpenCodeAdapter,
   sdkVersion,
 } from "../../../packages/opencode-adapter/src";
-import { OpenCodeProcessManager } from "../src/opencode/process-manager";
+import { OpenCodeProcessManager } from "../src/opencode/process-manager/manager";
 
 function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
   if (!server.listening) {

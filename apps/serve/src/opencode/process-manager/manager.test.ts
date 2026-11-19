@@ -2,13 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig } from "../config";
-import {
-  createOpenCodeEnvironment,
-  EngineUnavailableError,
-  OpenCodeProcessManager,
-  resolveOpenCodeBinary,
-} from "./process-manager";
+import { loadConfig } from "../../config";
+import { EngineUnavailableError } from "./errors";
+import { OpenCodeProcessManager } from "./manager";
+import { createOpenCodeEnvironment, resolveOpenCodeBinary } from "./runtime";
 
 const INVALID_PORT_MESSAGE = /OPENCODE_PORT/;
 const REMOTE_AUTOSTART_MESSAGE = /cannot be used with a remote/;
@@ -16,15 +13,6 @@ const AUTH_PAIR_MESSAGE = /must be configured together/;
 const UNHEALTHY_ENGINE_MESSAGE = /reports an unhealthy state/;
 const SDK_VERSION_MISMATCH_MESSAGE = /does not match the required SDK version/;
 
-/**
- * The engine address has to come from one place.
- *
- * The process manager used to hardcode 4096 while `opencodeBaseUrl` defaulted to
- * `http://localhost:4096` independently. Setting either one alone left serve
- * spawning on a port it then never talked to, or talking to a port nothing
- * listens on — and the failure surfaced as an agent prompt that silently did
- * nothing.
- */
 describe("opencode engine address", () => {
   const saved = { ...process.env };
 
@@ -32,7 +20,6 @@ describe("opencode engine address", () => {
     process.env = { ...saved };
   });
 
-  /** `loadConfig` reads env directly, so an "unset" var has to actually be absent. */
   function unset(name: string): void {
     Reflect.deleteProperty(process.env, name);
   }
@@ -106,15 +93,7 @@ describe("opencode engine address", () => {
   });
 
   describe("liveness", () => {
-    /**
-     * The engine has to answer on identity, not merely occupy the port. An engine
-     * that wedges — alive as a process, no longer replying — is otherwise
-     * indistinguishable from a slow model, and every prompt after it hangs with
-     * nothing in any log.
-     */
     test("an adopted engine is never probed into a restart", async () => {
-      // Port 0 lets the OS assign one. A fixed port collides when bun runs test
-      // files in parallel, which shows up as an unrelated EADDRINUSE.
       const server = Bun.serve({
         fetch: () => Response.json({ healthy: true, version: "1.19.0" }),
         hostname: "127.0.0.1",
@@ -129,7 +108,6 @@ describe("opencode engine address", () => {
         });
         await manager.start();
 
-        // Not ours: serve adopted it, so a failed probe must never kill it.
         expect(manager.observedVersion).toBe("1.19.0");
         await manager.stop();
       } finally {
@@ -238,8 +216,6 @@ describe("opencode engine address", () => {
     });
 
     test("an unhealthy endpoint is not adopted as a working engine", async () => {
-      // A responder that is up but reports itself unhealthy — the shape of a
-      // wedged engine, as distinct from nothing listening.
       const server = Bun.serve({
         fetch: () => Response.json({ healthy: false }),
         hostname: "127.0.0.1",

@@ -10,7 +10,7 @@ import { Elysia } from "elysia";
 import { sdkVersion } from "../../../packages/opencode-adapter/src";
 import { OpenCodeBridge } from "../src/bridge/opencode/bridge";
 import { EngineRegistry } from "../src/opencode/engine-registry";
-import { OpenCodeProcessManager } from "../src/opencode/process-manager";
+import { OpenCodeProcessManager } from "../src/opencode/process-manager/manager";
 import { RepositoryRegistry } from "../src/projects/repository-registry";
 import { createHttpRoutes } from "../src/routes";
 import { BoardTaskService } from "../src/tasks/board-task-service";

@@ -1,4 +1,4 @@
-import { resolveOpenCodeBinary } from "../opencode/process-manager";
+import { resolveOpenCodeBinary } from "../opencode/process-manager/runtime";
 
 interface CommandAttempt {
   args: string[];

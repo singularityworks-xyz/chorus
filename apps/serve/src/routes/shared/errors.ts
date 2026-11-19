@@ -1,6 +1,6 @@
 import { ReferenceLookupError } from "@chorus/oc-adapter";
 import { UnregisteredRootError } from "../../auth/roots";
-import { EngineUnavailableError } from "../../opencode/process-manager";
+import { EngineUnavailableError } from "../../opencode/process-manager/errors";
 import { RepositoryRegistryError } from "../../projects/repository-registry";
 import {
   BoardLifecycleError,

@@ -2,10 +2,8 @@ import { realpath } from "node:fs/promises";
 import { createServer } from "node:net";
 import { createLogger } from "@chorus/logger";
 import { OpenCodeAdapter } from "@chorus/oc-adapter";
-import {
-  EngineUnavailableError,
-  OpenCodeProcessManager,
-} from "./process-manager";
+import { EngineUnavailableError } from "./process-manager/errors";
+import { OpenCodeProcessManager } from "./process-manager/manager";
 
 const DEFAULT_ENGINE_LIMIT = 8;
 const PORT_ALLOCATION_ATTEMPTS = 3;

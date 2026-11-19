@@ -21,10 +21,8 @@ import { loadConfig } from "./config";
 import { HostRemoteAccess } from "./hosting/remote-access";
 import { createRemoteAccessRoutes } from "./hosting/routes";
 import { EngineRegistry } from "./opencode/engine-registry";
-import {
-  EngineUnavailableError,
-  OpenCodeProcessManager,
-} from "./opencode/process-manager";
+import { EngineUnavailableError } from "./opencode/process-manager/errors";
+import { OpenCodeProcessManager } from "./opencode/process-manager/manager";
 import { assertEngineLockstep } from "./paths/engine-lockstep";
 import { ProjectEngineContext } from "./projects/engine-context";
 import { NativeFolderPicker } from "./projects/folder-picker";

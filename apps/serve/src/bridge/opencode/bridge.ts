@@ -10,7 +10,7 @@ import type {
   SessionPromptInput,
 } from "@chorus/oc-adapter";
 import { OpenCodeAdapter } from "@chorus/oc-adapter";
-import { EngineUnavailableError } from "../../opencode/process-manager";
+import { EngineUnavailableError } from "../../opencode/process-manager/errors";
 import { EventStreamReconciler } from "./reconciliation";
 
 export interface DirectoryEngineProvider {

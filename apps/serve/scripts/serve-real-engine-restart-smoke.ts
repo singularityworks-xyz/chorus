@@ -16,11 +16,11 @@ import {
 } from "@chorus/contracts";
 import { OpenCodeAdapter } from "@chorus/oc-adapter";
 import { sdkVersion } from "../../../packages/opencode-adapter/src";
+import { OpenCodeProcessManager } from "../src/opencode/process-manager/manager";
 import {
   createOpenCodeEnvironment,
-  OpenCodeProcessManager,
   resolveOpenCodeBinary,
-} from "../src/opencode/process-manager";
+} from "../src/opencode/process-manager/runtime";
 import { DEFAULT_SESSION_TIMEOUT_MS } from "../src/tasks/session-watchdog";
 
 const ROOT_PREFIX = "chorus-real-engine-recovery-";
