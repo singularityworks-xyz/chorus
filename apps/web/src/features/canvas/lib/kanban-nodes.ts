@@ -1,8 +1,6 @@
 import type { Node } from "@xyflow/react";
-import {
-  KANBAN_CARD_NODE_TYPE,
-  type KanbanCardNodeData,
-} from "@/features/kanban/components/kanban-card-node";
+import type { KanbanCardNodeData } from "@/features/kanban/card-node/node-data";
+import { KANBAN_CARD_NODE_TYPE } from "@/features/kanban/card-node/node-data";
 import type { WorkspaceBoard } from "@/features/workspace/types";
 import {
   BOARD_CARD_HEIGHT,

@@ -29,11 +29,11 @@ import {
 } from "@/features/canvas/lib/board-layout";
 import { focusBoardOnCanvas } from "@/features/canvas/lib/board-navigation";
 import { hasCanvasViewport } from "@/features/canvas/lib/canvas-viewport";
+import { KanbanCardNode } from "@/features/kanban/card-node/kanban-card-node";
 import {
   KANBAN_CARD_NODE_TYPE,
-  KanbanCardNode,
   type KanbanCardNodeData,
-} from "@/features/kanban/components/kanban-card-node";
+} from "@/features/kanban/card-node/node-data";
 import { displayedPosition } from "@/features/workspace/reducer";
 import type {
   WorkspaceBoard,
