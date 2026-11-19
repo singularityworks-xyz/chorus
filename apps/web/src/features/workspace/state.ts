@@ -1,6 +1,5 @@
-import type { BoardSeed, RepoProject } from "@chorus/contracts";
+import type { BoardSeed, Columns, RepoProject, Task } from "@chorus/contracts";
 import { attachSession } from "@chorus/contracts";
-import type { Columns, Task } from "@/features/kanban/components/kanban";
 import type { WorkspaceBoard } from "./types";
 
 const BOARD_X_OFFSET = 180;

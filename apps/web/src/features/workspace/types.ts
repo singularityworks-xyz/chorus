@@ -8,9 +8,9 @@ import type {
   ProjectListResponse,
   QueueBoardPromptResponse,
   RepoProject,
+  Task,
   WorkspaceColumnId,
 } from "@chorus/contracts";
-import type { Task } from "@/features/kanban/components/kanban";
 import type { PendingDrag } from "./reducer";
 import type { WorkspaceSessionStatus } from "./session-status";
 

@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { Columns, Task } from "@chorus/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { KanbanTaskActionState } from "../hooks/use-kanban-card-actions";
-import { Kanban, KanbanColumnBody } from "./kanban";
+import { KanbanColumnBody } from "./board-columns";
+import { Kanban } from "./kanban";
 
 function makeTask(id: string, outcome?: Task["outcome"]): Task {
   return {

@@ -24,11 +24,9 @@ import {
 import { BoardSessionHistoryControls } from "@/features/kanban/components/board-session-history-controls";
 import { DiffNotice } from "@/features/kanban/components/diff-notice";
 import { GitStatusFeedback } from "@/features/kanban/components/git-status-feedback";
-import {
-  KanbanCardContent,
-  type KanbanCardData,
-} from "@/features/kanban/components/kanban";
+import { KanbanCardContent } from "@/features/kanban/components/kanban-card-content";
 import { useKanbanCardActions } from "@/features/kanban/hooks/use-kanban-card-actions";
+import type { KanbanCardData } from "@/features/kanban/types";
 import { useWorkspace } from "@/features/workspace/workspace-context";
 import {
   fetchGitStatus,
