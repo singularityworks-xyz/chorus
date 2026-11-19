@@ -2,7 +2,6 @@ import {
   boardIdOfEvent,
   clientHelloSchema,
   clientPongSchema,
-  isCoalescibleEvent,
   resyncRequestSchema,
   sequencedEventSchema,
   serverErrorSchema,
@@ -12,12 +11,15 @@ import {
   WS_CLOSE_RATE_LIMITED,
   WS_CLOSE_UNAUTHORIZED,
 } from "@chorus/contracts";
-import type {
-  SequencedRecord,
-  StoreCommit,
-  WorkspaceStore,
-} from "../workspace/store";
-import { bufferOf, mergeKeyFor, mergeRecords } from "./hub/coalescing";
+import type { WorkspaceStore } from "../workspace/store";
+import type { SequencedRecord, StoreCommit } from "../workspace/store/types";
+import { bufferOf } from "./hub/coalescing";
+import { HubEventDelivery } from "./hub/delivery";
+import {
+  HIGH_WATER_MARK as deliveryHighWaterMark,
+  MAX_COALESCE_BUFFER as deliveryMaxCoalesceBuffer,
+  RECOVERY_SENDS as deliveryRecoverySends,
+} from "./hub/limits";
 import { decideResume } from "./hub/resume";
 import type {
   BufferedRecord,
@@ -27,13 +29,11 @@ import type {
   HubStats,
 } from "./hub/types";
 
-export const HIGH_WATER_MARK = 262_144;
+export const HIGH_WATER_MARK = deliveryHighWaterMark;
+export const MAX_COALESCE_BUFFER = deliveryMaxCoalesceBuffer;
+export const RECOVERY_SENDS = deliveryRecoverySends;
 
 export const WS_CONTROL_LIMIT_PER_MINUTE = 60;
-
-export const RECOVERY_SENDS = 2;
-
-export const MAX_COALESCE_BUFFER = 2000;
 
 export const MAX_CONSECUTIVE_DROPS = 5;
 
@@ -50,14 +50,11 @@ export class WorkspaceHub {
   readonly #dropReasons = new Map<string, number>();
   readonly #store: WorkspaceStore;
   readonly #now: () => number;
-  readonly #coalesceMs: number;
   readonly #pingIntervalMs: number;
   readonly #pongTimeoutMs: number;
   readonly #isDeviceAllowed: HubOptions["isDeviceAllowed"];
 
-  readonly #pending: BufferedRecord[] = [];
-  readonly #mergeIndex = new Map<string, BufferedRecord>();
-  #flushTimer: ReturnType<typeof setTimeout> | null = null;
+  readonly #delivery: HubEventDelivery;
   #closed = false;
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -65,9 +62,13 @@ export class WorkspaceHub {
     this.#isDeviceAllowed = options.isDeviceAllowed;
     this.#store = store;
     this.#now = options.now ?? Date.now;
-    this.#coalesceMs = options.coalesceMs ?? COALESCE_MS;
     this.#pingIntervalMs = options.pingIntervalMs ?? PING_INTERVAL_MS;
     this.#pongTimeoutMs = options.pongTimeoutMs ?? PONG_TIMEOUT_MS;
+    this.#delivery = new HubEventDelivery({
+      coalesceMs: options.coalesceMs ?? COALESCE_MS,
+      clients: () => this.#clients.values(),
+      sendSequenced: (client, record) => this.#sendSequenced(client, record),
+    });
     this.#startHeartbeat();
   }
 
@@ -152,7 +153,7 @@ export class WorkspaceHub {
     return {
       backpressuredFrames,
       clients: this.#clients.size,
-      coalescerDepth: this.#pending.length,
+      coalescerDepth: this.#delivery.pendingCount,
       criticalOnlyClients,
       droppedFrames,
       dropReasons: Object.fromEntries(this.#dropReasons),
@@ -349,121 +350,11 @@ export class WorkspaceHub {
       return;
     }
 
-    if (isCoalescibleEvent(record.event)) {
-      this.#buffer(record);
-      return;
-    }
-    if (this.#pending.length > 0) {
-      // Immediate events must follow every earlier buffered sequence.
-      this.flush();
-    }
-
-    this.#deliver(bufferOf(record));
-  }
-
-  #buffer(record: SequencedRecord): void {
-    const buffered = bufferOf(record);
-    const mergeKey = mergeKeyFor(buffered);
-    const existing = this.#mergeIndex.get(mergeKey);
-
-    if (existing && mergeRecords(existing, record)) {
-      return;
-    }
-
-    if (this.#pending.length >= MAX_COALESCE_BUFFER) {
-      this.flush();
-    }
-
-    this.#pending.push(buffered);
-    this.#mergeIndex.set(mergeKey, buffered);
-    this.#scheduleFlush();
-  }
-
-  #scheduleFlush(): void {
-    if (this.#flushTimer !== null) {
-      return;
-    }
-    this.#flushTimer = setTimeout(() => {
-      this.#flushTimer = null;
-      this.flush();
-    }, this.#coalesceMs);
-    this.#flushTimer.unref?.();
+    this.#delivery.publishRecord(record);
   }
 
   flush(): void {
-    if (this.#pending.length === 0) {
-      return;
-    }
-
-    const records = this.#pending.splice(0);
-    this.#mergeIndex.clear();
-    // Sequence numbers are workspace-wide, even when records belong to different boards.
-    const ordered = records.sort((a, b) => a.fromSeq - b.fromSeq);
-
-    for (const record of ordered) {
-      try {
-        this.#deliver(record);
-      } catch (error) {
-        // One bad frame must not prevent delivery of the rest of the window.
-        console.error("[ws] delivery failed:", error);
-      }
-    }
-  }
-
-  #deliver(record: BufferedRecord): void {
-    for (const client of this.#clients.values()) {
-      if (!client.ready) {
-        continue;
-      }
-      this.#deliverTo(client, record);
-    }
-  }
-
-  #isCongested(client: HubClient, buffered: number): boolean {
-    if (buffered > HIGH_WATER_MARK) {
-      return true;
-    }
-    return (
-      (client.backpressuredFrames > 0 || client.droppedFrames > 0) &&
-      client.cleanSends === 0
-    );
-  }
-
-  #hasRecovered(
-    client: HubClient,
-    buffered: number,
-    hasGauge: boolean
-  ): boolean {
-    if (hasGauge) {
-      return buffered < HIGH_WATER_MARK / 2;
-    }
-    return client.cleanSends >= RECOVERY_SENDS;
-  }
-
-  #deliverTo(client: HubClient, record: BufferedRecord): void {
-    if (record.toSeq <= client.lastSeq) {
-      return;
-    }
-    const buffered = client.socket.getBufferedAmount?.() ?? 0;
-    const hasBufferGauge =
-      typeof client.socket.getBufferedAmount === "function";
-
-    if (this.#isCongested(client, buffered)) {
-      client.criticalOnly = true;
-    } else if (
-      client.criticalOnly &&
-      this.#hasRecovered(client, buffered, hasBufferGauge)
-    ) {
-      client.criticalOnly = false;
-      client.backpressuredFrames = 0;
-      client.cleanSends = 0;
-    }
-
-    if (client.criticalOnly && isCoalescibleEvent(record.event)) {
-      return;
-    }
-
-    this.#sendSequenced(client, record);
+    this.#delivery.flush();
   }
 
   #sendSequenced(client: HubClient, record: BufferedRecord): void {
@@ -525,16 +416,11 @@ export class WorkspaceHub {
   close(): void {
     this.#closed = true;
 
-    if (this.#flushTimer !== null) {
-      clearTimeout(this.#flushTimer);
-      this.#flushTimer = null;
-    }
     if (this.#heartbeatTimer !== null) {
       clearInterval(this.#heartbeatTimer);
       this.#heartbeatTimer = null;
     }
-    // Flush before closing sockets so the final sequence range is delivered.
-    this.flush();
+    this.#delivery.close();
 
     for (const client of [...this.#clients.values()]) {
       client.socket.close?.(1001, "server shutting down");

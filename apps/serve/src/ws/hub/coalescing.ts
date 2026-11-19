@@ -1,4 +1,4 @@
-import type { SequencedRecord } from "../../workspace/store";
+import type { SequencedRecord } from "../../workspace/store/types";
 import type { BufferedRecord } from "./types";
 
 export function bufferOf(record: SequencedRecord): BufferedRecord {
