@@ -6,6 +6,8 @@
     "moduleDetection": "force",
     "verbatimModuleSyntax": true,
     "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "skipLibCheck": true,
     "noEmit": true,
     "esModuleInterop": true,
