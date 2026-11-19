@@ -45,7 +45,6 @@ function columnOf(board: WorkspaceBoard, columnId: string): Task[] {
   return (board.columns[columnId] ?? []) as Task[];
 }
 
-/** Local stand-in for the now-private `findTaskColumn`. */
 function laneOf(
   board: WorkspaceBoard,
   taskId: string
@@ -780,8 +779,6 @@ describe("run and step events", () => {
   });
 
   test("a step event lazily opens the run on a card that has none", () => {
-    // Matches pre-Phase-1 behaviour: the first event opens `run` with a
-    // placeholder model rather than requiring an explicit `run.started`.
     const board = makeBoard();
     expect(columnOf(board, "in_progress")[0].run).toBeUndefined();
 
@@ -1173,8 +1170,6 @@ describe("formatting via the public API", () => {
       ts: T0,
       boardId: BOARD,
     });
-
-    // file_edit steps are excluded from plan text; response/thinking are joined
     expect(columnOf(next, "approve")[0].plan).toBe("one\n\ntwo");
   });
 

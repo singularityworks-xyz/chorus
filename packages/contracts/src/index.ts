@@ -13,4 +13,5 @@ export * from "./workspace/base";
 export * from "./workspace/events";
 export * from "./workspace/mutation-map";
 export * from "./workspace/projector";
+export { findTaskInColumns } from "./workspace/projector/task-state";
 export * from "./workspace/protocol";
