@@ -7,6 +7,7 @@ import {
   createTempDir,
   fileMode,
   mutation,
+  SEED,
   seedBoard,
 } from "./test-support";
 
@@ -14,6 +15,24 @@ const CORRUPT_SNAPSHOT = /corrupt workspace snapshot/;
 const CORRUPT_EVENT = /corrupt event at seq/;
 
 describe("WorkspaceStore durability", () => {
+  test("a throwing commit listener cannot fail a durable write", async () => {
+    const store = createStore();
+    await store.load();
+
+    let calls = 0;
+    store.onCommit(() => {
+      calls += 1;
+      throw new Error("subscriber exploded");
+    });
+
+    const commit = await store.applyMutation(
+      mutation("board.create", { seed: SEED })
+    );
+
+    expect(calls).toBe(1);
+    expect(commit?.lastSeq).toBe(1);
+  });
+
   test("a failed append leaves memory and the log consistent", async () => {
     const store = createStore();
     await store.load();
