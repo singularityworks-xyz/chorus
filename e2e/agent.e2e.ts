@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
 import { E2E_REPO_DIR } from "./serve-env";
+import { waitForSyncLive } from "./sync-state";
 import { signIn, test } from "./workspace-fixture";
 
 const HAS_PROVIDER = process.env.CHORUS_E2E_AGENT === "1";
@@ -53,15 +54,7 @@ async function submitPrompt(page: Page, text: string): Promise<void> {
 test.describe("agent lifecycle", () => {
   test.beforeEach(async ({ page }) => {
     await signIn(page);
-    await expect
-      .poll(
-        () =>
-          page.evaluate(() => window.localStorage.getItem("chorus:lastSeq")),
-        {
-          timeout: 30_000,
-        }
-      )
-      .not.toBeNull();
+    await waitForSyncLive(page);
   });
 
   test("a submitted prompt reaches the engine and requests approval", async ({

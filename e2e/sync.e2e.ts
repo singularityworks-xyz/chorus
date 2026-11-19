@@ -12,7 +12,7 @@ import {
   TOKEN,
 } from "./serve-env";
 import { start, stop } from "./serve-process";
-
+import { readPersistedSequence, waitForSyncLive } from "./sync-state";
 import { completeSignIn, signIn, test } from "./workspace-fixture";
 
 // biome-ignore lint/suspicious/useAwait: forwards the page's awaited evaluate result
@@ -63,23 +63,10 @@ function uniqueTitle(label: string): string {
   return `${label} ${crypto.randomUUID().slice(0, 8)}`;
 }
 
-function readLastSeq(page: Page): Promise<string | null> {
-  return page.evaluate(() => window.localStorage.getItem("chorus:lastSeq"));
-}
-
-async function waitForLive(page: Page): Promise<void> {
-  await expect
-    .poll(() => readLastSeq(page), { timeout: 30_000 })
-    .not.toBeNull();
-  await expect(page.getByTestId("connection-strip")).toHaveCount(0, {
-    timeout: 30_000,
-  });
-}
-
 test.describe("client sync", () => {
   test("a hard refresh resumes from the persisted cursor", async ({ page }) => {
     await signIn(page);
-    await waitForLive(page);
+    await waitForSyncLive(page);
     const title = uniqueTitle("E2E resume board");
     await createBoard(page, title);
     await expectBoardPresent(page, title);
@@ -87,11 +74,14 @@ test.describe("client sync", () => {
     await page.reload();
     await expectBoardPresent(page, title);
     await expect
-      .poll(() => readLastSeq(page), { timeout: 30_000 })
+      .poll(() => readPersistedSequence(page), { timeout: 30_000 })
       .not.toBeNull();
 
-    const cursor = await readLastSeq(page);
-    expect(Number(cursor)).toBeGreaterThan(0);
+    const cursor = await readPersistedSequence(page);
+    if (cursor === null) {
+      throw new Error("The persisted workspace sequence is missing");
+    }
+    expect(cursor).toBeGreaterThan(0);
 
     const helloFrames: unknown[] = [];
     page.on("websocket", (socket: WebSocket) => {
@@ -112,7 +102,7 @@ test.describe("client sync", () => {
 
     const resumed = helloFrames.at(-1) as { since: number; type: string };
     expect(resumed.type).toBe("hello");
-    expect(Number(resumed.since)).toBe(Number(cursor));
+    expect(Number(resumed.since)).toBe(cursor);
 
     await expectBoardPresent(page, title);
   });
@@ -155,7 +145,7 @@ test.describe("client sync", () => {
     page,
   }) => {
     await signIn(page);
-    await waitForLive(page);
+    await waitForSyncLive(page);
     const title = uniqueTitle("E2E restart board");
     await createBoard(page, title);
     await expectBoardPresent(page, title);
@@ -187,7 +177,7 @@ test.describe("client sync", () => {
     page,
   }) => {
     await signIn(page);
-    await waitForLive(page);
+    await waitForSyncLive(page);
     const first = uniqueTitle("E2E offline first");
     await createBoard(page, first);
     await expectBoardPresent(page, first);
@@ -195,7 +185,7 @@ test.describe("client sync", () => {
     const otherContext = await browser.newContext();
     const other = await otherContext.newPage();
     await signIn(other);
-    await waitForLive(other);
+    await waitForSyncLive(other);
     const second = uniqueTitle("E2E offline second");
     await createBoard(other, second);
 
@@ -206,7 +196,7 @@ test.describe("client sync", () => {
       timeout: 10_000,
     });
     await expect
-      .poll(() => readLastSeq(page), { timeout: 20_000 })
+      .poll(() => readPersistedSequence(page), { timeout: 20_000 })
       .not.toBeNull();
 
     const third = uniqueTitle("E2E offline third");
@@ -232,13 +222,13 @@ test.describe("client sync", () => {
     page,
   }) => {
     await signIn(page);
-    await waitForLive(page);
+    await waitForSyncLive(page);
 
     const otherContext = await browser.newContext();
     const other = await otherContext.newPage();
     await signIn(other);
 
-    await waitForLive(other);
+    await waitForSyncLive(other);
 
     const fromFirst = uniqueTitle("E2E converge a");
     await createBoard(page, fromFirst);
@@ -259,7 +249,7 @@ test.describe("client sync", () => {
     page,
   }) => {
     await signIn(page);
-    await waitForLive(page);
+    await waitForSyncLive(page);
     const title = uniqueTitle("E2E sign-in recovery");
     await createBoard(page, title);
     await expectBoardPresent(page, title);
@@ -273,7 +263,7 @@ test.describe("client sync", () => {
     ).toBeVisible();
 
     await completeSignIn(page);
-    await waitForLive(page);
+    await waitForSyncLive(page);
     await expectBoardPresent(page, title);
   });
 
