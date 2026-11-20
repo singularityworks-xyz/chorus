@@ -32,8 +32,6 @@ describe("registered repository roots (spec §6.4, plan P4.6)", () => {
   });
 
   test("projectId is not treated as a filesystem root", () => {
-    // It is an opencode project identifier; treating it as a path would grant
-    // authority to a string that never named one.
     expect(
       repoRoots({ repo: { directory: "/repos/a", projectId: "my-project" } })
     ).toEqual(["/repos/a"]);
@@ -77,8 +75,6 @@ describe("registered repository roots (spec §6.4, plan P4.6)", () => {
   });
 
   test("containment is not authority: a subdirectory is rejected", () => {
-    // These routes operate on a whole repository, so "somewhere inside a
-    // registered repo" is not sufficient authority to run git against it.
     const boards = [{ repo: { directory: "/repos/a" } }];
 
     expect(isRegisteredRoot("/repos/a/sub", boards)).toBe(false);
@@ -100,8 +96,6 @@ describe("registered repository roots (spec §6.4, plan P4.6)", () => {
         process.platform === "win32" ? "junction" : "dir"
       );
 
-      // Lexical containment passes this: the path is under the root and uses no
-      // `..`. Only realpath resolution catches it.
       const boards = [{ repo: { directory: root } }];
       expect(isRegisteredRoot(join(root, "escape"), boards)).toBe(false);
     } finally {
@@ -122,8 +116,6 @@ describe("registered repository roots (spec §6.4, plan P4.6)", () => {
         process.platform === "win32" ? "junction" : "dir"
       );
 
-      // The board registered the alias; the request named the real path. Both
-      // canonicalise to the same directory, so it is the same repository.
       const boards = [{ repo: { directory: join(alias, "link", "repo") } }];
 
       expect(isRegisteredRoot(real, boards)).toBe(true);

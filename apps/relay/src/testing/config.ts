@@ -1,4 +1,4 @@
-import { loadRelayConfig } from "../config";
+import { loadRelayConfig } from "../config/relay-config";
 
 export const testEnvironment = {
   RELAY_ACCOUNT_ORIGIN: "https://accounts.example.com",

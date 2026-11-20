@@ -1,7 +1,6 @@
 import { rootCertificates } from "node:tls";
 import type { RelayMachineConnection } from "@chorus/contracts";
 
-/** frpc skips certificate verification without an explicit trusted CA file. */
 export function trustedRelayAuthorities(): string {
   if (rootCertificates.length === 0) {
     throw new Error(
@@ -35,8 +34,7 @@ export function createTunnelConfig(
       throw new Error("invalid local proxy port");
     }
   }
-  // Quoted configuration strings, never shell text. This protected file must
-  // not be logged or served. Its machine credential is relay-scoped only.
+
   const quote = JSON.stringify;
   return [
     `serverAddr = ${quote(server.hostname)}`,

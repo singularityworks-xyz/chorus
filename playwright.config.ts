@@ -1,33 +1,14 @@
 import { defineConfig, devices } from "@playwright/test";
 import { SERVE_PORT, WEB_PORT } from "./e2e/serve-env";
 
-/**
- * Playwright configuration (plan P5, first Playwright config in the repo).
- *
- * The suite drives a real browser against a real serve process, because the
- * behaviours it exists to prove are exactly the ones a jsdom test fakes:
- *
- * - `localStorage` survives a reload and is read on the next connect.
- * - `visibilitychange` and `online` fire in a real browser.
- * - A WebSocket that dies mid-session reconnects on its own.
- * - A 4401 close stops the reconnect loop rather than looping forever.
- *
- * Each test gets a fresh Serve workspace. The restart scenario reopens that
- * test's database. Next.js runs from the packaged standalone build.
- */
 export default defineConfig({
   forbidOnly: Boolean(process.env.CI),
-  // Scoped deliberately. Playwright loads test files with Node's ESM loader, so
-  // a root-level glob would try to execute the repo's `bun:test` suites and fail
-  // on `bun:` imports and `bun:test`.
+
   testDir: "./e2e",
-  // `.e2e.ts` rather than `.spec.ts`: `bun test` globs `*.spec.ts` too, and
-  // loading a Playwright suite under `bun:test` fails on `test.describe`.
-  // Distinct extension means each runner owns its own files.
+
   testMatch: "**/*.e2e.ts",
   fullyParallel: false,
-  // The restart and offline cases own a shared serve process, so they must not
-  // interleave.
+
   workers: 1,
   globalSetup: "./e2e/global-setup.ts",
   globalTeardown: "./e2e/global-teardown.ts",
@@ -38,9 +19,7 @@ export default defineConfig({
     actionTimeout: 10_000,
     navigationTimeout: 15_000,
     baseURL: `http://127.0.0.1:${WEB_PORT}`,
-    // The default headless executable is chrome-headless-shell. Playwright's
-    // Windows process launcher does not hide its child consoles, so select the
-    // supported modern headless mode that uses the full Chromium executable.
+
     channel: "chromium",
     trace: "retain-on-failure",
   },
@@ -54,7 +33,7 @@ export default defineConfig({
     },
     {
       name: "mobile",
-      // These specs exercise controls on the desktop canvas card.
+
       testIgnore: [
         "**/agent.e2e.ts",
         "**/canvas-controls.e2e.ts",

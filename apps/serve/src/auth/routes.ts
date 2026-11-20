@@ -19,16 +19,6 @@ import { sessionHeaders } from "./session-headers";
 import { DeviceLimitError, type SessionRegistry } from "./session-registry";
 import { issueTicket, type TicketStore } from "./ticket";
 
-/**
- * Authentication routes (spec §6.1, plan P4.2/P4.3).
- *
- * `POST /auth/login` accepts an operator token or a single-use device code.
- * Local development also has a loopback-only session bootstrap; it cannot be
- * used from a remote device or in production. Successful entry points issue
- * the same HttpOnly session cookie so raw credentials do not travel with later
- * browser requests (spec §6.2).
- */
-
 export interface AuthRouteOptions {
   isProduction: boolean;
   localOrigins: readonly string[];
@@ -136,13 +126,8 @@ export function createAuthRoutes(options: AuthRouteOptions) {
     .post(
       "/auth/login",
       async ({ body, request, set, server }) => {
-        // `body` is already parsed by the schema below. Calling
-        // `request.json()` again throws "body already read", which silently
-        // turned every login into a rejection — including the correct token.
         const candidate = typeof body?.token === "string" ? body.token : "";
 
-        // Checked before comparing so a flood costs no HMAC work, only the
-        // window arithmetic. Keyed on the peer address.
         const key = clientIp(server ?? null, request);
         if (limiter.isBlocked(key) === "rate-limited") {
           limiter.prune();
@@ -163,8 +148,6 @@ export function createAuthRoutes(options: AuthRouteOptions) {
           return unauthorized();
         }
 
-        // A success clears the window so an operator who fumbled their token ten
-        // times is not left locked out for the next ten minutes.
         limiter.reset(key);
 
         const session = await issueSessionCookie(
@@ -285,20 +268,10 @@ export function createAuthRoutes(options: AuthRouteOptions) {
         store: options.ticketStore,
       });
 
-      // Returned in the body because the caller must present it, and it is
-      // single-use with a five-minute TTL, so its exposure window is small.
       return { ticket };
     });
 }
 
-/**
- * The rate-limit key for a request.
- *
- * Only the direct socket peer counts. `X-Forwarded-For` is client-supplied, so
- * honouring it would let an attacker rotate the key at will and defeat the
- * guard; an operator behind Caddy would need the proxy's real address, which is
- * a Phase 8 concern (see the runbook) rather than something to fake here.
- */
 export function clientIp(
   server: {
     requestIP?: (request: Request) => { address: string } | null;

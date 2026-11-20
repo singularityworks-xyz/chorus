@@ -25,7 +25,6 @@ const installationSchema = z.strictObject({
 
 type Availability = HostRemoteStatus["availability"];
 
-/** Local credential enrollment and connector lifecycle; never stores workspace data. */
 export class HostRemoteAccess {
   readonly #availability: Availability;
   readonly #installation: z.infer<typeof installationSchema> | null;
@@ -68,7 +67,7 @@ export class HostRemoteAccess {
     if (!options.installationFile) {
       return new HostRemoteAccess("unconfigured");
     }
-    // A Next development server must never be reachable through the relay.
+
     if (!options.isProduction) {
       return new HostRemoteAccess("production_required");
     }

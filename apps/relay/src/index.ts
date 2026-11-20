@@ -1,14 +1,13 @@
 import { Pool } from "pg";
 import { createRelayApp } from "./app";
-import { createRelayAuth } from "./auth";
-import { loadRelayConfig } from "./config";
-import { RelayEnrollment } from "./enrollment";
-import { RelayRegistry } from "./registry";
+import { createRelayAuth } from "./auth/service";
+import { loadRelayConfig } from "./config/relay-config";
+import { RelayEnrollment } from "./enrollment/service";
+import { RelayRegistry } from "./registry/service";
 import { createFrpPlugin, createTunnelVerifier } from "./tunnel/plugin";
 
 const config = loadRelayConfig();
-// Separate pools: enrollment holds a registry transaction while creating an
-// OAuth client. Sharing an exhausted pool would deadlock those operations.
+
 const poolOptions = {
   connectionString: config.databaseUrl,
   max: 8,

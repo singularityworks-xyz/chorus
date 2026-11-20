@@ -1,16 +1,10 @@
 import { AppHeader } from "@/components/app-header";
 import { AuthGate } from "@/components/auth-gate";
 import { ConnectionStrip } from "@/components/connection-strip";
-import { PromptInput } from "@/components/prompt-input";
 import { PostHogProvider } from "@/components/providers/posthog-provider";
+import { PromptInput } from "@/features/composer/components/prompt-input";
 import { ChorusWorkspaceProvider } from "@/features/workspace/provider";
 
-/**
- * Workspace shell.
- *
- * A route group so it wraps `/` and `/help` without touching `/login`, and so
- * the session gate lives next to the provider that raises `AUTH_EXPIRED`.
- */
 export default function WorkspaceLayout({
   children,
 }: Readonly<{

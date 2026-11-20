@@ -1,12 +1,12 @@
 import { relayEnrollmentRequestSchema } from "@chorus/contracts";
 import { Elysia } from "elysia";
 import { z } from "zod";
-import { INTERNAL_AUTH_HEADER, type RelayAuth } from "./auth";
-import type { RelayConfig } from "./config";
-import type { RelayEnrollment } from "./enrollment";
-import { renderPortal } from "./portal";
-import { RelayRateLimiter } from "./rate-limit";
-import { type RelayRegistry, RelayRegistryError } from "./registry";
+import { INTERNAL_AUTH_HEADER, type RelayAuth } from "./auth/service";
+import type { RelayConfig } from "./config/relay-config";
+import type { RelayEnrollment } from "./enrollment/service";
+import { renderPortal } from "./portal/handler";
+import { RelayRateLimiter } from "./rate-limit/limiter";
+import { type RelayRegistry, RelayRegistryError } from "./registry/service";
 
 export function createRelayApp(options: {
   auth: RelayAuth;

@@ -23,7 +23,7 @@ const BORDERLESS_THEME = {
     "scrollbarSlider.background": "#44444460",
     "scrollbarSlider.hoverBackground": "#66666660",
   },
-};
+} satisfies Parameters<Parameters<OnMount>[1]["editor"]["defineTheme"]>[1];
 
 let themeInitialized = false;
 
@@ -101,10 +101,7 @@ export function BorderlessFileView({
     if (themeInitialized) {
       monacoInstance.editor.setTheme("chorus-borderless");
     } else {
-      monacoInstance.editor.defineTheme(
-        "chorus-borderless",
-        BORDERLESS_THEME as never
-      );
+      monacoInstance.editor.defineTheme("chorus-borderless", BORDERLESS_THEME);
       monacoInstance.editor.setTheme("chorus-borderless");
       themeInitialized = true;
     }

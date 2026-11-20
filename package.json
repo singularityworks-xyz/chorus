@@ -1,6 +1,6 @@
 {
   "name": "chorus",
-  "version": "0.3.44",
+  "version": "0.4.25",
   "private": true,
   "scripts": {
     "build": "turbo run build",
@@ -12,8 +12,10 @@
     "check-types": "tsc --noEmit -p tsconfig.json && turbo run check-types",
     "version-packages": "changeset version",
     "release": "changeset publish",
-    "check": "ultracite fix && bun run check:log",
+    "check": "ultracite check && bun run check:log && bun run check:boundaries",
+    "check:boundaries": "bun scripts/check-import-boundaries.ts",
     "check:log": "bun scripts/check-log-gate.ts",
+    "format": "ultracite fix",
     "e2e": "bun scripts/run-e2e.ts",
     "e2e:install": "playwright install chromium"
   },

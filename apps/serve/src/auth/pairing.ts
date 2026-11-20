@@ -1,9 +1,3 @@
-/**
- * Short-lived, single-use credentials for adding a browser to an existing
- * Chorus instance. Tokens are kept as SHA-256 digests and only in memory; a
- * server restart invalidates any outstanding code.
- */
-
 export const DEVICE_PAIRING_TTL_MS = 300_000;
 
 const TOKEN_BYTES = 32;
@@ -27,8 +21,7 @@ export class DevicePairingTokenStore {
     const token = generateDevicePairingToken();
     const digest = await digestToken(token);
     const expiresAt = this.#now() + DEVICE_PAIRING_TTL_MS;
-    // A newer code replaces an unused one so an invisible stale code cannot
-    // remain valid after the UI has replaced it.
+
     this.#pending = { digest, expiresAt };
     return { expiresAt, token };
   }
@@ -43,7 +36,6 @@ export class DevicePairingTokenStore {
       return false;
     }
 
-    // Delete before returning so concurrent attempts cannot reuse a code.
     const expiresAt = this.#pending.expiresAt;
     this.#pending = null;
     return this.#now() < expiresAt;

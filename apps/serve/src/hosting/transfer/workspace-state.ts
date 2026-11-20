@@ -26,7 +26,6 @@ function pathKey(path: string): string {
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
-/** Bindings must describe authorized captured checkouts, or verified inactive targets. */
 function indexedBindings(input: WorkspaceCheckoutBinding[]) {
   const bindings = z.array(bindingSchema).max(1000).parse(input);
   const byCheckout = new Map<string, WorkspaceCheckoutBinding>();
@@ -110,7 +109,7 @@ export function captureWorkspaceState(
     preferences: snapshot.preferences,
     previousWorkspaces: snapshot.previousWorkspaces.map((entry) => {
       const repo = mapRepo(entry.repo);
-      // History IDs can be absolute paths or engine-local project IDs.
+
       return { ...entry, id: repo.checkoutId, repo };
     }),
     selectedBoardId: snapshot.selectedBoardId,
@@ -120,7 +119,6 @@ export function captureWorkspaceState(
   return state;
 }
 
-/** Path projection only. The result remains inactive until handoff/continuation validation. */
 export function restoreWorkspaceState(
   input: PortableWorkspaceState,
   bindings: WorkspaceCheckoutBinding[]

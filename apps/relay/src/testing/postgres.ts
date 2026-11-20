@@ -2,12 +2,11 @@ import { createHmac, generateKeyPairSync } from "node:crypto";
 import { hostPublicKeySchema } from "@chorus/contracts";
 import { getMigrations } from "better-auth/db/migration";
 import { Pool } from "pg";
-import { createRelayAuth } from "../auth";
-import { RelayEnrollment } from "../enrollment";
-import { RELAY_SCHEMA, RelayRegistry } from "../registry";
+import { createRelayAuth } from "../auth/service";
+import { RelayEnrollment } from "../enrollment/service";
+import { RELAY_SCHEMA, RelayRegistry } from "../registry/service";
 import { testConfig } from "./config";
 
-/** Opt-in, loopback-only fixture; each run owns one random schema, never public tables. */
 export async function createPostgresFixture(connectionString: string) {
   const url = new URL(connectionString);
   if (

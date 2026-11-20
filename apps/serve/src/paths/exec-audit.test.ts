@@ -8,15 +8,9 @@ const SHELL_EXEC_IMPORT =
   /import\s*\{[^}]*\bexec\b[^}]*\}\s*from\s*["']node:child_process["']/;
 const PROMISISED_EXEC = /promisify\(\s*exec\s*\)/;
 const SHELL_EXEC_CALL = /\bexecAsync\s*\(/;
-/**
- * A shell-string exec call.
- *
- * The negative lookbehind skips `db.exec(...)`, which is SQLite's SQL
- * executor rather than child_process's — the Phase 2 database layer trips this
- * otherwise. What remains is the RCE shape this guard exists for: a bare
- * `exec(` / `execAsync(` built from a template string.
- */
+
 const SHELL_STRING_TEMPLATE = /(?<![.\w])exec(?:Async)?\s*\(\s*`/;
+const EXEC_FILE_ARGUMENT_ARRAY = /execFile\(\s*file,\s*args,/;
 
 function collectSourceFiles(dir: string): string[] {
   const glob = new Bun.Glob("**/*.ts");
@@ -34,9 +28,6 @@ const LEGACY_AUTH_LOGIN_SHELL = [
 const LOGIN_COMMAND_LITERAL = 'execFileText("git", [';
 
 describe("no shell-string child process execution", () => {
-  // Regression guard for the Phase 0 RCE hotfix. git used to run through
-  // `exec("git " + args)`, which turned HTTP-supplied directory/hash values
-  // into shell syntax. Any reintroduction must fail here, loudly.
   test("serve source imports no bare exec and builds no shell command strings", () => {
     const offenders: string[] = [];
 
@@ -57,14 +48,14 @@ describe("no shell-string child process execution", () => {
   });
 
   test("execFile call sites pass literal argument arrays", () => {
-    const snapshot = readFileSync(
-      join(SERVE_SRC, "snapshot", "index.ts"),
+    const snapshotRepository = readFileSync(
+      join(SERVE_SRC, "snapshot", "repository.ts"),
       "utf8"
     );
 
-    // every invocation routes through the argument-array helper
-    expect(snapshot).not.toContain("promisify(exec");
-    expect(snapshot).toContain(LOGIN_COMMAND_LITERAL);
+    expect(snapshotRepository).not.toContain("promisify(exec");
+    expect(snapshotRepository).toMatch(EXEC_FILE_ARGUMENT_ARRAY);
+    expect(snapshotRepository).toContain(LOGIN_COMMAND_LITERAL);
   });
 
   test("auth login never interpolates a directory into shell text", () => {

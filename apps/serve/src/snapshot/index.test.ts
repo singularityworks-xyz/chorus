@@ -10,7 +10,8 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { InvalidPathError } from "../paths/sandbox";
-import { getGitStatus, restore, track } from "./index";
+import { restore, track } from "./operations";
+import { getGitStatus } from "./status";
 
 const INJECTION_MARKER = join(tmpdir(), "chorus-snapshot-pwned");
 const TREE_HASH_PATTERN = /^[0-9a-f]{40,64}$/;

@@ -46,7 +46,6 @@ async function repositoryState(root: string) {
   return { head, branch, refs, paths };
 }
 
-/** Caller must quiesce engines first. Capture never changes the source checkout. */
 export async function captureRepository(
   directory: string,
   checkpointDirectory: string

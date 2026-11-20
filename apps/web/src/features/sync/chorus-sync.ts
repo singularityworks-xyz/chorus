@@ -2,131 +2,25 @@ import {
   type SequencedEvent,
   type VersionedSnapshot,
   versionedSnapshotSchema,
+  WS_CLOSE_UNAUTHORIZED,
 } from "@chorus/contracts";
 import { Backoff } from "./backoff";
+import { decideFrame, parseServerFrame } from "./protocol";
 import {
   browserStorage,
   clearPersistedState,
   readPersistedSnapshot,
-  type SequenceStorage,
   writePersistedSnapshot,
-} from "./last-seq";
-import { decideFrame, parseServerFrame } from "./protocol";
+} from "./snapshot-storage";
 import { SocketAuthenticationExpiredError } from "./socket-credentials";
-
-/**
- * The socket state machine (plan P5 task 1).
- *
- * Deliberately framework-free: React's Strict Mode mounts effects twice in
- * development, so a socket lifecycle wired straight into `useEffect` produces a
- * connect/close/connect churn on every hot reload and on every dev mount. Keeping
- * the lifecycle here means it can be driven by an injected factory and asserted
- * in a unit test with a fake socket — no DOM, no timer flakiness.
- *
- * Commands go over HTTP; state arrives here and only here. Nothing else in the
- * client owns a WebSocket.
- */
-
-/** Close code the hub uses for an authentication failure (contracts §6.2). */
-export const WS_CLOSE_UNAUTHORIZED = 4401;
-
-/** The code a browser reports when a handshake fails outright, e.g. a 404. */
-export const WS_CLOSE_ABNORMAL = 1006;
-const IPV4_OCTET_PATTERN = /^\d{1,3}$/;
-
-/**
- * Turns a close event into something worth showing a person.
- *
- * A browser reports a failed handshake as 1006 with no reason, which on its own
- * is indistinguishable from a network blip. When the URL was never configured
- * and this origin has no `/ws` route, saying so beats an opaque code.
- */
-function describeClose(
-  closeEvent: { code: number; reason?: string },
-  urlIsImplicit: boolean
-): string {
-  if (closeEvent.reason && closeEvent.reason.length > 0) {
-    return closeEvent.reason;
-  }
-  if (urlIsImplicit && closeEvent.code === WS_CLOSE_ABNORMAL) {
-    return "no /ws endpoint on this origin — set NEXT_PUBLIC_CHORUS_WS_URL to the Chorus serve address";
-  }
-  return `closed ${String(closeEvent.code)}`;
-}
-
-export interface ChorusSyncState {
-  /** Set when the socket drops; surfaced so the UI can show it. */
-  lastError: string | null;
-  /** Highest contiguously applied sequence. */
-  lastSeq: number;
-  /** Boards and preferences from the last snapshot, plus applied events. */
-  snapshot: VersionedSnapshot | null;
-  status: "connecting" | "live" | "offline" | "auth-expired";
-  /** Database identity paired with the persisted snapshot and resume cursor. */
-  workspaceId: string | null;
-}
-
-export type SyncListener = (state: ChorusSyncState) => void;
-
-export interface ChorusSyncDeps {
-  cancel?: (handle: unknown) => void;
-  /** How many reconnect attempts have been made — surfaced for diagnostics. */
-  createSocket: (url: string) => ChorusSyncSocket;
-  now?: () => number;
-  /**
-   * Optionally obtains per-connection credentials before opening the socket.
-   * Tickets are single-use, so this must run again after every disconnect.
-   */
-  prepareSocketUrl?: (baseUrl: string) => Promise<string>;
-  random?: () => number;
-  /** Injected so reconnect scheduling is deterministic under test. */
-  schedule?: (fn: () => void, delayMs: number) => unknown;
-  storage?: SequenceStorage | null;
-  url: string;
-  /**
-   * Whether `url` came from an explicit configuration value.
-   *
-   * Same-origin `/ws` is correct when `serve` fronts the built web app, because
-   * that is the same process serving `/ws` and the session cookie rides the
-   * upgrade without any CORS involvement. It is *not* correct when the Next app
-   * is served directly (`next dev`, `next start`): there is no `/ws` route or
-   * rewrite, so the handshake 404s and the client would otherwise sit in
-   * `connecting` forever with an empty workspace and no error to show.
-   * `false` lets that case be reported with something actionable.
-   */
-  urlIsExplicit?: boolean;
-}
-
-/** The WebSocket surface this module uses — a subset on purpose. */
-export interface ChorusSyncSocket {
-  close: () => void;
-  onclose: ((event: { code: number; reason?: string }) => void) | null;
-  onerror: ((event: unknown) => void) | null;
-  onmessage: ((event: { data: unknown }) => void) | null;
-  onopen: (() => void) | null;
-  send: (data: string) => void;
-}
-
-export interface ChorusSyncOptions {
-  /**
-   * Fired once when authentication fails, then never again.
-   *
-   * The plan requires "exactly once" because the tempting alternative — retry
-   * until the cookie works — turns a dead session into an infinite reconnect loop
-   * that hammers the login endpoint.
-   */
-  onAuthExpired?: () => void;
-  onEvent?: (event: SequencedEvent) => void;
-  /**
-   * Restores the snapshot persisted by a previous page load, before any traffic.
-   *
-   * Without this the client would come back from a reload with a cursor but no
-   * state, resume from the gap, and render nothing until the next full snapshot.
-   */
-  onRestoredSnapshot?: (snapshot: VersionedSnapshot, seq: number) => void;
-  onSnapshot?: (snapshot: VersionedSnapshot, seq: number) => void;
-  onStatus?: (status: ChorusSyncState["status"]) => void;
-}
+import { describeClose } from "./socket-url";
+import type {
+  ChorusSyncDeps,
+  ChorusSyncOptions,
+  ChorusSyncSocket,
+  ChorusSyncState,
+  SyncListener,
+} from "./types";
 
 export class ChorusSync {
   readonly #deps: ChorusSyncDeps;
@@ -138,28 +32,12 @@ export class ChorusSync {
   #reconnectHandle: unknown = null;
   #started = false;
   #authExpiredEmitted = false;
-  /**
-   * Suppresses duplicate handshakes.
-   *
-   * `visibilitychange` and `online` can fire together when a phone wakes, and
-   * two in-flight `hello`s would replay the same gap twice. Read by `#connect` so
-   * a second trigger cannot shadow a socket that is already open or handshaking.
-   */
   #handshakeInFlight = false;
   #socketUrlPreparationInFlight = false;
   #connectionGeneration = 0;
   #connectionWorkspaceId: string | null = null;
 
-  /**
-   * Latches a resync so a burst of gapped frames sends one `resync`, not one per
-   * frame.
-   *
-   * The gap branch below leaves `lastSeq` where it was, so every frame in the
-   * same flush is also a gap. A coalesce flush can carry up to 2000 frames, and
-   * `resync` is not budget-exempt, so the burst would trip the hub's rate limit
-   * and get the socket closed with 4429 -- turning one dropped frame into a
-   * reconnect storm.
-   */
+  // One resync covers every gap in the same event burst.
   #resyncInFlight = false;
 
   #state: ChorusSyncState = {
@@ -198,12 +76,6 @@ export class ChorusSync {
     };
   }
 
-  /**
-   * Opens the socket and sends `hello`.
-   *
-   * Idempotent by design: a second `start()` while already connecting is a
-   * no-op, which is what makes Strict Mode's double-mount safe.
-   */
   start(): void {
     if (this.#started) {
       return;
@@ -218,12 +90,6 @@ export class ChorusSync {
     this.#connect();
   }
 
-  /**
-   * Repaints from the persisted snapshot, if there is a usable one.
-   *
-   * Best effort: a corrupt or oversized blob is ignored and the client asks for a
-   * fresh snapshot instead.
-   */
   #restorePersisted(): void {
     const storage = this.#deps.storage ?? browserStorage();
     const restored = readPersistedSnapshot(storage);
@@ -247,7 +113,6 @@ export class ChorusSync {
     this.#options.onRestoredSnapshot?.(parsed.data, restored.seq);
   }
 
-  /** Closes the socket and stops reconnecting. Used by the hook's cleanup. */
   stop(): void {
     this.#started = false;
     this.#invalidateSocketUrlPreparation();
@@ -256,12 +121,6 @@ export class ChorusSync {
     this.#setState({ status: "offline" });
   }
 
-  /**
-   * Reconnects now, bypassing backoff.
-   *
-   * Called on `visibilitychange` to visible and on `online`. It does *not* start
-   * a second connection when one is live or already handshaking.
-   */
   reconnectNow(): void {
     if (this.#state.status === "auth-expired") {
       return;
@@ -280,15 +139,6 @@ export class ChorusSync {
     this.#connect();
   }
 
-  /**
-   * Drops the transport when the browser reports that it is offline.
-   *
-   * Browsers do not consistently close an existing WebSocket when their
-   * network status changes. Keeping that socket marked live makes the next
-   * `online` event a no-op, even though no more frames can reach the client.
-   * Closing it here makes the next reconnect replay from the last applied
-   * cursor.
-   */
   networkOffline(): void {
     if (this.#state.status === "auth-expired") {
       return;
@@ -300,13 +150,6 @@ export class ChorusSync {
     this.#setState({ lastError: "offline", status: "offline" });
   }
 
-  /**
-   * Asks the server for a fresh snapshot after a detected gap.
-   *
-   * The alternative — applying a frame with a hole — would leave the client
-   * permanently missing whatever fell in the hole, because gap detection is a
-   * safety net, not a repair mechanism.
-   */
   requestResync(): void {
     if (this.#socket === null || this.#resyncInFlight) {
       return;
@@ -316,25 +159,18 @@ export class ChorusSync {
     try {
       this.#socket.send(JSON.stringify({ type: "resync" }));
     } catch {
-      // A send on a closing socket throws; the close handler drives recovery.
       this.#resyncInFlight = false;
     }
   }
 
-  /** Lets the UI report an HTTP 401 into the same auth-expired path. */
   reportUnauthorized(): void {
     this.#failAuth();
   }
-
-  // ── internals ─────────────────────────────────────────────────────────────
 
   #connect(): void {
     if (!this.#started || this.#state.status === "auth-expired") {
       return;
     }
-    // Never shadow a live socket. Without this, a `visibilitychange` and an
-    // `online` firing together on a waking phone would leave the first socket
-    // running with no handler, silently stranding the client.
     if (
       this.#socket !== null ||
       this.#handshakeInFlight ||
@@ -403,12 +239,6 @@ export class ChorusSync {
     this.#socket = socket;
 
     socket.onopen = () => {
-      // Deliberately no `#backoff.reset()` here. The TCP/WS upgrade succeeding
-      // is not a healthy session: a server that accepts and then immediately
-      // closes (1001 on restart, 1011 "frames dropped", 4000 pong timeout) would
-      // reset the counter every time and draw from [0, 250) forever -- roughly
-      // eight connect/close cycles a second, indefinitely. Backoff resets on
-      // `ready`, which the hub only sends after auth succeeded.
       this.#handshakeInFlight = true;
       this.#sendHello();
     };
@@ -447,22 +277,8 @@ export class ChorusSync {
     if (socket === null) {
       return;
     }
-
-    // Resume from the in-memory cursor, which is the highest sequence this
-    // client has actually applied.
-    //
-    // Not from the persisted one. That is pinned to the last snapshot, so on a
-    // reconnect within the same page load it sits far behind the applied state
-    // and the hub coalesces the whole gap back into one frame -- `fromSeq=401,
-    // seq=900` against an applied cursor of 600, say. That is not contiguous, so
-    // gap detection would read every ordinary network blip as a hole and answer
-    // it with a full snapshot. After a restore `#state.lastSeq` already equals
-    // the persisted cursor, so this is correct in both cases.
-    //
-    // Only honour the cursor when the matching snapshot and its database
-    // identity are both in memory. Older snapshots have no identity, so they
-    // request one authoritative snapshot before they can be resumed safely.
     const workspaceId = this.#state.workspaceId;
+    // Storage stays at the snapshot cursor; resume from the applied in-memory cursor.
     const since =
       this.#state.snapshot === null || workspaceId === null
         ? 0
@@ -471,17 +287,13 @@ export class ChorusSync {
     try {
       socket.send(
         JSON.stringify({
+          capabilities: ["card.reordered"],
           ...(workspaceId === null ? {} : { workspaceId }),
           since,
           type: "hello",
         })
       );
     } catch {
-      // Treat an undeliverable handshake as a dropped connection rather than
-      // assuming the close handler will notice. Leaving `status` at
-      // "connecting" with `#socket` still non-null means `reconnectNow` also
-      // declines to act, which strands the client permanently blank with no
-      // status change to show for it.
       this.#handshakeInFlight = false;
       this.#closeSocket();
       this.#setState({ lastError: "hello failed", status: "offline" });
@@ -497,26 +309,17 @@ export class ChorusSync {
 
     const frame = parseServerFrame(data);
     if (frame === null) {
-      // A frame the schema rejects is a version mismatch, not a reason to drop a
-      // working socket. Ignoring it is strictly better than tearing down state.
       return;
     }
 
     switch (frame.type) {
       case "ready": {
-        // The handshake completed. Anything the server is about to send is the
-        // replay or the snapshot, and both are legitimate first traffic.
         this.#handshakeInFlight = false;
         this.#connectionWorkspaceId = frame.workspaceId ?? null;
-        // The only success that justifies resetting backoff: auth passed and the
-        // server accepted our `since`. Resetting on `open` instead would let a
-        // server that accepts-then-closes reconnect at full speed forever.
+
         this.#backoff.reset();
         this.#setState({ lastError: null, status: "live" });
         this.#options.onStatus?.("live");
-        // Older Serve versions do not announce a database identity. Recover
-        // safely by requesting a full snapshot instead of trusting an opaque
-        // cursor from local storage.
         if (this.#connectionWorkspaceId === null) {
           this.requestResync();
         }
@@ -534,19 +337,11 @@ export class ChorusSync {
       }
 
       case "ping": {
-        // The hub sends an application-level ping and closes a client that
-        // misses two. A browser WebSocket cannot answer with a protocol-level
-        // pong, and nothing in the page does it automatically — so without this
-        // the server would drop every idle browser after 60 s.
         this.#sendPong();
         return;
       }
 
       case "viewport.sync": {
-        // Ephemeral viewport state, never board state. There is deliberately no
-        // `pong` case: pong is the client's reply to a ping, so the server never
-        // sends one, and `serverMessageSchema` does not describe it. A pong
-        // arriving from the server fails the union in `parseServerFrame`.
         return;
       }
 
@@ -569,15 +364,12 @@ export class ChorusSync {
     try {
       socket.send(JSON.stringify({ type: "pong" }));
     } catch {
-      // The close handler drives recovery.
+      return;
     }
   }
 
   #applySnapshot(snapshot: VersionedSnapshot, seq: number): void {
     const storage = this.#deps.storage ?? browserStorage();
-
-    // The snapshot answered the pending resync; allow another one if the next
-    // gap demands it.
     this.#resyncInFlight = false;
 
     this.#setState({
@@ -595,31 +387,18 @@ export class ChorusSync {
     const decision = decideFrame(frame, this.#state.lastSeq);
 
     if (decision.action === "gap") {
-      // Ask rather than guess. The client's cursor is the only record of what it
-      // has, so applying across a hole would make the divergence permanent.
       this.#setState({
         lastError: `gap: expected ${String(decision.expected)}, got ${String(decision.got)}`,
       });
-      // Latched: a coalesce flush can carry many gapped frames, and `resync`
-      // draws from the hub's command budget, so one request per frame would get
-      // the socket closed.
       this.requestResync();
       return;
     }
 
     if (decision.action === "duplicate") {
-      // The hub already skips these; a replay overlapping a snapshot would
-      // otherwise re-append a transcript.
       this.#setState({ lastSeq: decision.nextSeq });
       return;
     }
-
-    // Apply first, advance the cursor second.
-    //
-    // If the subscriber throws and the cursor already moved, the frame is lost
-    // silently: gap detection cannot report a hole that the cursor claims it
-    // has passed. Failing over to a snapshot is the recoverable answer, and it
-    // does not depend on the exception reaching the WebSocket event handler.
+    // Listener failures must not advance the resume cursor.
     try {
       this.#options.onEvent?.(frame);
     } catch (error) {
@@ -640,10 +419,6 @@ export class ChorusSync {
     this.#invalidateSocketUrlPreparation();
     this.#clearReconnect();
     this.#closeSocket();
-
-    // The cursor and its snapshot are cleared because they belong to the session
-    // that just died. Keeping them would resume from a sequence the new session
-    // has never seen.
     clearPersistedState(storage);
 
     this.#setState({ lastSeq: 0, status: "auth-expired", workspaceId: null });
@@ -691,8 +466,6 @@ export class ChorusSync {
       return;
     }
 
-    // Detach first: closing a socket fires `onclose` synchronously in some
-    // transports, which would re-enter the reconnect path while tearing down.
     socket.onclose = null;
     socket.onerror = null;
     socket.onmessage = null;
@@ -701,7 +474,7 @@ export class ChorusSync {
     try {
       socket.close();
     } catch {
-      // Already closed.
+      return;
     }
   }
 
@@ -735,78 +508,4 @@ function defaultCancel(handle: unknown): void {
   if (typeof handle === "number" || typeof handle === "object") {
     clearTimeout(handle as ReturnType<typeof setTimeout>);
   }
-}
-
-/**
- * Resolves the WebSocket URL for the current deployment.
- *
- * Same-origin by default so the HttpOnly session cookie rides the upgrade
- * unassisted; the ticket path exists for proxies that strip it and is Phase 8's
- * concern to wire up.
- */
-export function resolveSocketUrl(env: {
-  allowLocalHostRebinding?: boolean;
-  developmentServePort?: number;
-  localServePort?: number;
-  explicit?: string | undefined;
-  isSecure: boolean;
-  origin: string;
-}): string {
-  // `.trim()` and the truthiness check matter: `.env.example` tells operators to
-  // leave this unset when serve fronts the app, and `NEXT_PUBLIC_CHORUS_WS_URL=`
-  // is the obvious way to do that. `""` would reach `new URL("")` and throw
-  // during render, taking the whole workspace tree down.
-  const explicit = env.explicit?.trim();
-  const url = new URL(explicit ? explicit : env.origin);
-
-  if (!explicit && url.port === "3000") {
-    const port =
-      env.developmentServePort ??
-      (isLoopbackHostname(url.hostname) ? env.localServePort : undefined);
-    if (port) {
-      url.port = String(port);
-    }
-  }
-
-  if (
-    explicit &&
-    env.allowLocalHostRebinding &&
-    isLoopbackHostname(url.hostname)
-  ) {
-    const page = new URL(env.origin);
-    if (url.hostname !== page.hostname) {
-      // In development the web app may be opened from another device on the
-      // LAN. Keep the configured serve port, but target the host that served
-      // this page instead of making the other device connect to itself.
-      url.hostname = page.hostname;
-    }
-  }
-
-  // An explicitly configured address keeps its own scheme. Overriding it with
-  // the page's would turn `https://serve.example` into `ws://` when opened from
-  // an http dev page, which a TLS-only server rejects.
-  const secure = explicit
-    ? url.protocol === "https:" || url.protocol === "wss:"
-    : env.isSecure;
-
-  url.protocol = secure ? "wss:" : "ws:";
-  url.pathname = "/ws";
-  url.search = "";
-  return url.toString();
-}
-
-function isLoopbackHostname(hostname: string): boolean {
-  const normalized = hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  if (normalized === "localhost" || normalized === "::1") {
-    return true;
-  }
-
-  const octets = normalized.split(".");
-  return (
-    octets.length === 4 &&
-    octets[0] === "127" &&
-    octets.every(
-      (octet) => IPV4_OCTET_PATTERN.test(octet) && Number(octet) <= 255
-    )
-  );
 }

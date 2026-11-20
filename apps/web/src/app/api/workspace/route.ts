@@ -45,7 +45,6 @@ export async function POST(request: Request) {
       body: JSON.stringify(body),
     });
 
-    // If the backend returned an error, log it for debugging
     if (!response.ok) {
       const errorText = await response.clone().text();
       console.error("Workspace mutation failed:", {

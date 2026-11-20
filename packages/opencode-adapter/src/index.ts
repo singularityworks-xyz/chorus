@@ -3,13 +3,11 @@ import { createRequire } from "node:module";
 import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2";
 import { createClient as createAdapterClient } from "./features/client/client";
 import { ConfigManager } from "./features/config/config-manager";
-import type { SessionMessageWithParts } from "./features/events/event-stream";
-import {
-  EventStream,
-  normalizeEvent,
-  normalizeSessionHistory,
-  resetMessageTracking,
-} from "./features/events/event-stream";
+import { EventStream } from "./features/events/event-stream";
+import { normalizeEvent } from "./features/events/normalizer";
+import { normalizeSessionHistory } from "./features/events/normalizer/history";
+import { resetMessageTracking } from "./features/events/normalizer/message-tracking";
+import type { SessionMessageWithParts } from "./features/events/normalizer/types";
 import { InstanceManager } from "./features/instance/instance-manager";
 import { PermissionHandler } from "./features/permissions/permission-handler";
 import { ProjectManager } from "./features/projects/project-manager";
@@ -38,22 +36,17 @@ export type {
   EventStreamHandle,
   EventStreamOptions,
   EventStreamStatus,
+} from "./features/events/event-stream";
+
+// biome-ignore lint/performance/noBarrelFile: package entry point from package.json `exports` — serve imports `@chorus/oc-adapter` as one specifier by design.
+export { normalizeEvent } from "./features/events/normalizer";
+export { normalizeSessionHistory } from "./features/events/normalizer/history";
+export { resetMessageTracking } from "./features/events/normalizer/message-tracking";
+export type {
   NormalizedActivity,
   NormalizedAgentEvent,
   SessionMessageWithParts,
-} from "./features/events/event-stream";
-/**
- * The normalizer and its reset, exported so a server-side replay test can drive
- * the boundary without standing up an engine. Reaching into the package's
- * internals from another app would break the boundary this module exists to
- * hold.
- */
-// biome-ignore lint/performance/noBarrelFile: package entry point from package.json `exports` — serve imports `@chorus/oc-adapter` as one specifier by design.
-export {
-  normalizeEvent,
-  normalizeSessionHistory,
-  resetMessageTracking,
-} from "./features/events/event-stream";
+} from "./features/events/normalizer/types";
 export type {
   PermissionHandlerInput,
   PermissionReply,
@@ -144,21 +137,11 @@ export class OpenCodeAdapter {
   normalize = (event: Event) => normalizeEvent(event, this.#normalizationScope);
   normalizeHistory = (sessionID: string, messages: SessionMessageWithParts[]) =>
     normalizeSessionHistory(sessionID, messages, this.#normalizationScope);
-  /** The SDK version this adapter is compiled against. See decision #5. */
+
   sdkVersion = sdkVersion;
   resetMessageTracking = resetMessageTracking;
 }
 
-/**
- * The installed `@opencode-ai/sdk` version, read from its own package.json.
- *
- * Not a hand-maintained constant: bumping the dependency without updating a
- * version string would make the lockstep assertion confidently wrong instead of
- * merely stale.
- *
- * The bare `@opencode-ai/sdk` specifier does not resolve here — the SDK's exports
- * map has no usable CJS entry — but its manifest does.
- */
 export function sdkVersion(): string {
   try {
     const require = createRequire(import.meta.url);

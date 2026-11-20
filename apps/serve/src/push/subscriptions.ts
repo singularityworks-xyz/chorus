@@ -82,8 +82,7 @@ export function isPublicAddress(address: string): boolean {
   }
 
   const normalized = address.toLowerCase();
-  // Web push providers are publicly routable. Restrict IPv6 to global unicast,
-  // excluding special translation/documentation ranges and mapped IPv4.
+
   return (
     (normalized.startsWith("2") || normalized.startsWith("3")) &&
     !normalized.startsWith("2001:db8:") &&

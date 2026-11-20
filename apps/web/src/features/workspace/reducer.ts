@@ -7,21 +7,6 @@ import {
 } from "@chorus/contracts";
 import type { WorkspaceHistoryEntry } from "./types";
 
-/**
- * Client workspace reducer (plan P5 task 4).
- *
- * Two rules shape this file:
- *
- * - **One projector.** Every server change is folded in through
- *   `applyEventToBoard` / `applyEventToWorkspace` from `packages/contracts`.
- *   Re-implementing board reduction in the client is precisely the server/client
- *   drift the plan names as risk #4, and it stays invisible until the UI renders
- *   wrong state.
- * - **The server wins.** An optimistic drag is a local guess until the server
- *   confirms it. Any event for that board replaces the guess, and a 5 s deadline
- *   clears it so a dropped mutation cannot pin a board in the wrong place.
- */
-
 export interface PendingDrag {
   expiresAt: number;
   mutationId: string;
@@ -30,24 +15,16 @@ export interface PendingDrag {
 
 export interface WorkspaceState {
   boards: WorkspaceBoard[];
-  /** One in-flight optimistic position per board, keyed by board id. */
+
   pendingDrags: Map<string, PendingDrag>;
   preferences: WorkspacePreferences;
-  /**
-   * Recently used boards.
-   *
-   * Not in the versioned snapshot the socket sends (spec §5 defines the blob as
-   * boards, preferences, and selection), so it is maintained client-side from
-   * board lifecycle events rather than being clobbered by every snapshot.
-   */
+
   previousWorkspaces: WorkspaceHistoryEntry[];
   selectedBoardId: string | null;
 }
 
-/** Optimistic drift is abandoned rather than left pinned. */
 export const DRAG_TIMEOUT_MS = 5000;
 
-/** Keeps the recents list bounded. */
 export const MAX_PREVIOUS_WORKSPACES = 8;
 
 export type WorkspaceAction =
@@ -107,12 +84,6 @@ function withoutPending(
   return next;
 }
 
-/**
- * Records a board in the recents list.
- *
- * Keyed on the repo directory rather than the board id, so reopening the same
- * repository replaces its entry instead of stacking duplicates.
- */
 function noteHistory(
   existing: WorkspaceHistoryEntry[],
   board: WorkspaceBoard
@@ -131,15 +102,6 @@ function noteHistory(
   return [entry, ...without].slice(0, MAX_PREVIOUS_WORKSPACES);
 }
 
-/**
- * Folds one event into the board list.
- *
- * Returns `null` for workspace-scoped events, which have nothing to say about a
- * specific board. `board.created` and `board.removed` are handled here rather
- * than by the shared projector on purpose: that projector operates on one board
- * and deliberately treats both as no-ops, because adding to and removing from
- * the list is the caller's job.
- */
 function applyBoardListEvent(
   input: BoardListInput,
   event: WorkspaceEvent
@@ -155,20 +117,11 @@ function applyBoardListEvent(
 
   let { boards, pendingDrags, previousWorkspaces } = input;
 
-  // The server is authoritative, but only an event that carries a position can
-  // answer the guess. Server events are ordered, so anything else for this board
-  // was emitted before the server saw the `board.move` and says nothing about
-  // it -- settling on those would snap a dropped card back to its old position
-  // within milliseconds, then jump forward again when `board.moved` lands. That
-  // is the exact flicker the optimistic guess exists to prevent. A dropped
-  // mutation is covered by the five-second sweeper instead.
   if (event.type === "board.moved" || event.type === "board.removed") {
     pendingDrags = withoutPending(pendingDrags, boardId) ?? pendingDrags;
   }
 
   if (event.type === "board.created") {
-    // The event carries the whole board, so nothing is reconstructed here — there
-    // is no second place for board construction to drift.
     const alreadyPresent = boards.some(
       (board) => board.boardId === event.board.boardId
     );
@@ -180,8 +133,6 @@ function applyBoardListEvent(
     const removed = boards.find((board) => board.boardId === boardId);
     boards = boards.filter((board) => board.boardId !== boardId);
     if (removed) {
-      // The board is gone, so its recents entry would offer to reopen something
-      // the operator just deleted.
       previousWorkspaces = previousWorkspaces.filter(
         (candidate) => candidate.repo.directory !== removed.repo.directory
       );
@@ -199,16 +150,7 @@ interface BoardListInput {
   previousWorkspaces: WorkspaceHistoryEntry[];
 }
 
-/**
- * Folds sequenced events onto the state.
- *
- * Precondition: `events` contains each sequence at most once, and nothing the
- * caller has already applied via `server/snapshot`. The projector is not
- * idempotent -- `card.created` appends and `step.delta_appended` concatenates --
- * so a duplicate here is visible duplicated state, not a no-op. The transport
- * enforces this by filtering buffered events against the snapshot's sequence
- * before they reach this function.
- */
+// Duplicate events append state twice; the sync layer must deduplicate first.
 function applyEvents(
   state: WorkspaceState,
   events: WorkspaceEvent[]
@@ -231,8 +173,6 @@ function applyEvents(
       previousWorkspaces = boardList.previousWorkspaces;
     }
 
-    // Workspace-scoped events (selection, preferences) go through the same
-    // shared reducer so the client cannot grow its own preference logic.
     const scope = applyEventToWorkspace(
       { boards, preferences, selectedBoardId },
       event
@@ -256,12 +196,9 @@ export function workspaceReducer(
 ): WorkspaceState {
   switch (action.type) {
     case "server/snapshot": {
-      // Recents survive: the versioned blob does not carry them, so clearing
-      // would empty the list the first time the server answered.
       return {
         ...state,
         boards: action.boards,
-        // Every guess is abandoned — the snapshot is the truth for all boards.
         pendingDrags: new Map(),
         preferences: action.preferences,
         selectedBoardId: action.selectedBoardId,
@@ -323,12 +260,6 @@ export function workspaceReducer(
   }
 }
 
-/**
- * The position a board should render at.
- *
- * The optimistic guess wins while it is live, because that is the point of
- * applying it locally — otherwise a drag would visibly snap back and forward.
- */
 export function displayedPosition(
   board: WorkspaceBoard,
   pendingDrags: Map<string, PendingDrag>,
@@ -343,12 +274,6 @@ export function displayedPosition(
   return board.position;
 }
 
-/**
- * Drops guesses whose deadline has passed.
- *
- * A mutation that never got a matching event would otherwise pin the board in
- * the wrong place for the rest of the session.
- */
 export function expirePendingDrags(
   state: WorkspaceState,
   now: number

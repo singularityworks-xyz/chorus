@@ -21,7 +21,6 @@ const logger = createLogger(
   "SERVE:PROJECTS"
 );
 
-/** Container-relative directory holding per-board worktrees. */
 export const WORKTREE_CONTAINER = ".chorus-worktrees";
 
 export class WorktreeNotCleanError extends Error {
@@ -36,22 +35,6 @@ export class WorktreeNotCleanError extends Error {
   }
 }
 
-/**
- * Worktree-per-board (spec §2 rule 1, plan P6 task 2).
- *
- * The first board for a repo uses the primary checkout. Every *additional*
- * concurrent board for the same repo gets its own git worktree under
- * `<repo>/.chorus-worktrees/<boardId>`, so two agents editing one repository
- * cannot collide on the index or on files.
- *
- * Every git invocation goes through `execFile` with an argument array. There is
- * no shell here, and none of these values is ever interpolated into a command
- * string — plan risk #8 is the regression test for exactly this.
- *
- * That audit is a grep rather than an AST walk, so it reads comments too and
- * will flag prose that quotes the shell form it forbids. Reword the comment
- * rather than loosening the pattern.
- */
 export class WorktreeManager {
   readonly #gitTimeoutMs: number;
 
@@ -59,19 +42,11 @@ export class WorktreeManager {
     this.#gitTimeoutMs = options.gitTimeoutMs ?? 30_000;
   }
 
-  /**
-   * Where a board's worktree belongs.
-   *
-   * `boardId` is server-minted, but it still goes through `resolveInside` rather
-   * than straight into `join`: containment is cheap and this is the one place a
-   * traversal bug would hand a caller a path outside the repo.
-   */
   worktreePath(repoDirectory: string, boardId: string): string {
     const root = resolve(repoDirectory);
     return resolveInside(root, join(WORKTREE_CONTAINER, boardId));
   }
 
-  /** True when another live board already holds this repo's primary checkout. */
   needsWorktree(
     boards: ReadonlyArray<{ repo: { directory: string } }>,
     repoDirectory: string
@@ -82,25 +57,11 @@ export class WorktreeManager {
     );
   }
 
-  /**
-   * Creates the worktree, or returns the existing one.
-   *
-   * Idempotent by asking git rather than by checking the filesystem: a directory
-   * can exist without being a registered worktree, and re-adding a registered
-   * path fails. Two boards racing for the same repo is the case plan risk #6 is
-   * about, so the caller must await this inside the store's serial queue.
-   */
   async ensureWorktree(
     repoDirectory: string,
     boardId: string,
     branch?: string
   ): Promise<string> {
-    // Canonical root, so paths we build line up with the ones git reports.
-    //
-    // `git worktree list --porcelain` returns realpaths, while `resolve` is
-    // lexical. On a symlinked root — macOS `/var` → `/private/var`, or a
-    // symlinked projects folder — the two disagree, so the registered check
-    // misses a worktree that exists and `add` then fails on a path already in use.
     const repoRoot = await canonical(repoDirectory);
     const path = this.worktreePath(repoRoot, boardId);
 
@@ -118,8 +79,6 @@ export class WorktreeManager {
 
     const args = ["worktree", "add", "--quiet"];
     if (branch) {
-      // A new worktree cannot check out a branch another worktree already holds,
-      // so a named branch becomes a detached head at that revision.
       args.push("--detach");
     }
     args.push(path, branch ?? "HEAD");
@@ -127,8 +86,6 @@ export class WorktreeManager {
     logger.info("worktree-creating", { boardId, path, repoRoot });
     await this.#git(repoRoot, args);
 
-    // A worktree path is handed to the engine as its working directory and can
-    // come back to us through a client, so confirm its real path after creation.
     await assertContained(repoRoot, path);
 
     logger.info("worktree-created", { boardId, path });
@@ -152,9 +109,6 @@ export class WorktreeManager {
 
     await this.#assertClean(path, boardId);
 
-    // Git performs its own clean-worktree check here. Keep it as a second guard
-    // against edits arriving after the status probe; never use --force because
-    // that also removes ignored and untracked user files.
     await this.#git(repoRoot, ["worktree", "remove", path]);
     logger.info("worktree-removed", { boardId, path });
   }
@@ -187,22 +141,10 @@ export class WorktreeManager {
     }
   }
 
-  /**
-   * Removes worktree directories that no live board claims.
-   *
-   * A crashed serve leaves directories behind that git still has registered, and
-   * the next boot would otherwise inherit them: `git worktree list` grows without
-   * bound and a new board can collide with a stale checkout. Only ever removes
-   * entries under our own container directory and only ones whose name is not a
-   * live board id, so a bug here cannot delete a user's checkout.
-   */
   async pruneOrphans(
     repoDirectory: string,
     liveBoardIds: ReadonlySet<string>
   ): Promise<string[]> {
-    // Canonical for the same reason as `ensureWorktree`: the entries come from
-    // git as realpaths, so a lexical container never matches and no orphan is
-    // ever pruned on a symlinked root.
     const repoRoot = await canonical(repoDirectory);
     const container = resolveInside(repoRoot, WORKTREE_CONTAINER);
 
@@ -215,7 +157,6 @@ export class WorktreeManager {
     for (const entry of await this.#worktreeEntries(repoRoot)) {
       const name = basename(entry.path);
 
-      // Anything not ours is left alone, whatever it is named.
       if (dirname(entry.path) !== container || name.length === 0) {
         continue;
       }
@@ -263,7 +204,6 @@ export class WorktreeManager {
     }
   }
 
-  /** Absolute paths git currently has registered for this repository. */
   async #listWorktreePaths(repoRoot: string): Promise<Set<string>> {
     const out = await this.#git(repoRoot, ["worktree", "list", "--porcelain"]);
     const paths = new Set<string>();
@@ -277,7 +217,6 @@ export class WorktreeManager {
     return paths;
   }
 
-  /** Registered worktrees that live inside our container directory. */
   async #worktreeEntries(repoRoot: string): Promise<{ path: string }[]> {
     const out = await this.#git(repoRoot, ["worktree", "list", "--porcelain"]);
     const entries: { path: string }[] = [];
@@ -292,19 +231,6 @@ export class WorktreeManager {
   }
 }
 
-/**
- * Confirms a path really is inside the repo once symlinks are resolved.
- *
- * `resolveInside` is lexical (paths/sandbox.ts), so a symlink planted inside the
- * container could otherwise point a worktree at `/etc`. The worktree may not
- * exist yet when this runs for a freshly added one, hence the resolve fallback.
- */
-/**
- * A path with symlinks resolved, falling back to the lexical form.
- *
- * The fallback covers a path that does not exist yet, which is the normal case for
- * a worktree about to be created.
- */
 async function canonical(path: string): Promise<string> {
   return await realpath(path).catch(() => resolve(path));
 }
@@ -354,8 +280,6 @@ async function realPathWithMissingSuffix(candidate: string): Promise<string> {
       continue;
     }
 
-    // Resolving an existing symlink here catches a managed container redirected
-    // outside the repository before mkdir or git can touch its target.
     const resolved = await realpath(current);
     return resolve(resolved, ...missing.reverse());
   }

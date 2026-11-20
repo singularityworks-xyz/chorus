@@ -7,7 +7,7 @@ import {
   OpenCodeAdapter,
   sdkVersion,
 } from "../../../packages/opencode-adapter/src";
-import { OpenCodeProcessManager } from "../src/opencode/process-manager";
+import { OpenCodeProcessManager } from "../src/opencode/process-manager/manager";
 
 const providerID = "chorus-local-fixture";
 const modelID = "fixture-model";
@@ -527,6 +527,5 @@ if (cleanupFailures.length > 0) {
 process.stdout.write(
   `PASS: pinned OpenCode ${sdkVersion()} loaded ${providerID}/${modelID}, streamed and persisted replies on two isolated boards through the shared engine database, and made exactly two requests to the local fixture endpoint. No external provider was used.\n`
 );
-// The OpenCode SDK leaves keep-alive handles after the engine child and local
-// provider are stopped. Exit only after every controlled resource is cleaned.
+
 process.exit(0);

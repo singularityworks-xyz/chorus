@@ -1,62 +1,26 @@
-/**
- * Registered v2 sessions and legacy v1 signing helpers.
- *
- * Serve supplies a SessionRegistry and issues opaque v2 credentials, storing
- * only their hashes. Each session belongs to a revocable device. A v1 cookie
- * cannot authenticate when a registry is configured. Local bootstrap replaces
- * an old session without asking for a token; remote browsers must sign in again.
- * The v1 helpers below remain for compatibility with isolated library callers.
- *
- * Shape: `<expiresAtBase36>.<signature>`, where the signature is
- * HMAC-SHA256 over `"chorus-session-v1:<expiresAt>"` under a key derived from
- * `CHORUS_TOKEN` via HKDF-SHA256 with the info label `chorus-session`.
- *
- * Two properties this shape is chosen for:
- *
- * - The signing key is *derived*, not the raw token. A leaked cookie therefore
- *   does not hand an attacker the token itself, and the derivation is labelled
- *   so the same token used for another purpose cannot reuse this key.
- * - Verification is `crypto.subtle.verify`, i.e. the WebCrypto HMAC comparison.
- *   Re-implementing the check as `a === b` on hex strings is the classic
- *   timing-oracle bug, and a token comparison is exactly where it is tempting.
- */
-
 import type { SessionRegistry } from "./session-registry";
 
 const KEY_LABEL = "chorus-session";
-/** Cookie name used on both the HTTP responses and the WS upgrade. */
+
 export const SESSION_COOKIE = "chorus_session";
 export const SECURE_SESSION_COOKIE = "__Host-chorus_session";
 
-/** 30 days (decision #3). */
 export const SESSION_TTL_SECONDS = 2_592_000;
 
-/** Bumped if the cookie format changes; an old cookie then fails closed. */
 const SESSION_VERSION = "v1";
 
 const KEY_LENGTH_BITS = 256;
 
-/**
- * WebCrypto key usages, spelled locally because this project's lib config has
- * no DOM `KeyUsage`.
- */
 export type SessionKeyUsage = "sign" | "verify";
 
 export interface SessionOptions {
   deviceLabel?: string;
   now?: () => number;
   registry?: SessionRegistry;
-  /** Injected in tests; production derives it from `CHORUS_TOKEN`. */
+
   token: string;
 }
 
-/**
- * Derives the session-signing key with HKDF-SHA256.
- *
- * An empty salt: the input key material is already 256 bits of CSPRNG output,
- * so a salt adds no entropy, and a fixed value would only add a field to get
- * wrong.
- */
 export async function deriveSessionKey(
   token: string,
   usage: readonly SessionKeyUsage[] = ["sign", "verify"]
@@ -84,20 +48,12 @@ export async function deriveSessionKey(
 }
 
 export interface IssuedSession {
-  /** Cookie value to set. */
   cookie: string;
   deviceId?: string;
-  /** Absolute expiry in ms since epoch. */
+
   expiresAt: number;
 }
 
-/**
- * Copies encoded bytes into a fresh `ArrayBuffer`-backed array.
- *
- * `TextEncoder.encode` returns `Uint8Array<ArrayBufferLike>`, which no longer
- * satisfies `BufferSource` under this TypeScript version. Copying is cheap here
- * (a ~40 byte payload, once per handshake) and keeps the cast out of the code.
- */
 function bytesOf(text: string): Uint8Array<ArrayBuffer> {
   return new Uint8Array(new TextEncoder().encode(text));
 }
@@ -110,7 +66,6 @@ function toBase64Url(bytes: ArrayBuffer): string {
   return Buffer.from(bytes).toString("base64url");
 }
 
-/** Mints a signed cookie value for `ttlSeconds` from now. */
 export async function issueSessionCookie(
   options: SessionOptions,
   ttlSeconds: number = SESSION_TTL_SECONDS
@@ -134,8 +89,7 @@ export async function issueSessionCookie(
   );
 
   // The version prefix is load-bearing: `verifySessionCookie` rejects a cookie
-  // without it as malformed. Leaving it off made every issued cookie
-  // unverifiable, which surfaced as a 401 on a correct login.
+
   return {
     cookie: `${SESSION_VERSION}.${expiresAt.toString(36)}.${toBase64Url(signature)}`,
     expiresAt,
@@ -152,13 +106,6 @@ export type VerifyResult =
   | { ok: true; expiresAt: number; deviceId?: string }
   | { ok: false; reason: VerifyFailure };
 
-/**
- * Verifies a cookie value.
- *
- * Never throws and never distinguishes "never existed" from "wrong" to the
- * caller beyond a reason string the HTTP layer collapses to a flat 401, so a
- * probe cannot learn which of the two it hit.
- */
 export async function verifySessionCookie(
   cookie: string | undefined | null,
   options: SessionOptions
@@ -208,7 +155,6 @@ export async function verifySessionCookie(
   return { expiresAt, ok: true };
 }
 
-/** Reads the session cookie out of a Cookie header. */
 export function readSessionCookie(
   header: string | null | undefined
 ): string | null {
@@ -240,7 +186,6 @@ export function readSessionCookie(
   return null;
 }
 
-/** `Set-Cookie` value for issuing a session. */
 export function buildSessionCookieHeader(
   cookie: string,
   expiresAt: number,
@@ -258,13 +203,11 @@ export function buildSessionCookieHeader(
     attributes.push("Secure");
   }
 
-  // `Expires` mirrors `Max-Age` for clients that ignore one of them.
   attributes.push(`Expires=${new Date(expiresAt).toUTCString()}`);
 
   return attributes.join("; ");
 }
 
-/** `Set-Cookie` value that clears the session. */
 export function buildClearedCookieHeader(secure: boolean): string {
   const attributes = [
     `${secure ? SECURE_SESSION_COOKIE : SESSION_COOKIE}=`,
@@ -282,13 +225,6 @@ export function buildClearedCookieHeader(secure: boolean): string {
   return attributes.join("; ");
 }
 
-/**
- * Constant-time string comparison for raw token checks.
- *
- * Used only for the login body, where the candidate arrives as a plain string
- * rather than a signed frame. Length is compared first (public information),
- * then every byte is XOR-accumulated so the loop does not short-circuit.
- */
 export function timingSafeEqualStrings(a: string, b: string): boolean {
   const left = new TextEncoder().encode(a);
   const right = new TextEncoder().encode(b);
@@ -298,7 +234,7 @@ export function timingSafeEqualStrings(a: string, b: string): boolean {
   }
 
   // A constant-time compare is the whole reason for this loop: `!==`
-  // short-circuits and leaks the position of the first differing byte.
+
   let difference = 0;
   for (let index = 0; index < left.length; index += 1) {
     // biome-ignore lint/suspicious/noBitwiseOperators: see above

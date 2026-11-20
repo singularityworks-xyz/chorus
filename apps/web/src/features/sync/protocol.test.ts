@@ -1,11 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { resolveSocketUrl } from "./chorus-sync";
-import { decideFrame, eventsAfterSnapshot } from "./protocol";
+import { decideFrame, eventsAfterSnapshot, parseServerFrame } from "./protocol";
+import { eventFrame, snapshotFixture } from "./testing";
 
 describe("eventsAfterSnapshot", () => {
-  // A snapshot is cut at the server's head, so it already reflects every event
-  // buffered in the transport. Replaying those duplicates cards and streamed
-  // text, because the projector appends and concatenates.
   const buffered = [
     { event: "e9", seq: 9 },
     { event: "e10", seq: 10 },
@@ -59,112 +56,76 @@ describe("decideFrame", () => {
   });
 
   test("treats an overlapping prefix as a gap rather than re-applying it", () => {
-    // Cannot happen against the hub, whose ranges never overlap, but re-applying
-    // the prefix would duplicate state, so the safe reading is a snapshot.
     expect(decideFrame({ fromSeq: 5, seq: 9 }, 6).action).toBe("gap");
+  });
+
+  test("never moves the cursor backwards", () => {
+    expect(decideFrame({ fromSeq: 3, seq: 3 }, 10)).toEqual({
+      action: "duplicate",
+      nextSeq: 10,
+    });
   });
 });
 
-describe("resolveSocketUrl", () => {
-  test("installed loopback frontend finds Serve without rerouting public frontends", () => {
-    expect(
-      resolveSocketUrl({
-        localServePort: 2000,
-        isSecure: false,
-        origin: "http://localhost:3000",
-      })
-    ).toBe("ws://localhost:2000/ws");
-    expect(
-      resolveSocketUrl({
-        localServePort: 2000,
-        isSecure: true,
-        origin: "https://host.example:3000",
-      })
-    ).toBe("wss://host.example:3000/ws");
-  });
-  test("an explicitly empty variable falls back to the origin", () => {
-    // `.env.example` tells operators to leave this unset when serve fronts the
-    // app, and `NEXT_PUBLIC_CHORUS_WS_URL=` is the obvious way to do that.
-    // `new URL("")` throws, and this runs during render.
-    expect(
-      resolveSocketUrl({
-        explicit: "",
-        isSecure: false,
-        origin: "http://app.test",
-      })
-    ).toBe("ws://app.test/ws");
+describe("parseServerFrame", () => {
+  test("accepts every server frame type", () => {
+    for (const frame of [
+      { head: 12, type: "ready" },
+      { data: snapshotFixture(), seq: 4, type: "snapshot" },
+      eventFrame(1, 1),
+      { at: 1, type: "ping" },
+      { message: "boom", type: "error" },
+      { payload: { x: 1 }, timestamp: 5, type: "viewport.sync" },
+    ]) {
+      expect(parseServerFrame(JSON.stringify(frame))).not.toBeNull();
+    }
   });
 
-  test("uses the local Serve port when Next dev is opened directly", () => {
+  test("returns null for malformed JSON and invalid shapes", () => {
+    expect(parseServerFrame("{not json")).toBeNull();
+    expect(parseServerFrame("")).toBeNull();
+    expect(parseServerFrame(JSON.stringify({ nope: true }))).toBeNull();
     expect(
-      resolveSocketUrl({
-        developmentServePort: 2000,
-        isSecure: false,
-        origin: "http://localhost:3000",
-      })
-    ).toBe("ws://localhost:2000/ws");
+      parseServerFrame(JSON.stringify({ head: -1, type: "ready" }))
+    ).toBeNull();
   });
 
-  test("rebinds a local dev serve host to the host used by a LAN browser", () => {
+  test("rejects a snapshot missing required preference fields", () => {
     expect(
-      resolveSocketUrl({
-        allowLocalHostRebinding: true,
-        explicit: "http://localhost:2000",
-        isSecure: false,
-        origin: "http://192.168.1.8:3000",
-      })
-    ).toBe("ws://192.168.1.8:2000/ws");
+      parseServerFrame(
+        JSON.stringify({
+          data: { boards: [], preferences: {}, selectedBoardId: null, v: 1 },
+          seq: 1,
+          type: "snapshot",
+        })
+      )
+    ).toBeNull();
   });
 
-  test("does not rebind a configured serve URL outside development", () => {
+  test("rejects an envelope whose boardId contradicts its event", () => {
     expect(
-      resolveSocketUrl({
-        explicit: "http://localhost:2000",
-        isSecure: false,
-        origin: "http://192.168.1.8:3000",
-      })
-    ).toBe("ws://localhost:2000/ws");
+      parseServerFrame(
+        JSON.stringify({
+          ...eventFrame(1, 1, {
+            boardId: "board-b",
+            reviewMode: "auto",
+            type: "board.review_mode_set",
+          }),
+          boardId: "board-a",
+          event: {
+            boardId: "board-b",
+            reviewMode: "auto",
+            ts: 1,
+            type: "board.review_mode_set",
+          },
+        })
+      )
+    ).toBeNull();
   });
 
-  test("a whitespace-only variable falls back to the origin", () => {
+  test("rejects a backwards sequence range", () => {
     expect(
-      resolveSocketUrl({
-        explicit: "  ",
-        isSecure: false,
-        origin: "http://app.test",
-      })
-    ).toBe("ws://app.test/ws");
-  });
-
-  test("an explicit address keeps its own scheme", () => {
-    // Overriding with the page's scheme turns this into ws://, which a
-    // TLS-only server rejects.
-    expect(
-      resolveSocketUrl({
-        explicit: "https://serve.example",
-        isSecure: false,
-        origin: "http://app.test",
-      })
-    ).toBe("wss://serve.example/ws");
-  });
-
-  test("an explicit ws or wss address is respected", () => {
-    expect(
-      resolveSocketUrl({
-        explicit: "ws://serve.example:9000",
-        isSecure: true,
-        origin: "https://app.test",
-      })
-    ).toBe("ws://serve.example:9000/ws");
-  });
-
-  test("an explicit address discards its path", () => {
-    expect(
-      resolveSocketUrl({
-        explicit: "https://serve.example/some/path",
-        isSecure: false,
-        origin: "http://app.test",
-      })
-    ).toBe("wss://serve.example/ws");
+      parseServerFrame(JSON.stringify({ ...eventFrame(9, 5), fromSeq: 9 }))
+    ).toBeNull();
   });
 });

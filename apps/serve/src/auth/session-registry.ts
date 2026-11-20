@@ -20,7 +20,6 @@ const deviceSchema = z.strictObject({
   revokedAt: z.number().int().nonnegative().nullable(),
 });
 
-/** Hashed opaque credentials, separate per browser and immediately revocable. */
 export class DeviceLimitError extends Error {
   constructor() {
     super("Disconnect a paired device before connecting another.");
@@ -49,7 +48,7 @@ export class SessionRegistry {
       throw new Error("session expiry must be in the future");
     }
     this.prune();
-    // Bound authenticated credential creation as well as login brute force.
+
     if (
       this.list().filter((device) => device.revokedAt === null).length >=
       MAX_PAIRED_DEVICES

@@ -1,32 +1,25 @@
-/**
- * `@chorus/contracts` — the single typed language shared by `apps/serve` and
- * `apps/web`.
- *
- * Module layout:
- * - `base.ts`    — domain schemas (repo, board, card, step, snapshot, mutations)
- * - `events.ts`  — `WorkspaceEvent`, the vocabulary persisted in the event log
- * - `protocol.ts` — `/ws` wire envelopes and control-event classification
- * - `projector.ts` — pure `applyEventToBoard`, the only board reducer that exists
- *
- * `base.ts` is separate from this barrel on purpose: `events.ts` needs the base
- * schemas at module-evaluation time, so a direct `events.ts` ↔ `index.ts`
- * cycle would leave those zod schemas in the temporal dead zone. Nothing may
- * import from `index.ts` internally — import the specific module instead.
- */
-
 // biome-ignore lint/performance/noBarrelFile: package entry point from package.json `exports` — both apps import `@chorus/contracts` as one specifier by design.
-export * from "./auth";
-export * from "./autocomplete";
-export * from "./base";
-export * from "./events";
-export * from "./hosting";
-export * from "./mutation-map";
-export * from "./notifications";
-export * from "./projector";
-export * from "./protocol";
-export * from "./relay";
-export * from "./repository-transfer";
-export * from "./review-transfer";
-export * from "./session-diff";
-export * from "./workspace-checkpoint";
-export * from "./workspace-transfer";
+export * from "./auth/contracts";
+export * from "./hosting/contracts";
+export * from "./hosting/transfer/checkpoint";
+export * from "./hosting/transfer/repository";
+export * from "./hosting/transfer/review";
+export * from "./hosting/transfer/workspace";
+export * from "./notifications/contracts";
+export * from "./relay/contracts";
+export * from "./sessions/diff";
+export * from "./workspace/autocomplete";
+export * from "./workspace/base/boards";
+export * from "./workspace/base/commands";
+export * from "./workspace/base/common";
+export * from "./workspace/base/models";
+export * from "./workspace/base/mutations";
+export * from "./workspace/base/projects";
+export * from "./workspace/base/providers";
+export * from "./workspace/base/sessions";
+export * from "./workspace/base/tasks";
+export * from "./workspace/events";
+export * from "./workspace/mutation-map";
+export * from "./workspace/projector";
+export { findTaskInColumns } from "./workspace/projector/task-state";
+export * from "./workspace/protocol";

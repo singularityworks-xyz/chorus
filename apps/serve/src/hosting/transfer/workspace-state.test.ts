@@ -148,7 +148,7 @@ describe("portable workspace projection", () => {
     expect(restored.preferences).toEqual(files.snapshot.preferences);
     expect(restored.selectedBoardId).toBe("board-b");
     expect(restored.revision).toBe(12);
-    // Projection is intentionally historical, not an executable continuation.
+
     expect(restored.boards[0]?.session.sessionId).toBe("source-session");
     expect(restored.boards[0]?.columns.in_progress?.[0]?.runId).toBe(
       "source-run"

@@ -1,21 +1,12 @@
 import { createLogger } from "@chorus/logger";
 import type {
   EventStreamHandle,
-  EventStreamStatus,
   NormalizedAgentEvent,
-  PermissionHandlerInput,
-  QuestionReplyInput,
-  QuestionRequest,
-  SessionCreateInput,
-  SessionForkInput,
-  SessionPromptInput,
 } from "@chorus/oc-adapter";
 import { OpenCodeAdapter } from "@chorus/oc-adapter";
-import { EngineUnavailableError } from "../../opencode/process-manager";
-
-const MAX_RECONCILIATION_RETRIES = 5;
-const RECONCILIATION_RETRY_BASE_MS = 250;
-const RECONCILIATION_RETRY_MAX_MS = 5000;
+import { EngineUnavailableError } from "../../opencode/process-manager/errors";
+import { EventStreamReconciler } from "./reconciliation";
+import { OpenCodeSessionCommands } from "./sessions/commands";
 
 export interface DirectoryEngineProvider {
   adapterForDirectory(directory: string): Promise<OpenCodeAdapter>;
@@ -47,22 +38,17 @@ export class OpenCodeBridge {
   readonly #defaultDirectory: string;
   readonly #ensureEngineReady: () => Promise<void>;
   readonly #engineProvider: DirectoryEngineProvider | undefined;
+  readonly #reconciler: EventStreamReconciler;
+  readonly #sessionCommands: OpenCodeSessionCommands;
   #eventHandle: EventStreamHandle | null = null;
   readonly #directoryHandles = new Map<string, EventStreamHandle>();
-  readonly #streamStates = new Map<string, EventStreamStatus>();
   readonly #subscribers = new Set<EventSubscriber>();
   readonly #activeSessions = new Map<
     string,
     { activity: string; directory: string; sessionID: string }
   >();
-  readonly #reconciliations = new Map<string, Promise<void>>();
-  readonly #reconciliationRetryAttempts = new Map<string, number>();
-  readonly #reconciliationRetryTimers = new Map<
-    string,
-    ReturnType<typeof setTimeout>
-  >();
   #recoverySessions: (directory: string) => string[] = () => [];
-  readonly #startTime = Date.now();
+  readonly #startTime: number;
   readonly #logger = createLogger(
     {
       env: process.env.NODE_ENV === "production" ? "production" : "development",
@@ -84,6 +70,20 @@ export class OpenCodeBridge {
     this.#ensureEngineReady =
       options.ensureEngineReady ?? (() => Promise.resolve());
     this.#engineProvider = options.engineProvider;
+    this.#reconciler = new EventStreamReconciler({
+      activeSessionIds: (target) =>
+        [...this.#activeSessions.values()]
+          .filter((session) => session.directory === target)
+          .map((session) => session.sessionID),
+      adapterFor: (target) => this.#adapterFor(target),
+      markReconciled: (target) => this.#engineProvider?.markReconciled(target),
+      onExhausted: (target) => this.#detachExhaustedStream(target),
+      publish: async (target, event) => {
+        this.#trackSession(event, target);
+        await this.#broadcastAndWait(event);
+      },
+      recoverySessionIds: (target) => this.#recoverySessions(target),
+    });
     this.#engineProvider?.setEvictionHandler((evictedDirectory) => {
       this.#removeDirectorySubscription(evictedDirectory);
     });
@@ -92,6 +92,11 @@ export class OpenCodeBridge {
       baseUrl,
       directory,
     });
+    this.#sessionCommands = new OpenCodeSessionCommands(
+      (target) => this.#adapterFor(target),
+      this.#defaultDirectory,
+      this.#logger
+    );
     this.#startTime = Date.now();
   }
 
@@ -107,8 +112,6 @@ export class OpenCodeBridge {
   }
 
   async start(): Promise<void> {
-    // Pool engines are started lazily for a board's canonical checkout. There
-    // is no default shared stream in that mode.
     if (this.#engineProvider) {
       return;
     }
@@ -125,7 +128,7 @@ export class OpenCodeBridge {
       },
       {
         onStatus: (status) =>
-          this.#onStreamStatus(this.#defaultDirectory, status),
+          this.#reconciler.onStatus(this.#defaultDirectory, status),
       }
     );
 
@@ -160,7 +163,7 @@ export class OpenCodeBridge {
         },
         {
           directory,
-          onStatus: (status) => this.#onStreamStatus(directory, status),
+          onStatus: (status) => this.#reconciler.onStatus(directory, status),
         }
       );
     } catch (error) {
@@ -250,432 +253,102 @@ export class OpenCodeBridge {
     }
   }
 
-  #onStreamStatus(directory: string, status: EventStreamStatus): void {
-    this.#streamStates.set(directory, status);
-    if (status === "connected") {
-      this.#startReconciliation(directory);
-      return;
-    }
-    if (status === "exhausted") {
-      this.#detachExhaustedStream(directory);
-      this.#failDirectorySessions(directory).catch((error: unknown) => {
-        this.#logger.error(
-          "event-stream-exhaustion-state-failed",
-          error instanceof Error ? error : undefined,
-          { directory }
-        );
-      });
-    }
+  createSession(
+    input: Parameters<OpenCodeSessionCommands["createSession"]>[0]
+  ) {
+    return this.#sessionCommands.createSession(input);
   }
 
-  #startReconciliation(directory: string): void {
-    const timer = this.#reconciliationRetryTimers.get(directory);
-    if (timer) {
-      clearTimeout(timer);
-      this.#reconciliationRetryTimers.delete(directory);
-    }
-    if (this.#reconciliations.has(directory)) {
-      return;
-    }
-
-    const reconciliation = this.#reconcileDirectory(directory).finally(() => {
-      if (this.#reconciliations.get(directory) === reconciliation) {
-        this.#reconciliations.delete(directory);
-      }
-    });
-    this.#reconciliations.set(directory, reconciliation);
-    reconciliation.catch((error: unknown) => {
-      this.#scheduleReconciliationRetry(directory, error);
-    });
+  getSession(input: Parameters<OpenCodeSessionCommands["getSession"]>[0]) {
+    return this.#sessionCommands.getSession(input);
   }
 
-  #scheduleReconciliationRetry(directory: string, error: unknown): void {
-    if (this.#streamStates.get(directory) !== "connected") {
-      return;
-    }
-    if (this.#reconciliationRetryTimers.has(directory)) {
-      return;
-    }
-
-    const attempts =
-      (this.#reconciliationRetryAttempts.get(directory) ?? 0) + 1;
-    this.#reconciliationRetryAttempts.set(directory, attempts);
-    if (attempts > MAX_RECONCILIATION_RETRIES) {
-      this.#logger.error(
-        "event-stream-reconciliation-retries-exhausted",
-        error instanceof Error ? error : undefined,
-        { attempts, directory }
-      );
-      return;
-    }
-
-    const delay = Math.min(
-      RECONCILIATION_RETRY_BASE_MS * 2 ** (attempts - 1),
-      RECONCILIATION_RETRY_MAX_MS
-    );
-    const timer = setTimeout(() => {
-      this.#reconciliationRetryTimers.delete(directory);
-      if (this.#streamStates.get(directory) === "connected") {
-        this.#startReconciliation(directory);
-      }
-    }, delay);
-    this.#reconciliationRetryTimers.set(directory, timer);
+  sessionMessages(sessionID: string, directory: string) {
+    return this.#sessionCommands.sessionMessages(sessionID, directory);
   }
 
-  #clearReconciliationRetry(directory: string): void {
-    const timer = this.#reconciliationRetryTimers.get(directory);
-    if (timer) {
-      clearTimeout(timer);
-      this.#reconciliationRetryTimers.delete(directory);
-    }
-    this.#reconciliationRetryAttempts.delete(directory);
+  promptSession(
+    input: Parameters<OpenCodeSessionCommands["promptSession"]>[0]
+  ) {
+    return this.#sessionCommands.promptSession(input);
   }
 
-  #detachExhaustedStream(directory: string): void {
-    this.#directoryHandles.get(directory)?.stop();
-    this.#directoryHandles.delete(directory);
-    if (!this.#engineProvider && directory === this.#defaultDirectory) {
-      this.#eventHandle?.stop();
-      this.#eventHandle = null;
-    }
-    this.#engineProvider?.markSubscribed(directory, false);
-    this.#clearReconciliationRetry(directory);
-    this.#streamStates.set(directory, "exhausted");
+  promptSessionAsync(
+    input: Parameters<OpenCodeSessionCommands["promptSessionAsync"]>[0]
+  ) {
+    return this.#sessionCommands.promptSessionAsync(input);
   }
 
-  async #failDirectorySessions(directory: string): Promise<void> {
-    const sessionIDs = new Set(this.#recoverySessions(directory));
-    for (const session of this.#activeSessions.values()) {
-      if (session.directory === directory) {
-        sessionIDs.add(session.sessionID);
-      }
-    }
-
-    const timestamp = Date.now();
-    for (const sessionID of sessionIDs) {
-      const event: NormalizedAgentEvent = {
-        activity: "error",
-        error: "The OpenCode event stream could not reconnect.",
-        sessionID,
-        sourceEventId: `stream-exhausted:${sessionID}`,
-        timestamp,
-        type: "session.error",
-      };
-      this.#trackSession(event, directory);
-      await this.#broadcastAndWait(event);
-    }
-    this.#engineProvider?.markReconciled(directory);
+  abortSession(sessionID: string, directory?: string) {
+    return this.#sessionCommands.abortSession(sessionID, directory);
   }
 
-  async #reconcileDirectory(directory: string): Promise<void> {
-    try {
-      const adapter = await this.#adapterFor(directory);
-      const recoverySessions = this.#recoverySessions(directory);
-      const recoverableSessionIds = new Set(recoverySessions);
-      const [statuses, permissions, questions, histories] = await Promise.all([
-        adapter.sessions.status(directory),
-        adapter.permissions.list(directory),
-        adapter.questions.list(directory),
-        Promise.all(
-          recoverySessions.map(async (sessionID) => {
-            try {
-              const messages = await adapter.sessions.messages(sessionID, {
-                directory,
-                limit: 200,
-              });
-              return adapter.normalizeHistory(sessionID, messages);
-            } catch (error) {
-              this.#logger.warn("session-history-reconciliation-failed", {
-                directory,
-                errorName: error instanceof Error ? error.name : "unknown",
-                sessionID,
-              });
-              throw error;
-            }
-          })
-        ),
-      ]);
-
-      for (const history of histories) {
-        for (const event of history) {
-          this.#trackSession(event, directory);
-          await this.#broadcastAndWait(event);
-        }
-      }
-
-      const timestamp = Date.now();
-      for (const [sessionID, status] of Object.entries(statuses)) {
-        if (!recoverableSessionIds.has(sessionID)) {
-          continue;
-        }
-        const normalized: NormalizedAgentEvent = {
-          activity: status.type === "idle" ? "idle" : "thinking",
-          sessionID,
-          timestamp,
-          type: "session.status",
-        };
-        this.#trackSession(normalized, directory);
-        await this.#broadcastAndWait(normalized);
-      }
-
-      for (const sessionID of recoverySessions) {
-        if (Object.hasOwn(statuses, sessionID)) {
-          continue;
-        }
-        const normalized: NormalizedAgentEvent = {
-          activity: "idle",
-          sessionID,
-          timestamp,
-          type: "session.status",
-        };
-        this.#trackSession(normalized, directory);
-        await this.#broadcastAndWait(normalized);
-      }
-
-      for (const permission of permissions) {
-        if (!recoverableSessionIds.has(permission.sessionID)) {
-          continue;
-        }
-        await this.#broadcastAndWait({
-          activity: "waiting_for_approval",
-          permissionID: permission.id,
-          permission: permission.permission,
-          sessionID: permission.sessionID,
-          sourceEventId: `permission.asked:${permission.id}`,
-          timestamp,
-          type: "permission.asked",
-        });
-      }
-
-      for (const question of questions) {
-        if (!recoverableSessionIds.has(question.sessionID)) {
-          continue;
-        }
-        await this.#broadcastAndWait({
-          activity: "waiting_for_question",
-          questionID: question.id,
-          questions: question.questions,
-          sessionID: question.sessionID,
-          sourceEventId: `question.asked:${question.id}`,
-          timestamp,
-          type: "question.asked",
-        });
-      }
-      this.#engineProvider?.markReconciled(directory);
-      this.#clearReconciliationRetry(directory);
-    } catch (error) {
-      this.#logger.error(
-        "event-stream-reconciliation-failed",
-        error instanceof Error ? error : undefined,
-        { directory }
-      );
-      throw error;
-    }
+  sessionDiff(sessionID: string, directory?: string) {
+    return this.#sessionCommands.sessionDiff(sessionID, directory);
   }
 
-  async createSession(input: SessionCreateInput) {
-    const adapter = await this.#adapterFor(
-      input.directory ?? this.#defaultDirectory
-    );
-    return adapter.sessions.create(input);
+  listAutocompleteCommands(directory: string) {
+    return this.#sessionCommands.listAutocompleteCommands(directory);
   }
 
-  /**
-   * Reads a session back from the engine.
-   *
-   * Used to check that a session we are about to reuse really belongs to the
-   * directory we are about to work in. The engine is the only authority on that;
-   * the store holds a session id and a path but no link between them.
-   */
-  async getSession(input: {
-    directory?: string;
-    engineDirectory?: string;
-    sessionID: string;
-  }) {
-    const directory =
-      input.directory ?? input.engineDirectory ?? this.#defaultDirectory;
-    const adapter = await this.#adapterFor(directory);
-    return adapter.sessions.get(input.sessionID, directory);
+  listAutocompleteSkills(directory: string) {
+    return this.#sessionCommands.listAutocompleteSkills(directory);
   }
 
-  async sessionMessages(sessionID: string, directory: string) {
-    const adapter = await this.#adapterFor(directory);
-    return adapter.sessions.messages(sessionID, { directory, limit: 200 });
+  findAutocompleteFiles(query: string, directory: string) {
+    return this.#sessionCommands.findAutocompleteFiles(query, directory);
   }
 
-  async promptSession(input: SessionPromptInput) {
-    const adapter = await this.#adapterFor(
-      input.directory ?? this.#defaultDirectory
-    );
-    return adapter.sessions.prompt(input);
+  listAutocompleteDirectory(path: string, directory: string) {
+    return this.#sessionCommands.listAutocompleteDirectory(path, directory);
   }
 
-  async promptSessionAsync(input: SessionPromptInput) {
-    const adapter = await this.#adapterFor(
-      input.directory ?? this.#defaultDirectory
-    );
-    return adapter.sessions.promptAsync(input);
-  }
-
-  async abortSession(sessionID: string, directory?: string) {
-    const adapter = await this.#adapterFor(directory ?? this.#defaultDirectory);
-    return adapter.sessions.abort(sessionID, directory);
-  }
-
-  async sessionDiff(sessionID: string, directory?: string) {
-    const target = directory ?? this.#defaultDirectory;
-    const adapter = await this.#adapterFor(target);
-    return adapter.sessions.diff(sessionID, target);
-  }
-
-  async listAutocompleteCommands(directory: string) {
-    const adapter = await this.#adapterFor(directory);
-    return adapter.references.listCommands(directory);
-  }
-
-  async listAutocompleteSkills(directory: string) {
-    const adapter = await this.#adapterFor(directory);
-    return adapter.references.listSkills(directory);
-  }
-
-  async findAutocompleteFiles(query: string, directory: string) {
-    const adapter = await this.#adapterFor(directory);
-    return adapter.references.findFiles(query, directory);
-  }
-
-  async listAutocompleteDirectory(path: string, directory: string) {
-    const adapter = await this.#adapterFor(directory);
-    return adapter.references.listDirectory(path, directory);
-  }
-
-  async waitForSessionIdle(
-    sessionID: string,
-    directory: string,
-    timeoutMs: number
-  ): Promise<boolean> {
-    const adapter = await this.#adapterFor(directory);
-    const deadline = Date.now() + Math.max(0, timeoutMs);
-    for (;;) {
-      const statuses = await adapter.sessions.status(directory);
-      const status = statuses[sessionID];
-      if (!status || status.type === "idle") {
-        return true;
-      }
-      if (Date.now() >= deadline) {
-        return false;
-      }
-      await new Promise((resolvePromise) => {
-        setTimeout(resolvePromise, Math.min(100, deadline - Date.now()));
-      });
-    }
-  }
-
-  async replyPermission(input: PermissionHandlerInput) {
-    const adapter = await this.#adapterFor(
-      input.directory ?? this.#defaultDirectory
-    );
-    return adapter.permissions.reply(input);
-  }
-
-  async listQuestions(directory?: string): Promise<QuestionRequest[]> {
-    const adapter = await this.#adapterFor(directory ?? this.#defaultDirectory);
-    return adapter.questions.list(directory);
-  }
-
-  async replyQuestion(input: QuestionReplyInput) {
-    const adapter = await this.#adapterFor(
-      input.directory ?? this.#defaultDirectory
-    );
-    return adapter.questions.reply(input);
-  }
-
-  async rejectQuestion(requestID: string, directory?: string) {
-    const adapter = await this.#adapterFor(directory ?? this.#defaultDirectory);
-    return adapter.questions.reject(requestID, directory);
-  }
-
-  async forkSession(input: SessionForkInput) {
-    const adapter = await this.#adapterFor(
-      input.directory ?? this.#defaultDirectory
-    );
-    return adapter.sessions.fork(input);
-  }
-
-  async revertSession(sessionID: string, directory?: string) {
-    const adapter = await this.#adapterFor(directory ?? this.#defaultDirectory);
-    const target = directory ?? this.#defaultDirectory;
-    this.#logger.debug("Reverting session", {
+  waitForSessionIdle(sessionID: string, directory: string, timeoutMs: number) {
+    return this.#sessionCommands.waitForSessionIdle(
       sessionID,
-      directory: target,
-    });
-    return adapter.sessions
-      .revert({ sessionID, directory: target })
-      .then((result) => {
-        this.#logger.info("Session reverted", {
-          sessionID,
-          messageID: result?.messageID,
-          messageIndex: result?.messageIndex,
-          totalMessages: result?.totalMessages,
-        });
-        return result;
-      })
-      .catch((error: unknown) => {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        const errorStack = error instanceof Error ? error.stack : undefined;
-        this.#logger.error(
-          "Failed to revert session",
-          error instanceof Error ? error : undefined,
-          {
-            sessionID,
-            directory: target,
-            errorMessage,
-            errorStack,
-          }
-        );
-        throw error;
-      });
+      directory,
+      timeoutMs
+    );
   }
 
-  async unrevertSession(sessionID: string, directory?: string) {
-    const adapter = await this.#adapterFor(directory ?? this.#defaultDirectory);
-    const target = directory ?? this.#defaultDirectory;
-    this.#logger.debug("Unreverting session", {
-      sessionID,
-      directory: target,
-    });
-    return adapter.sessions
-      .unrevert({ sessionID, directory: target })
-      .then((result) => {
-        this.#logger.info("Session unreverted", { sessionID });
-        return result;
-      })
-      .catch((error: unknown) => {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        const errorStack = error instanceof Error ? error.stack : undefined;
-        this.#logger.error(
-          "Failed to unrevert session",
-          error instanceof Error ? error : undefined,
-          {
-            sessionID,
-            directory: target,
-            errorMessage,
-            errorStack,
-          }
-        );
-        throw error;
-      });
+  replyPermission(
+    input: Parameters<OpenCodeSessionCommands["replyPermission"]>[0]
+  ) {
+    return this.#sessionCommands.replyPermission(input);
+  }
+
+  listQuestions(directory?: string) {
+    return this.#sessionCommands.listQuestions(directory);
+  }
+
+  replyQuestion(
+    input: Parameters<OpenCodeSessionCommands["replyQuestion"]>[0]
+  ) {
+    return this.#sessionCommands.replyQuestion(input);
+  }
+
+  rejectQuestion(requestID: string, directory?: string) {
+    return this.#sessionCommands.rejectQuestion(requestID, directory);
+  }
+
+  forkSession(input: Parameters<OpenCodeSessionCommands["forkSession"]>[0]) {
+    return this.#sessionCommands.forkSession(input);
+  }
+
+  revertSession(sessionID: string, directory?: string) {
+    return this.#sessionCommands.revertSession(sessionID, directory);
+  }
+
+  unrevertSession(sessionID: string, directory?: string) {
+    return this.#sessionCommands.unrevertSession(sessionID, directory);
   }
 
   getStatus(): BridgeStatus {
     return {
       connected:
         (this.#eventHandle !== null || this.#directoryHandles.size > 0) &&
-        this.#streamStates.size > 0 &&
-        [...this.#streamStates.values()].every(
-          (status) => status === "connected"
-        ),
+        this.#reconciler.hasStatus &&
+        this.#reconciler.allConnected,
       opencodeUrl: this.#baseUrl,
       activeSessions: this.#activeSessions.size,
       subscribedDirectories: [
@@ -709,15 +382,24 @@ export class OpenCodeBridge {
     return this.adapter;
   }
 
+  #detachExhaustedStream(directory: string): void {
+    this.#directoryHandles.get(directory)?.stop();
+    this.#directoryHandles.delete(directory);
+    if (!this.#engineProvider && directory === this.#defaultDirectory) {
+      this.#eventHandle?.stop();
+      this.#eventHandle = null;
+    }
+    this.#engineProvider?.markSubscribed(directory, false);
+  }
+
   #removeDirectorySubscription(directory: string): void {
-    this.#clearReconciliationRetry(directory);
+    this.#reconciler.removeDirectory(directory);
     const handle = this.#directoryHandles.get(directory);
     if (!handle) {
       return;
     }
     handle.stop();
     this.#directoryHandles.delete(directory);
-    this.#streamStates.delete(directory);
     this.#engineProvider?.markSubscribed(directory, false);
   }
 
@@ -731,12 +413,7 @@ export class OpenCodeBridge {
       this.#engineProvider?.markSubscribed(directory, false);
     }
     this.#directoryHandles.clear();
-    for (const timer of this.#reconciliationRetryTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.#reconciliationRetryTimers.clear();
-    this.#reconciliationRetryAttempts.clear();
-    this.#streamStates.clear();
+    this.#reconciler.stop();
     this.#subscribers.clear();
     this.#activeSessions.clear();
   }

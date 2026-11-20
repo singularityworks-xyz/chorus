@@ -15,14 +15,6 @@ import { WORKTREE_CONTAINER, WorktreeManager } from "./worktree-manager";
 
 const NOT_A_REPO = /not a git repository/;
 
-/**
- * Worktree-per-board (spec §2 rule 1, plan P6 task 2).
- *
- * These run against real git in a real repository. The behaviour under test is
- * `git worktree add` interacting with a concurrent queue, and a mock would
- * assert only that the mock was called.
- */
-
 function makeRepo(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   execFileSync("git", ["init", "--quiet"], { cwd: dir, windowsHide: true });
@@ -70,7 +62,7 @@ async function seedBoard(
     },
     type: "board.create",
   });
-  // Narrowed once here so callers do not juggle a nullable id.
+
   const boardId = commit?.boardId;
   if (!boardId) {
     throw new Error("board.create produced no board");
@@ -105,7 +97,7 @@ describe("WorktreeManager", () => {
     const boards = [{ repo: { directory: "/repos/app" } }];
 
     expect(manager.needsWorktree(boards, "/repos/app")).toBe(true);
-    // A different repo is unaffected.
+
     expect(manager.needsWorktree(boards, "/repos/other")).toBe(false);
   });
 
@@ -148,8 +140,6 @@ describe("WorktreeManager", () => {
     );
     await store.load();
 
-    // The first board keeps the primary checkout; the second gets a worktree,
-    // which is the one removal has to clean up.
     await seedBoard(store, repo);
     const second = await seedBoard(store, repo);
     const secondPath = store.getBoard(second)?.repo.worktree;
@@ -166,10 +156,8 @@ describe("WorktreeManager", () => {
       type: "board.remove",
     });
 
-    // The worktree is gone with the board, rather than lingering until the next
-    // boot's prune.
     expect(worktreeList(repo)).not.toContain(resolve(secondPath));
-    // The repo itself survives — a board on the primary must never remove it.
+
     expect(existsSync(join(repo, "README.md"))).toBe(true);
     expect(worktreeList(repo)).toContain(resolve(repo));
 
@@ -258,7 +246,6 @@ describe("WorktreeManager", () => {
     expect(second).toBe(first);
     expect(existsSync(first)).toBe(true);
 
-    // One registered worktree per board, not two.
     const containerEntries = worktreeList(repo).filter((path) =>
       path.includes(WORKTREE_CONTAINER)
     );
@@ -278,9 +265,6 @@ describe("WorktreeManager", () => {
     );
     await store.load();
 
-    // Fired together on purpose: this is plan risk #6. Worktree creation is
-    // awaited inside the store's serial queue, so these queue rather than race,
-    // and each create sees the boards the previous ones added.
     await Promise.all(
       Array.from({ length: 10 }, async () => seedBoard(store, repo))
     );
@@ -289,7 +273,7 @@ describe("WorktreeManager", () => {
     expect(boards).toHaveLength(10);
 
     const paths = boards.map((board) => board.repo.worktree);
-    // Exactly one primary checkout; the rest each got their own path.
+
     expect(paths.filter((path) => path === repo)).toHaveLength(1);
     expect(new Set(paths).size).toBe(10);
 
@@ -297,7 +281,7 @@ describe("WorktreeManager", () => {
       path.includes(WORKTREE_CONTAINER)
     );
     expect(containerEntries).toHaveLength(9);
-    // Every recorded path is one git actually registered.
+
     for (const path of containerEntries) {
       expect(existsSync(path)).toBe(true);
     }
@@ -374,8 +358,6 @@ describe("WorktreeProvisioner contract", () => {
   });
 
   test("WorktreeManager satisfies the store's structural contract", () => {
-    // Compile-time proof the two agree; the runtime assertion is the guard
-    // against someone changing one signature and not the other.
     const provisioner: WorktreeProvisioner = new WorktreeManager();
     expect(typeof provisioner.needsWorktree).toBe("function");
     expect(typeof provisioner.ensureWorktree).toBe("function");

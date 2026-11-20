@@ -17,7 +17,6 @@ export default function HelpPage() {
   return (
     <main className="relative h-full w-full overflow-y-auto overflow-x-hidden bg-[#0a0a0a] text-white">
       <div className="mx-auto max-w-5xl px-6 py-12">
-        {/* Header */}
         <div className="mb-12">
           <Link
             className="mb-6 inline-flex items-center gap-2 text-sm text-zinc-400 transition-colors hover:text-white"
@@ -32,7 +31,6 @@ export default function HelpPage() {
           </p>
         </div>
 
-        {/* What is Chorus */}
         <section className="mb-16">
           <div className="mb-6 flex items-center gap-3">
             <BookOpen className="h-6 w-6 text-blue-400" />
@@ -61,11 +59,9 @@ export default function HelpPage() {
           </div>
         </section>
 
-        {/* Core Concepts */}
         <section className="mb-16">
           <h2 className="mb-6 font-semibold text-3xl">Core Concepts</h2>
           <div className="grid gap-6 md:grid-cols-2">
-            {/* Task Cards */}
             <div className="rounded-lg border border-zinc-800 bg-[#0f0f0f]/90 p-6">
               <div className="mb-3 flex items-start gap-3">
                 <div className="mt-1">
@@ -83,7 +79,6 @@ export default function HelpPage() {
               </div>
             </div>
 
-            {/* Kanban States */}
             <div className="rounded-lg border border-zinc-800 bg-[#0f0f0f]/90 p-6">
               <div className="mb-3 flex items-start gap-3">
                 <div className="mt-1">
@@ -114,7 +109,6 @@ export default function HelpPage() {
               </div>
             </div>
 
-            {/* Dependency Chains */}
             <div className="rounded-lg border border-zinc-800 bg-[#0f0f0f]/90 p-6">
               <div className="mb-3 flex items-start gap-3">
                 <div className="mt-1">
@@ -133,7 +127,6 @@ export default function HelpPage() {
               </div>
             </div>
 
-            {/* Real-time Sync */}
             <div className="rounded-lg border border-zinc-800 bg-[#0f0f0f]/90 p-6">
               <div className="mb-3 flex items-start gap-3">
                 <div className="mt-1">
@@ -152,7 +145,6 @@ export default function HelpPage() {
           </div>
         </section>
 
-        {/* How to Control Tasks */}
         <section className="mb-16">
           <div className="mb-6 flex items-center gap-3">
             <Command className="h-6 w-6 text-purple-400" />
@@ -160,7 +152,6 @@ export default function HelpPage() {
           </div>
           <div className="rounded-lg border border-zinc-800 bg-[#0f0f0f]/90 p-8">
             <div className="space-y-6">
-              {/* Approve */}
               <div className="flex items-start gap-4">
                 <div className="mt-1 rounded-lg bg-green-500/10 p-2">
                   <CheckSquare className="h-5 w-5 text-green-400" />
@@ -178,7 +169,6 @@ export default function HelpPage() {
                 </div>
               </div>
 
-              {/* Reject */}
               <div className="flex items-start gap-4">
                 <div className="mt-1 rounded-lg bg-red-500/10 p-2">
                   <XCircle className="h-5 w-5 text-red-400" />
@@ -193,7 +183,6 @@ export default function HelpPage() {
                 </div>
               </div>
 
-              {/* Abort */}
               <div className="flex items-start gap-4">
                 <div className="mt-1 rounded-lg bg-orange-500/10 p-2">
                   <Ban className="h-5 w-5 text-orange-400" />
@@ -208,7 +197,6 @@ export default function HelpPage() {
                 </div>
               </div>
 
-              {/* Redirect */}
               <div className="flex items-start gap-4">
                 <div className="mt-1 rounded-lg bg-blue-500/10 p-2">
                   <CornerUpRight className="h-5 w-5 text-blue-400" />
@@ -226,7 +214,6 @@ export default function HelpPage() {
           </div>
         </section>
 
-        {/* Technology Stack */}
         <section className="mb-16">
           <h2 className="mb-6 font-semibold text-3xl">Technology Stack</h2>
           <div className="grid gap-4 text-sm">
@@ -299,7 +286,6 @@ export default function HelpPage() {
           </div>
         </section>
 
-        {/* Key Principles */}
         <section className="mb-16">
           <h2 className="mb-6 font-semibold text-3xl">Key Principles</h2>
           <div className="space-y-4 rounded-lg border border-zinc-800 bg-[#0f0f0f]/90 p-8 text-zinc-300">
@@ -343,7 +329,6 @@ export default function HelpPage() {
           </div>
         </section>
 
-        {/* Getting Started */}
         <section className="mb-16">
           <h2 className="mb-6 font-semibold text-3xl">Getting Started</h2>
           <div className="space-y-4 text-zinc-300 leading-relaxed">
@@ -379,7 +364,6 @@ export default function HelpPage() {
           </div>
         </section>
 
-        {/* Footer */}
         <footer className="border-zinc-800 border-t pt-8">
           <div className="flex items-center justify-between text-sm text-zinc-500">
             <p>

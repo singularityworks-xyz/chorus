@@ -79,11 +79,6 @@ export class SessionWatchdog {
     });
   }
 
-  /**
-   * Records activity for a session that may have been recovered after Serve
-   * restarted. Unlike reset(), this also creates the missing timer on the
-   * first post-restart event.
-   */
   observeActivity(sessionId: string, info: WatchdogSessionInfo): void {
     if (this.#timers.has(sessionId)) {
       this.reset(sessionId);
@@ -150,9 +145,6 @@ export class SessionWatchdog {
       elapsedMs,
     });
 
-    // The board's own directory, not the bridge default: a worktree board's
-    // session does not exist in the directory serve was started in, so the abort
-    // would fail to reach it.
     this.#bridge
       .abortSession(sessionId, entry.info.directory)
       .catch((error) => {

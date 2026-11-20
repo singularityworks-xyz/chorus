@@ -3,7 +3,7 @@ import { Elysia, t } from "elysia";
 import { RepositoryRegistryError } from "../projects/repository-registry";
 import { WorktreeNotCleanError } from "../projects/worktree-manager";
 import type { BoardTaskService } from "../tasks/board-task-service";
-import { BoardLifecycleError } from "../tasks/board-task-service";
+import { BoardLifecycleError } from "../tasks/errors";
 import type { WorkspaceStore } from "../workspace/store";
 
 export function createWorkspaceRoutes(
@@ -42,11 +42,6 @@ export function createWorkspaceRoutes(
           };
         }
 
-        // The store's own commit hook publishes to the hub, so this route does
-        // not broadcast: there is exactly one emit path and it is not here.
-        // Returns null when the mutationId was already applied or the
-        // mutation addressed nothing — both no-ops the client already has the
-        // answer for.
         if (parsed.data.type === "board.remove" && boardTasks) {
           await boardTasks.removeBoard(parsed.data);
         } else {

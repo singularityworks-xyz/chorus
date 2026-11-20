@@ -29,7 +29,6 @@ const proxySchema = z.object({
   use_compression: z.boolean().optional(),
 });
 
-/** One exact host, HTTPS traffic and ACME challenges only. No general proxy. */
 export function authorizeProxy(input: unknown, host: TunnelHost): boolean {
   const parsed = proxySchema.safeParse(input);
   if (!parsed.success || host.revoked) {

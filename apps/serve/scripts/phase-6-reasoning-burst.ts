@@ -9,7 +9,6 @@ const BURST_EVENTS = BURST_TICKS * EVENTS_PER_TICK;
 const harness = await startPhase6Harness();
 
 try {
-  // Warm normalization, SQLite, auth, and WebSocket paths before sampling RSS.
   harness.appendReasoningBatch(200);
   await new Promise((done) => setTimeout(done, 500));
 
@@ -55,7 +54,6 @@ try {
   await harness.close();
 }
 
-// Bun can retain native socket handles after harness cleanup.
 await new Promise<void>((resolve, reject) =>
   process.stdout.write("", (error) => (error ? reject(error) : resolve()))
 );

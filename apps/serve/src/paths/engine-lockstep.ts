@@ -2,17 +2,6 @@ import { createLogger } from "@chorus/logger";
 
 const logger = createLogger({ env: "development" }, "SERVE");
 
-/**
- * Fails boot when the SDK and the engine disagree (decision #5).
- *
- * The adapter re-exports SDK `Event`/`SessionStatus` types, so a mismatch makes
- * the type layer describe an engine that is not the one answering. Nothing
- * throws at runtime; the workspace simply stays empty while the agent works,
- * which is far harder to diagnose than a refusal to start.
- *
- * An unknown engine version is not fatal: a remote engine may not report one, and
- * refusing to boot would be worse than the risk.
- */
 export function assertEngineLockstep(
   expected: string,
   observed: string | null | undefined

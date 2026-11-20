@@ -236,7 +236,6 @@ describe("stripTerminalRunDetails", () => {
   });
 
   test("returns the same reference when nothing is eligible", () => {
-    // Lets the store skip a pointless snapshot write.
     const snapshot = snapshotWith(EMPTY);
     expect(stripTerminalRunDetails(snapshot, T0 - 30 * DAY)).toBe(snapshot);
   });
@@ -275,7 +274,6 @@ describe("stripTerminalRunDetails", () => {
       ],
     });
 
-    // Treated as started at 0, i.e. older than any cutoff, so it is compacted.
     expect(
       stripTerminalRunDetails(snapshot, T0 - 30 * DAY).boards[0]?.columns
         .done[0]?.run?.steps

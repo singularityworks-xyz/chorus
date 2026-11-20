@@ -5,26 +5,9 @@ import { join } from "node:path";
 import type { NormalizedAgentEvent } from "@chorus/oc-adapter";
 import { normalizeEvent, resetMessageTracking } from "@chorus/oc-adapter";
 
-/**
- * The raw event shape the normalizer accepts.
- *
- * Taken from the normalizer's own signature rather than importing the SDK: serve
- * has no dependency on `@opencode-ai/sdk` by design, and the adapter is the only
- * boundary allowed to know the external shape.
- */
 type OpencodeEvent = Parameters<typeof normalizeEvent>[0];
 
 import { WorkspaceStore } from "../../workspace/store";
-
-/**
- * An engine event burst, replayed (plan P6 verify step 6).
- *
- * Unit tests normalize one event at a time and the store tests hand-build the
- * state they need. Neither covers the shape that actually breaks: a real run's
- * events arriving in sequence — parent message, then a burst of part updates and
- * deltas — and being folded onto one board. Ordering assumptions are documented in
- * both files and neither test would catch one of them being wrong.
- */
 
 const SESSION = "sess-burst";
 const MESSAGE = "msg-1";
@@ -41,9 +24,6 @@ function partUpdated(text: string, partId: string): OpencodeEvent {
   return {
     id: `evt-${partId}`,
     properties: {
-      // `part.messageID` is what the normalizer uses to look the part up against
-      // the roles it recorded from `message.updated`; omitting it makes the part
-      // unclassifiable and it is dropped without complaint.
       part: {
         id: partId,
         messageID: MESSAGE,
@@ -73,14 +53,6 @@ function partDelta(delta: string, partId: string): OpencodeEvent {
   } as OpencodeEvent;
 }
 
-/**
- * The sequence a run produces for one assistant response.
- *
- * `part.updated` carries the text accumulated so far and each `part.delta` the
- * increment since — so the update is the prefix the deltas extend. Repeating the
- * final text in the update *and* appending the deltas would double-count, which
- * is a fixture bug rather than engine behaviour.
- */
 function burst(): OpencodeEvent[] {
   return [
     messageUpdated("user"),
@@ -151,27 +123,12 @@ async function seedStoreWithCard(prefix: string) {
   return { boardId, dir, store };
 }
 
-/**
- * The streamed text a card has accumulated.
- *
- * Reads the run's steps rather than looking one up by id: the projector prefixes
- * step ids with the message id, so asserting on a raw part id would be asserting
- * that scheme instead of the content.
- */
 function streamedText(
   card: { run?: { steps: { content?: string }[] } } | undefined
 ): string {
   return (card?.run?.steps ?? []).map((step) => step.content ?? "").join("");
 }
 
-/**
- * Finds a card wherever the run has moved it.
- *
- * A run does not leave its card in one column: `card.started` moves it to
- * `in_progress` and the terminal transition can move it again, so a fixture that
- * assumes a column is asserting the lifecycle rather than the event handling
- * under test.
- */
 function findCard(store: WorkspaceStore, boardId: string) {
   const board = store.getBoard(boardId);
   if (!board) {
@@ -194,10 +151,6 @@ describe("engine event burst replay", () => {
     const { boardId, dir, store } = await seedStoreWithCard("chorus-burst-");
 
     try {
-      // `message.updated` carries no board meaning — it only records the
-      // message's role for the normalizer — so it legitimately commits nothing.
-      // Every other event in a run must reach the store; a silently dropped one is
-      // a card that never progresses, which is the failure this phase was about.
       const BOARD_MEANINGFUL = new Set([
         "message.part.updated",
         "message.part.delta",
@@ -217,8 +170,6 @@ describe("engine event burst replay", () => {
       const card = findCard(store, boardId);
       expect(card?.id).toBe("task-1");
 
-      // Both deltas landed on the same part rather than fragmenting into two
-      // steps, and the part's own text prefixed them without being duplicated.
       expect(streamedText(card)).toBe("Working on it");
 
       await store.close();
@@ -228,9 +179,6 @@ describe("engine event burst replay", () => {
   });
 
   test("an event dropped before its parent is not receipted and can be replayed", async () => {
-    // The normalizer needs the parent's role before it can attribute a part.
-    // Since no workspace event can be produced yet, the store must leave the
-    // source ID unreceipted so a later reconciliation can retry it.
     resetMessageTracking();
     const { boardId, dir, store } = await seedStoreWithCard(
       "chorus-burst-order-"
@@ -243,17 +191,12 @@ describe("engine event burst replay", () => {
       const textPart = events[2] as OpencodeEvent;
       const delta = events[3] as OpencodeEvent;
 
-      // The delta arrives before any parent has been recorded.
       await store.applyAgentEvent(
         normalizeEvent(delta) as NormalizedAgentEvent
       );
 
-      // Nothing was attributed: the normalizer refused to guess whose text a
-      // part with an unrecorded parent belongs to.
       expect(findCard(store, boardId)?.run?.steps ?? []).toHaveLength(0);
 
-      // Parents arrive, then the part, then the same increment is normalized
-      // again with the missing context available.
       for (const raw of [userMessage, assistantMessage, textPart, delta]) {
         await store.applyAgentEvent(
           normalizeEvent(raw as OpencodeEvent) as NormalizedAgentEvent
@@ -275,10 +218,6 @@ describe("engine event burst replay", () => {
     );
 
     try {
-      // The non-terminal events only. A terminal `session.idle` releases the
-      // board's current task, after which late agent events are dropped by the
-      // store rather than applied — so replay has to be tested while the card is
-      // still the live one.
       const events = burst().slice(0, 4);
       for (const raw of events) {
         await store.applyAgentEvent(
@@ -289,7 +228,6 @@ describe("engine event burst replay", () => {
       const once = findCard(store, boardId);
       expect(streamedText(once)).toBe("Working on it");
 
-      // Replay just the deltas, as an unfiltered resync would.
       const deltas = events.filter((raw) => raw.type === "message.part.delta");
       for (const raw of deltas) {
         await store.applyAgentEvent(
@@ -298,8 +236,7 @@ describe("engine event burst replay", () => {
       }
 
       const twice = findCard(store, boardId);
-      // The repeated source IDs are already durable, so replay does not append
-      // the increment twice.
+
       expect(streamedText(twice)).toBe("Working on it");
 
       await store.close();

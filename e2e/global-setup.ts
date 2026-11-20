@@ -13,11 +13,7 @@ import {
 } from "./serve-env";
 import { startEngine, stop } from "./serve-process";
 
-/** Prepare the repository and engine shared by the isolated workspaces. */
 export default async function globalSetup(): Promise<void> {
-  // A leftover serve on the port would be reused and silently inherit a stale
-  // event log, which is exactly the kind of cross-run state that makes a sync
-  // suite lie about resume.
   await stop(SERVE_PORT, SERVE_PID_FILE);
 
   rmSync(SERVE_DATA_DIR, { force: true, recursive: true });
@@ -25,8 +21,6 @@ export default async function globalSetup(): Promise<void> {
 
   seedFixtureRepo();
 
-  // The engine first: serve adopts a running one rather than spawning its own,
-  // and the agent specs need it reachable before the browser does.
   await stop(OPENCODE_PORT, ENGINE_PID_FILE, "engine");
   await startEngine({
     cwd: repoRoot,
@@ -36,12 +30,6 @@ export default async function globalSetup(): Promise<void> {
   });
 }
 
-/**
- * Creates the throwaway repository the agent specs bind boards to.
- *
- * Idempotent: the data dir is wiped each run but this path is not, so an existing
- * fixture is reused rather than re-initialised.
- */
 function seedFixtureRepo(): void {
   if (existsSync(join(E2E_REPO_DIR, ".git"))) {
     return;

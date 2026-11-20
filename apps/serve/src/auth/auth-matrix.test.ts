@@ -4,29 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CONTENT_SECURITY_POLICY } from "../security-headers";
 
-/**
- * Phase 4 auth matrix against a real server process (plan P4 integration list).
- *
- * Everything here is end-to-end on purpose. Each of these gates has a way to
- * look implemented while protecting nothing:
- *
- * - A `resolve` hook that returns a raw `Response` is silently discarded by
- *   Elysia and the handler still runs, so an unauthenticated `/workspace` would
- *   answer 200 and a code-only review would call it guarded.
- * - A hook that arrives via `.use()` never reaches the nested route plugins, and
- *   routes registered before it are never gated. Also silent.
- * - A cookie signed with a missing version prefix verifies as malformed, so a
- *   correct login looks like a rejected one.
- * - `onBeforeHandle` runs after query/body validation, so a route with a
- *   required query answers 422 before the guard runs.
- * - `mapResponse` does not propagate into `.use()`-ed route plugins, so an
- *   app-wide header policy applied through it leaves every plugin-mounted
- *   endpoint bare.
- *
- * The guard was wrong in four of those five ways during this phase and each one
- * survived a passing typecheck. Only asserting against a live server catches it.
- */
-
 const SERVE_ENTRY = join(import.meta.dir, "..", "index.ts");
 
 const HEX_32 = /^[0-9a-f]{32}$/;
@@ -34,12 +11,10 @@ const COOKIE_PAIR = /(?:__Host-)?chorus_session=[^;]+/;
 const DEVICE_COOKIE_PAIR = /(?:__Host-)?chorus_device=[^;]+/;
 const COOKIE_VALUE = /(?:__Host-)?chorus_session=([^;]+)/;
 
-/** POSIX mode mask: keeps permission bits, drops the file-type bits. */
 const MODE_MASK = 0o777;
 
 const TOKEN = "f".repeat(64);
 
-/** Routes the plan requires to reject an unauthenticated caller. */
 const GATED_ROUTES = [
   { label: "GET /auth/devices", method: "GET", path: "/auth/devices" },
   { label: "GET /hosting/remote", method: "GET", path: "/hosting/remote" },
@@ -197,31 +172,18 @@ async function startServer(): Promise<ServerHandle> {
   throw new Error("serve did not become healthy in time");
 }
 
-/**
- * Sends the cookie explicitly rather than via a cookie jar.
- *
- * The session cookie is `Secure`, so curl (like a browser) refuses to attach it
- * over plain HTTP. That is correct behaviour being exercised, not a bug — and
- * the server's verification path still has to be proven, so the header is set by
- * hand. A real deployment terminates TLS at Caddy in Phase 8.
- */
 function authed(server: ServerHandle, init: RequestInit = {}): RequestInit {
   const headers = new Headers(init.headers);
   headers.set("cookie", server.cookie);
   return { ...init, headers };
 }
 
-/**
- * One server for the whole suite: booting serve per test would add ~10 s each
- * and the matrix is about the guards, not about boot.
- */
 const server = await startServer();
 
 describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
   test("the server is up and healthy without a credential", async () => {
     const res = await fetch(`${server.base}/health`);
 
-    // `GET /health` is the one route that must stay open (spec §6.1).
     expect(res.status).toBe(200);
     expect((await res.json()) as { status: string }).toMatchObject({
       status: "ok",
@@ -236,8 +198,6 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
         method: route.method,
       });
 
-      // Not 403, not 404, and above all not 200/422: a 422 here would mean
-      // validation ran before the guard and the route schema leaked.
       expect(res.status).toBe(401);
       expect((await res.json()) as { code: string }).toMatchObject({
         code: "unauthorized",
@@ -256,9 +216,6 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
   test("the login screen is reachable without a session", async () => {
     const res = await fetch(`${server.base}/`);
 
-    // The static frontend serves the login screen, so it must not be gated. The
-    // exact status depends on whether `apps/web/dist` exists, so what matters is
-    // that it is not 401.
     expect(res.status).not.toBe(401);
   });
 
@@ -275,7 +232,7 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
     expect(setCookie).toContain("HttpOnly");
     expect(setCookie).toContain("SameSite=Strict");
     expect(setCookie).toContain("Max-Age=2592000");
-    // Production must mark it Secure; a plain-HTTP dev server must not.
+
     expect(setCookie).toContain("Secure");
   });
 
@@ -344,8 +301,6 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
   });
 
   test("an unregistered directory is refused even when authenticated", async () => {
-    // The git-backed routes take a client-supplied `directory`. Before this
-    // phase nothing constrained it, so a caller could aim git at any path.
     for (const path of [
       "/snapshots/diff?directory=%2Fetc&fromHash=HEAD",
       "/git/status?directory=%2Fetc",
@@ -353,7 +308,6 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
     ]) {
       const res = await fetch(`${server.base}${path}`, authed(server));
 
-      // 403, not 500: a rejected request is a client error and should say so.
       expect(res.status).toBe(403);
     }
   });
@@ -361,7 +315,6 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
   test("a traversal attempt against the static root is refused", async () => {
     const res = await fetch(`${server.base}/%2e%2e%2f%2e%2e%2fetc%2fpasswd`);
 
-    // The SPA catch-all would otherwise read the file and return its contents.
     expect([403, 404]).toContain(res.status);
     expect(await res.text()).not.toContain("root:");
   });
@@ -382,14 +335,10 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
 
     expect(statSync(db).isFile()).toBe(true);
     if (process.platform !== "win32") {
-      // Linux CI enforces the POSIX database permission contract.
       // biome-ignore lint/suspicious/noBitwiseOperators: reading POSIX mode bits
       expect(statSync(db).mode & MODE_MASK).toBe(0o600);
     }
 
-    // The production boot used CHORUS_TOKEN from the environment and so never
-    // wrote a token file; laptop mode does, and that path is asserted in
-    // token.test.ts. Its absence here is the correct outcome for production.
     expect(() => statSync(tokenFile)).toThrow();
   });
 
@@ -403,7 +352,6 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
       authed(server)
     );
 
-    // Whatever the status, the payload must not have executed.
     expect(res.status).toBe(403);
     expect(() => statSync(marker)).toThrow();
   });
@@ -411,8 +359,6 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
   test("an unauthenticated WebSocket upgrade is closed with 4401", async () => {
     const code = await wsCloseCode(`${server.base}/ws`);
 
-    // A browser cannot read a 401 from a failed handshake, so the close code is
-    // the signal the client contract depends on.
     expect(code).toBe(4401);
   });
 
@@ -426,13 +372,9 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
     const { ticket } = (await ticketRes.json()) as { ticket: string };
     expect(ticket).toMatch(HEX_32);
 
-    // First use is accepted: the socket opens and receives the hub's `ready`
-    // frame, which is only sent to a registered client.
     const first = await wsFrames(`${server.base}/ws?ticket=${ticket}`);
     expect(first).toBe("open");
 
-    // Replay is refused. A replayable ticket would be a bearer credential with
-    // no bound beyond its TTL.
     expect(await wsCloseCode(`${server.base}/ws?ticket=${ticket}`)).toBe(4401);
   });
 
@@ -477,15 +419,12 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
   });
 
   test("the cookie also authenticates the WebSocket upgrade", async () => {
-    // Browsers attach the cookie to a same-origin upgrade on their own, so this
-    // is the primary path and the ticket is only the proxy fallback.
     expect(await wsFrames(`${server.base}/ws`, { cookie: server.cookie })).toBe(
       "open"
     );
   });
 
   test("the brute-force guard trips after ten failed logins", async () => {
-    // Keyed on the peer address, so this is the loopback source.
     const statuses: number[] = [];
 
     for (let attempt = 0; attempt < 12; attempt += 1) {
@@ -500,8 +439,6 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
     expect(statuses.slice(0, 10).every((code) => code === 401)).toBe(true);
     expect(statuses.at(-1)).toBe(429);
 
-    // A correct token is refused too while the window is open — otherwise the
-    // guard would not slow a brute force that got lucky at the end.
     const good = await fetch(`${server.base}/auth/login`, {
       body: JSON.stringify({ token: TOKEN }),
       headers: { "content-type": "application/json" },
@@ -517,7 +454,6 @@ describe("Phase 4 auth matrix (plan P4 integration tests)", () => {
   });
 });
 
-/** Resolves to the close code, or `"open"` if the socket stays connected. */
 // biome-ignore lint/suspicious/useAwait: returns a Promise it awaits internally
 async function wsCloseCode(
   url: string,
@@ -541,7 +477,6 @@ async function wsCloseCode(
   });
 }
 
-/** Resolves `"open"` once the hub's first frame arrives, or the close code. */
 // biome-ignore lint/suspicious/useAwait: returns the promise it constructs
 async function wsFrames(
   url: string,

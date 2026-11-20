@@ -33,27 +33,9 @@ function resolveOpenCodeBinary(): string {
   return join(dirname(manifestPath), binary);
 }
 
-/**
- * Owns the serve process so a test can actually restart it.
- *
- * Playwright's `webServer` supervises its own process and offers no way to stop
- * and start it from inside a spec, but "the server went away mid-session and the
- * client came back" is a real failure mode with real consequences: the socket
- * drops, backoff has to kick in, and the resume cursor has to be honoured
- * against a process that has no memory of the connection. Simulating that with
- * `context.setOffline` only exercises the client half -- it never proves the
- * server accepted the replay. So serve is spawned here instead, and its pid is
- * published to a file the specs can read.
- *
- * `stop` is exported for global teardown. Nothing else should ever kill it: a
- * leftover serve on the port would be reused by the next run and silently
- * inherit a stale event log, which is exactly the kind of cross-run state that
- * makes a sync suite lie.
- */
-
 export interface ServeProcessOptions {
   dataDir: string;
-  /** Extra env for the child; used to point serve at the shared engine. */
+
   env?: Record<string, string>;
   logFile: string;
   pidFile: string;
@@ -62,7 +44,6 @@ export interface ServeProcessOptions {
   token: string;
 }
 
-/** Writes a pid file so specs in a worker can find the process to restart. */
 export function recordPid(pidFile: string, pid: number): void {
   writeFileSync(pidFile, String(pid), "utf8");
 }
@@ -76,7 +57,6 @@ export function readPid(pidFile: string): number | null {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-/** Spawns serve and resolves once `/health` answers, or rejects on timeout. */
 export async function start(options: ServeProcessOptions): Promise<number> {
   const child = spawn("bun", ["run", "apps/serve/src/index.ts"], {
     cwd: options.repoRoot,
@@ -84,28 +64,19 @@ export async function start(options: ServeProcessOptions): Promise<number> {
       ...process.env,
       CHORUS_TOKEN: options.token,
       DATA_DIR: options.dataDir,
-      // The browser suite runs on insecure loopback HTTP/WS. A Secure cookie
-      // can authenticate the HTTP proxy on localhost but is not sent on the
-      // `ws://` upgrade; production Secure-cookie behavior is covered by the
-      // auth tests, while this harness exercises the real cookie flow over its
-      // deliberately local, non-TLS transport.
+
       NODE_ENV: "development",
       OPENCODE_AUTO_START: "false",
       PORT: String(options.port),
-      // Spread last so a caller can point serve at an engine it did not spawn.
+
       ...options.env,
     },
-    // Serve is restarted from inside a Playwright worker. Keep it independent
-    // of that worker so a test failure cannot take the server down before later
-    // tests report their own failures. `windowsHide` keeps the detached process
-    // from opening a visible console on Windows.
+
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
 
-  // Without a consumer the pipe fills and the child blocks on write, which
-  // shows up as a health check that times out for no visible reason.
   const log = createWriteStream(options.logFile, { flags: "a" });
   child.stdout?.pipe(log, { end: false });
   child.stderr?.pipe(log, { end: false });
@@ -119,19 +90,10 @@ export async function start(options: ServeProcessOptions): Promise<number> {
   child.unref();
   recordPid(options.pidFile, child.pid ?? -1);
 
-  // Serve waits for the engine's event stream to attach before opening its
-  // HTTP listener. On a cold Windows engine this handshake can take longer
-  // than the browser server's usual 30-second readiness window.
   await waitForChildHealth(child, options.port, 120_000, "serve");
   return child.pid ?? -1;
 }
 
-/**
- * Stops serve and waits for the port to be released.
- *
- * Resolves even if the process is already gone: a restart test may have been
- * retried after a partial run, and "it was not running" is not a failure.
- */
 export async function stop(
   port: number,
   pidFile: string,
@@ -150,19 +112,6 @@ export async function stop(
   await waitForPortFree(port, 15_000, kind);
 }
 
-/**
- * Resolves when the process on this port is genuinely the one we want.
- *
- * `kind` decides the endpoint, because the two differ in a way that matters:
- * serve answers `/health` with JSON, while `opencode serve` returns 200 with an
- * HTML shell for *any* unknown path. Probing the engine on `/health` therefore
- * accepted an HTML fallback as readiness, so the engine was declared up before it
- * could serve anything. `/global/health` is the engine's one real endpoint.
- *
- * Polls rather than waiting on the child's exit, because a process that boots and
- * immediately fails has no output the parent can read more clearly than "the port
- * never opened".
- */
 async function waitForHealth(
   port: number,
   timeoutMs: number,
@@ -213,8 +162,6 @@ async function healthOnce(
     }
 
     if (kind === "engine") {
-      // The engine's health endpoint is the only path that is not the HTML
-      // fallback, so the body is what distinguishes a live engine from a squatter.
       const body: unknown = await response.json();
       return (
         typeof body === "object" &&
@@ -235,17 +182,6 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-/**
- * Starts the opencode engine and resolves once it reports healthy.
- *
- * Not managed by Playwright's `webServer`: spawning `opencode serve` from there
- * proved unreliable — the child would intermittently die while the readiness wait
- * ran to its full timeout, with nothing in the output to say why. Starting it
- * here means the wait, the retries and the log all belong to us.
- *
- * `/global/health` is the readiness target because `opencode serve` answers 200
- * with an HTML shell for any unknown path.
- */
 export async function startEngine(options: {
   cwd: string;
   logFile: string;

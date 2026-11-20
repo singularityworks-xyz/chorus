@@ -55,7 +55,6 @@ export async function captureReviewObjects(
   });
 }
 
-/** Creates an inactive bare store. Activation must install it for the remapped checkout. */
 export async function stageReviewObjects(
   input: ReviewCheckpoint,
   content: RepositoryContent,

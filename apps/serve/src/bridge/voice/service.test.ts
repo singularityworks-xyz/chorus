@@ -56,7 +56,6 @@ describe.skipIf(!RUN_REAL_API)("Groq Voice Service", () => {
     test("transcribes wav audio", async () => {
       const service = new VoiceService();
 
-      // First generate audio to transcribe
       const ttsResult = await service.generateSpeech({
         type: "task_summary",
         text: "This is a test of speech to text transcription.",

@@ -6,7 +6,7 @@ import {
   EngineRegistry,
   type ManagedEngine,
 } from "./engine-registry";
-import { EngineUnavailableError } from "./process-manager";
+import { EngineUnavailableError } from "./process-manager/errors";
 
 const temporaryDirectories: string[] = [];
 const fixtureRoot = resolve(import.meta.dir, "../../../../");

@@ -12,7 +12,6 @@ import {
 
 const HEX_64 = /^[0-9a-f]{64}$/;
 
-/** File-mode mask: keeps the permission bits and drops the file-type bits. */
 const MODE_MASK = 0o777;
 
 function expectPrivateFile(path: string): void {
@@ -20,7 +19,7 @@ function expectPrivateFile(path: string): void {
   if (process.platform === "win32") {
     return;
   }
-  // Windows does not expose POSIX permission bits; Linux CI enforces 0600.
+
   // biome-ignore lint/suspicious/noBitwiseOperators: reading POSIX mode bits
   expect(statSync(path).mode & MODE_MASK).toBe(0o600);
 }
@@ -33,8 +32,6 @@ describe("CHORUS_TOKEN lifecycle (spec §6.1, decision #4)", () => {
   test("generates 64 hex chars — 256 bits, not a UUID", () => {
     const token = generateToken();
 
-    // 32 bytes hex-encoded. A UUID v4 would be 36 chars with dashes; 122 bits is
-    // the entropy the plan explicitly rejects for this value.
     expect(token).toHaveLength(64);
     expect(token).toMatch(HEX_64);
   });
@@ -63,8 +60,6 @@ describe("CHORUS_TOKEN lifecycle (spec §6.1, decision #4)", () => {
   test("production without CHORUS_TOKEN refuses to boot", async () => {
     const dir = tempDir();
     try {
-      // Auto-generating here would hand an operator a credential they cannot
-      // find, on a machine that is about to be exposed to the internet.
       await expect(
         resolveToken({ dataDir: dir, isProduction: true })
       ).rejects.toBeInstanceOf(MissingTokenError);
@@ -108,7 +103,7 @@ describe("CHORUS_TOKEN lifecycle (spec §6.1, decision #4)", () => {
 
       expect(resolved.source).toBe("environment");
       expect(resolved.token).toBe("operator-chosen-token");
-      // An operator-supplied token is never written to disk.
+
       expect(() => statSync(join(dir, TOKEN_FILE_NAME))).toThrow();
     } finally {
       rmSync(dir, { force: true, recursive: true });
@@ -124,7 +119,6 @@ describe("CHORUS_TOKEN lifecycle (spec §6.1, decision #4)", () => {
       expect(first.token).toHaveLength(64);
       expectPrivateFile(first.tokenPath);
 
-      // A restart must not orphan the token the operator already copied out.
       const second = await resolveToken({ dataDir: dir, isProduction: false });
       expect(second.source).toBe("persisted");
       expect(second.token).toBe(first.token);
@@ -146,7 +140,7 @@ describe("CHORUS_TOKEN lifecycle (spec §6.1, decision #4)", () => {
 
       expect(resolved.source).toBe("environment");
       expect(resolved.token).toBe("from-env");
-      // The on-disk token is left alone rather than overwritten.
+
       expect(readFileSync(join(dir, TOKEN_FILE_NAME), "utf8").trim()).toBe(
         "from-disk"
       );

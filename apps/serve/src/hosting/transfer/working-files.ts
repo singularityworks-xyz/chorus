@@ -104,7 +104,7 @@ export async function captureFiles(
       throw new RepositoryTransferError("checkpoint_too_large");
     }
     // Windows Git tracks executable mode in its index; POSIX also captures an
-    // unstaged chmod without depending on the destination's platform defaults.
+
     files.push({
       path,
       mode: workingFileMode(file.mode, modes.get(path)),

@@ -4,18 +4,6 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { safeNotificationReturnTo } from "@/features/notifications/browser";
 
-/**
- * Device pairing and operator-token entry.
- *
- * The raw token is posted once and never stored client-side: the server answers
- * with an HttpOnly session cookie (spec §6.1), so the browser holds a credential
- * JavaScript cannot read. Local first visits sign in through Serve's
- * loopback-only bootstrap and do not land here.
- *
- * A failed attempt is reported without distinguishing "wrong token" from
- * "expired" — the same collapse the server makes, so the form cannot be used to
- * probe which it hit.
- */
 export default function LoginPage() {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
@@ -39,7 +27,6 @@ export default function LoginPage() {
       });
 
       if (response.ok) {
-        // `replace` so Back does not return to a route that will 401 again.
         const requested = new URLSearchParams(window.location.search).get(
           "returnTo"
         );

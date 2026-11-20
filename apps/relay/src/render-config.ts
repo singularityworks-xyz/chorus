@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { loadRelayConfig } from "./config";
-import { renderRelayDeployment } from "./deployment";
+import { loadRelayConfig } from "./config/relay-config";
+import { renderRelayDeployment } from "./deployment/render";
 
 const output = process.argv[2];
 if (!output) {

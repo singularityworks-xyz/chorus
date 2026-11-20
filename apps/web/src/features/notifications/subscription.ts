@@ -99,8 +99,6 @@ export async function removeServerSubscription(
 export function withSubscriptionLock<T>(
   operation: () => Promise<T>
 ): Promise<T> {
-  // Web Locks serialize resubscription across Chorus tabs. Older browsers still
-  // get the same-tab guard from PushManager itself and can continue using push.
   if ("locks" in navigator) {
     return navigator.locks.request(SUBSCRIPTION_LOCK, operation);
   }

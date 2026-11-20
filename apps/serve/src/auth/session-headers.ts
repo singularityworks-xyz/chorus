@@ -1,7 +1,6 @@
 import { buildDeviceCookieHeader, issueDeviceCookie } from "./device";
 import { buildSessionCookieHeader, type IssuedSession } from "./session";
 
-/** A registered session and its signed device identity are issued together. */
 export async function sessionHeaders(
   session: IssuedSession,
   token: string,

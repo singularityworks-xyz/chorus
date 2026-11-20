@@ -1,208 +1,25 @@
-import { describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { WorkspaceStore } from "../workspace/store";
-import { createWsHandler } from "./handler";
-import { WorkspaceHub } from "./hub";
-import type { WsMessage } from "./types";
+import { expect, test } from "bun:test";
+import { Elysia } from "elysia";
+import { wsClientMessageSchema } from "./handler";
 
-function makeHub() {
-  const dir = mkdtempSync(join(tmpdir(), "chorus-ws-handler-"));
-  const store = new WorkspaceStore(dir);
-  const hub = new WorkspaceHub(store);
-  return { dir, hub, store };
-}
-
-function makeMockBridge() {
-  return {
-    adapter: {
-      sessions: {
-        fork: mock(async () => ({ id: "sess-forked" })),
-      },
-    },
-    createSession: mock(async () => ({ id: "sess-123" })),
-    promptSession: mock(async () => undefined),
-    abortSession: mock(async () => true),
-    replyPermission: mock(async () => true),
-    getStatus: mock(() => ({
-      connected: true,
-      opencodeUrl: "http://localhost:4096",
-      activeSessions: 2,
-      uptime: 1000,
-    })),
+test("websocket message validation preserves client capabilities", async () => {
+  const message = {
+    capabilities: ["card.reordered"],
+    since: 0,
+    type: "hello",
   };
-}
-
-function makeMockBoardTasks() {
-  return {
-    queuePrompt: mock(async () => ({
-      boardId: "board-1",
-      sessionId: "sess-123",
-      taskId: "task-123",
-      createdSession: true,
-      accepted: true,
-      timestamp: 123,
-    })),
-    abortTask: mock(async (boardId: string, taskId: string) => ({
-      boardId,
-      sessionId: "sess-123",
-      status: "accepted" as const,
-      taskId,
-      timestamp: 123,
-    })),
-  };
-}
-
-function emptyTicketStore() {
-  const rows = new Map<string, string>();
-  return {
-    deleteMeta: (key: string) => {
-      rows.delete(key);
-    },
-    entriesWithPrefix: (prefix: string) =>
-      [...rows].filter(([key]) => key.startsWith(prefix)),
-    getMeta: (key: string) => rows.get(key) ?? null,
-    setMeta: (key: string, value: string) => {
-      rows.set(key, value);
-    },
-  };
-}
-
-describe("WebSocket handler", () => {
-  test("creates WS handler with /ws endpoint", async () => {
-    const { dir, hub, store } = makeHub();
-    await store.load();
-    const handler = createWsHandler({
-      boardTasks: makeMockBoardTasks() as never,
-      bridge: makeMockBridge() as never,
-      hub,
-      ticketOptions: { now: Date.now, store: emptyTicketStore() },
-      token: "test-token",
-      workspaceStore: store,
-    });
-
-    expect(handler).toBeDefined();
-    hub.close();
-    await store.close();
-    rmSync(dir, { force: true, recursive: true });
+  const app = new Elysia().post("/message", ({ body }) => body, {
+    body: wsClientMessageSchema,
   });
 
-  test("the handler starts with no connected clients", async () => {
-    const { dir, hub, store } = makeHub();
-    await store.load();
-    createWsHandler({
-      boardTasks: makeMockBoardTasks() as never,
-      bridge: makeMockBridge() as never,
-      hub,
-      ticketOptions: { now: Date.now, store: emptyTicketStore() },
-      token: "test-token",
-      workspaceStore: store,
-    });
+  const response = await app.handle(
+    new Request("http://localhost/message", {
+      body: JSON.stringify(message),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    })
+  );
 
-    expect(hub.clientCount()).toBe(0);
-    hub.close();
-    await store.close();
-    rmSync(dir, { force: true, recursive: true });
-  });
-});
-
-describe("WS message type definitions", () => {
-  test("task.queue message has correct shape", () => {
-    const msg: WsMessage = {
-      type: "task.queue",
-      payload: {
-        boardId: "board-1",
-        directory: "/tmp/repo",
-        text: "build something",
-        model: { providerID: "anthropic", modelID: "claude" },
-        agent: "build",
-        reviewMode: "auto",
-      },
-    };
-
-    expect(msg.type).toBe("task.queue");
-    expect(msg.payload.boardId).toBe("board-1");
-    expect(msg.payload.text).toBe("build something");
-  });
-
-  test("task.approve message has correct shape", () => {
-    const msg: WsMessage = {
-      type: "task.approve",
-      payload: {
-        requestID: "perm-1",
-        sessionID: "sess-1",
-        message: "approved",
-      },
-    };
-
-    expect(msg.type).toBe("task.approve");
-    expect(msg.payload.requestID).toBe("perm-1");
-  });
-
-  test("task.reject message has correct shape", () => {
-    const msg: WsMessage = {
-      type: "task.reject",
-      payload: {
-        requestID: "perm-2",
-        sessionID: "sess-1",
-      },
-    };
-
-    expect(msg.type).toBe("task.reject");
-  });
-
-  test("task.abort message has correct shape", () => {
-    const msg: WsMessage = {
-      type: "task.abort",
-      payload: { sessionID: "sess-1" },
-    };
-
-    expect(msg.type).toBe("task.abort");
-    expect(msg.payload.sessionID).toBe("sess-1");
-  });
-
-  test("task.redirect message supports soft and hard modes", () => {
-    const softMsg: WsMessage = {
-      type: "task.redirect",
-      payload: {
-        sessionID: "sess-1",
-        text: "change approach",
-        mode: "soft",
-      },
-    };
-
-    const hardMsg: WsMessage = {
-      type: "task.redirect",
-      payload: {
-        sessionID: "sess-1",
-        text: "start fresh",
-        mode: "hard",
-      },
-    };
-
-    expect(softMsg.payload.mode).toBe("soft");
-    expect(hardMsg.payload.mode).toBe("hard");
-  });
-
-  test("viewport.sync message has correct shape", () => {
-    const msg: WsMessage = {
-      type: "viewport.sync",
-      payload: {
-        projectId: "proj-1",
-        viewport: { x: 10, y: 20, zoom: 1.5 },
-      },
-    };
-
-    expect(msg.type).toBe("viewport.sync");
-    expect(msg.payload.viewport.x).toBe(10);
-  });
-
-  test("presence.ping message has no payload", () => {
-    const msg: WsMessage = {
-      type: "presence.ping",
-    };
-
-    expect(msg.type).toBe("presence.ping");
-  });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual(message);
 });

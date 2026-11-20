@@ -2,10 +2,8 @@ import { realpath } from "node:fs/promises";
 import { createServer } from "node:net";
 import { createLogger } from "@chorus/logger";
 import { OpenCodeAdapter } from "@chorus/oc-adapter";
-import {
-  EngineUnavailableError,
-  OpenCodeProcessManager,
-} from "./process-manager";
+import { EngineUnavailableError } from "./process-manager/errors";
+import { OpenCodeProcessManager } from "./process-manager/manager";
 
 const DEFAULT_ENGINE_LIMIT = 8;
 const PORT_ALLOCATION_ATTEMPTS = 3;
@@ -63,11 +61,6 @@ export interface EngineRegistryOptions {
   username?: string;
 }
 
-/**
- * Lazily owns one verified local engine for each canonical worktree. Allocation
- * is single-flight by directory and serialized across directories, so two board
- * prompts cannot share a port or exceed the configured process budget.
- */
 export class EngineRegistry {
   readonly #expectedVersion: string;
   readonly #maxEngines: number;
@@ -344,7 +337,7 @@ export class EngineRegistry {
           lastUsedAt: this.#now(),
           manager,
           // Protect a newly allocated engine until its event stream is either
-          // established or explicitly abandoned by the bridge.
+
           protectedUntil: this.#now() + 30_000,
           reconciled: false,
         };

@@ -1,4 +1,4 @@
-import { DiffEditor } from "@monaco-editor/react";
+import { DiffEditor, type DiffOnMount } from "@monaco-editor/react";
 import { useCallback, useRef } from "react";
 
 const INLINE_DIFF_THEME = {
@@ -16,7 +16,7 @@ const INLINE_DIFF_THEME = {
     "diffEditorOverview.insertedForeground": "#2ea04388",
     "diffEditorOverview.removedForeground": "#f8514988",
   },
-};
+} satisfies Parameters<Parameters<DiffOnMount>[1]["editor"]["defineTheme"]>[1];
 
 interface InlineDiffViewProps {
   height?: string;
@@ -34,18 +34,10 @@ export function InlineDiffView({
   const themeKey = `inline-diff-${language}`;
   const initializedRef = useRef(false);
 
-  const handleMount = useCallback(
-    (
-      _editor: unknown,
-      monacoInstance: {
-        editor: {
-          defineTheme: (name: string, data: unknown) => void;
-          setTheme: (name: string) => void;
-        };
-      }
-    ) => {
+  const handleMount = useCallback<DiffOnMount>(
+    (_editor, monacoInstance) => {
       if (!initializedRef.current) {
-        monacoInstance.editor.defineTheme(themeKey, INLINE_DIFF_THEME as never);
+        monacoInstance.editor.defineTheme(themeKey, INLINE_DIFF_THEME);
         initializedRef.current = true;
       }
       monacoInstance.editor.setTheme(themeKey);
@@ -68,7 +60,7 @@ export function InlineDiffView({
           height="100%"
           language={language}
           modified={modified}
-          onMount={handleMount as never}
+          onMount={handleMount}
           options={{
             minimap: { enabled: false },
             fontSize: 12,

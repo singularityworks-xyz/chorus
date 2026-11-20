@@ -6,16 +6,6 @@ import type { WorkspaceBoard } from "@chorus/contracts";
 import { WorkspaceStore } from "../workspace/store";
 import { SessionWatchdog } from "./session-watchdog";
 
-/**
- * A session that dies must not be silently orphaned (plan P6 verification:
- * "kill opencode mid-prompt → surfaced as an `error` card").
- *
- * The watchdog is what notices. Nothing about it is engine-specific, so this
- * drives it with a stub bridge rather than a real process: what is under test is
- * that the timeout produces the event the projector turns into a visible error
- * card, not that opencode can be killed on demand.
- */
-
 const REPO = { directory: "/tmp/repo", sandboxes: [], worktree: "/tmp/repo" };
 
 const noopCallbacks = { onTimeout: () => undefined };
@@ -84,8 +74,6 @@ describe("SessionWatchdog", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 40));
 
-    // The board's own directory is passed, not the bridge default: a worktree
-    // board's session does not exist in the directory serve was started in.
     expect(bridge.abortSession).toHaveBeenCalledWith("sess-1", REPO.directory);
     watchdog.dispose();
 
@@ -100,16 +88,10 @@ describe("SessionWatchdog", () => {
     await store.load();
     const { boardId, taskId } = await seedBoardWithCard(store);
 
-    // What serve wires up: on timeout, commit the event the projector renders as
-    // an error on the card. Asserted here because that wiring is the only thing
-    // standing between a dead engine and a board that looks merely idle.
     const watchdog = new SessionWatchdog(
       bridge as never,
       {
         onTimeout: (sessionId, _info, message) => {
-          // What serve wires up: on timeout, commit the event the projector
-          // renders. Wired here rather than reached into so the test exercises
-          // the same seam serve does.
           store
             .applyAgentEvent({
               activity: "error",
@@ -133,10 +115,7 @@ describe("SessionWatchdog", () => {
       .map((record) => record.event.type);
 
     expect(eventTypes).toContain("session.timeout");
-    // The card leaves `in_progress` rather than sitting there looking live, and
-    // the reason is on the session. The Phase 1 contract puts a timed-out card in
-    // `done` with `session.errorMessage`; there is no failed column, and
-    // `card.failed` has no producer yet.
+
     expect(board?.columns.in_progress).toHaveLength(0);
     expect(board?.columns.done?.map((card) => card.id)).toEqual([taskId]);
     expect(board?.session.errorMessage).toContain("timed out");
@@ -201,17 +180,13 @@ describe("SessionWatchdog", () => {
     const watchdog = new SessionWatchdog(bridge as never, noopCallbacks, 120);
     watchdog.start("sess-1", { boardId, directory: REPO.directory });
 
-    // Keep the session visibly busy past the original deadline.
     for (let tick = 0; tick < 4; tick += 1) {
       await new Promise((resolve) => setTimeout(resolve, 60));
       watchdog.reset("sess-1");
     }
 
-    // A sliding window, not a cancel: a long run that keeps producing activity is
-    // alive, and cancelling outright would let an abandoned session run forever.
     expect(bridge.abortSession).not.toHaveBeenCalled();
 
-    // Once activity stops, it does fire.
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(bridge.abortSession).toHaveBeenCalledWith("sess-1", REPO.directory);
 

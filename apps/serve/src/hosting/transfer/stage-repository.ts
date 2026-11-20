@@ -43,7 +43,6 @@ export async function stageRepository(
   }
 }
 
-/** Internal seam: the caller owns a new repository or an empty linked worktree. */
 export async function restoreCheckpoint(
   directory: string,
   checkpoint: RepositoryCheckpoint,

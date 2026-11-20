@@ -1,6 +1,5 @@
-import type { BoardSeed, RepoProject } from "@chorus/contracts";
+import type { BoardSeed, Columns, RepoProject, Task } from "@chorus/contracts";
 import { attachSession } from "@chorus/contracts";
-import type { Columns, Task } from "@/features/kanban/components/kanban";
 import type { WorkspaceBoard } from "./types";
 
 const BOARD_X_OFFSET = 180;
@@ -125,10 +124,6 @@ export function attachPromptTask(
   };
 }
 
-/**
- * Delegates to the shared projector so `apps/web` and `apps/serve` cannot
- * drift on how a session binds to a board.
- */
 export function attachSessionToBoard(
   board: WorkspaceBoard,
   sessionId: string
@@ -143,16 +138,6 @@ export function updateBoardPosition(
   return {
     ...board,
     position,
-  };
-}
-
-export function updateBoardColumns(
-  board: WorkspaceBoard,
-  columns: Columns
-): WorkspaceBoard {
-  return {
-    ...board,
-    columns,
   };
 }
 

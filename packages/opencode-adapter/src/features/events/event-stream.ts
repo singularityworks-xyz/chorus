@@ -1,9 +1,4 @@
-import type {
-  Message,
-  Event as OCEvent,
-  OpencodeClient,
-  Part,
-} from "@opencode-ai/sdk/v2";
+import type { Event as OCEvent, OpencodeClient } from "@opencode-ai/sdk/v2";
 
 export type { Event as AgentEvent, SessionStatus } from "@opencode-ai/sdk/v2";
 
@@ -51,11 +46,6 @@ export class EventStream {
     const key = options?.directory ?? "__default__";
 
     if (this.#dirSubscriptions.has(key)) {
-      // A duplicate handle shares the owner's pump. Stopping it must not release
-      // the slot, which would orphan that pump: the next subscriber would open a
-      // second stream for the same key and both would deliver every event, and
-      // the store does not deduplicate agent events. The owner's handle is the
-      // one that stops the stream.
       return { stop: () => undefined };
     }
 
@@ -67,18 +57,8 @@ export class EventStream {
       recentEventOrder: [],
     };
 
-    // Claim the slot before awaiting, so two concurrent subscribers cannot both
-    // open a stream for the same directory.
+    // Claim before awaiting so concurrent subscribers cannot open duplicate pumps.
     this.#dirSubscriptions.set(key, sub);
-
-    // Deliberately NOT resetting `assistantMessageRoles` here.
-    //
-    // The map is global because `normalize` has no directory context, and the
-    // engine does not replay `message.updated` for a message already in flight.
-    // Clearing it on a new subscription therefore *causes* the silent content
-    // drop it looks like it prevents: another board's in-flight parts lose the
-    // only record that says whose text they are. Entries are session-scoped, so
-    // one session never legitimately appears under two directories.
 
     let initial: Awaited<ReturnType<OpencodeClient["event"]["subscribe"]>>;
     try {
@@ -86,15 +66,10 @@ export class EventStream {
         directory: options?.directory,
       });
     } catch (error) {
-      // Release the claim. Leaving it behind meant every later attempt took the
-      // "already subscribed" branch and returned a handle wired to nothing — a
-      // dead subscription that looked perfectly healthy to its caller.
       this.#release(key, sub);
       throw error;
     }
 
-    // Reconnection runs detached so `subscribe` still resolves once the stream
-    // is attached; awaiting the loop here would hang the caller forever.
     this.#pump(
       sub,
       key,
@@ -113,19 +88,6 @@ export class EventStream {
     };
   }
 
-  /**
-   * Keeps an event stream open for as long as the subscription is wanted.
-   *
-   * The engine's event stream is the only way agent activity reaches us, and it
-   * ends for reasons unrelated to any run: a proxy timeout, an engine restart, a
-   * dropped socket. `#consume` used to log that and give up, after which the
-   * board silently stopped updating while the agent kept working.
-   *
-   * Retries with capped, jittered backoff. The attempt counter resets whenever a
-   * stream actually delivered something, so a long-lived subscription that blips
-   * occasionally reconnects indefinitely, while one that cannot stay open at all
-   * is abandoned after `MAX_STREAM_RECONNECTS`.
-   */
   async #pump(
     sub: DirSubscription,
     key: string,
@@ -144,7 +106,6 @@ export class EventStream {
         return;
       }
 
-      // A stream that produced events was healthy up to the moment it ended.
       attempts = delivered.count > 0 ? 0 : attempts + 1;
       this.#notifyStatus(sub, "reconnecting");
       const reopened = await this.#reopenWithRetry(directory, abort, attempts);
@@ -208,13 +169,7 @@ export class EventStream {
     return { attempts, stopped: false, stream: null };
   }
 
-  /**
-   * Drains one stream, returning how many events it delivered.
-   *
-   * Iterates manually rather than with `for await` so a pending `next()` can be
-   * abandoned on abort: `for await` only checks between iterations, so a stream
-   * that never settles again would hang the pump — and its slot — forever.
-   */
+  // Race each read with abort so a stalled iterator can be stopped.
   async #consume(
     sub: DirSubscription,
     stream: AsyncIterable<OCEvent>,
@@ -243,8 +198,6 @@ export class EventStream {
         delivered += 1;
       }
     } finally {
-      // Closes the engine-side stream rather than leaving it open until the
-      // engine happens to notice.
       await iterator.return?.(undefined).catch(() => undefined);
     }
   }
@@ -283,7 +236,6 @@ export class EventStream {
     }
   }
 
-  /** Reopens the stream, or returns null when it will not open. */
   async #reopen(
     directory: string | undefined,
     abort: AbortController
@@ -300,21 +252,8 @@ export class EventStream {
     }
   }
 
-  /**
-   * Drops a subscription's claim.
-   *
-   * Every exit from the pump has to do this. Missing one leaves a key behind, and
-   * the next `subscribe` for that directory takes the "already subscribed" branch
-   * and hands its caller a handle wired to a pump that no longer exists.
-   */
+  // Remove only the current owner; stale pumps must not release a replacement.
   #release(key: string, sub: DirSubscription): void {
-    // Only if this subscription still owns the slot.
-    //
-    // Deleting by key alone let a superseded pump wipe its successor's claim: stop
-    // one directory, subscribe again before the old pump reached its next
-    // checkpoint, and the old pump's release deletes the *new* slot. The next
-    // subscriber then opens a third stream, so two pumps run for one key and the
-    // global `#running` flag can be flipped off while one is still live.
     if (this.#dirSubscriptions.get(key) !== sub) {
       return;
     }
@@ -325,7 +264,6 @@ export class EventStream {
     }
   }
 
-  /** Sleeps, resolving early if the subscription is stopped while waiting. */
   async #backoff(attempt: number, abort: AbortController): Promise<void> {
     const ceiling = Math.min(
       STREAM_RECONNECT_BASE_MS * 2 ** (attempt - 1),
@@ -339,8 +277,6 @@ export class EventStream {
         resolve();
       }, delayMs);
 
-      // Removed on the normal path too. `{ once: true }` alone leaves a listener
-      // behind on every reconnect, and they all run when `abort()` finally fires.
       function onAbort(): void {
         clearTimeout(timer);
         resolve();
@@ -359,15 +295,8 @@ export class EventStream {
   }
 }
 
-/** Sentinel for "the subscription was aborted mid-read". */
 const ABORTED = Symbol("aborted");
 
-/**
- * Resolves with the iterator result, or `ABORTED` if the signal fires first.
- *
- * Without this a `next()` that never settles cannot be interrupted, so stopping
- * the subscription would leave the pump and its slot alive indefinitely.
- */
 function raceAbort<T>(
   pending: Promise<T>,
   signal: AbortSignal
@@ -377,12 +306,6 @@ function raceAbort<T>(
   }
 
   return new Promise<T | typeof ABORTED>((resolve, reject) => {
-    // First settlement wins, and only one is ever made.
-    //
-    // The earlier version resolved with `Promise.reject(error)` when the read
-    // failed after an abort had already settled the race. Settling an already-
-    // settled promise is a no-op, so the rejected thenable it created was never
-    // observed and surfaced as an unhandled rejection.
     let settled = false;
     const settle = (apply: () => void): void => {
       if (settled) {
@@ -402,513 +325,16 @@ function raceAbort<T>(
       },
       (error: unknown) => {
         signal.removeEventListener("abort", onAbort);
-        // Attaching this handler is also what keeps a late rejection from the
-        // underlying iterator from becoming unhandled when the race was aborted.
+
         settle(() => reject(error));
       }
     );
   });
 }
 
-/** Backoff bounds for re-opening a dropped event stream. */
 const STREAM_RECONNECT_BASE_MS = 250;
 const STREAM_RECONNECT_MAX_MS = 10_000;
 
-/** Consecutive failed reopens before a stream is abandoned. */
 const MAX_STREAM_RECONNECTS = 10;
 
-/** A bounded per-subscription deduplication window for stable SDK event IDs. */
 const MAX_RECENT_EVENT_IDS = 4096;
-
-export type NormalizedActivity =
-  | "writing"
-  | "thinking"
-  | "waiting_for_approval"
-  | "waiting_for_question"
-  | "error"
-  | "idle";
-
-export interface FileDiffInfo {
-  additions?: number;
-  after?: string;
-  before?: string;
-  deletions?: number;
-  filePath: string;
-}
-
-export interface QuestionOption {
-  description: string;
-  label: string;
-}
-
-export interface QuestionInfo {
-  custom?: boolean;
-  header: string;
-  multiple?: boolean;
-  options: QuestionOption[];
-  question: string;
-}
-
-export interface NormalizedAgentEvent {
-  activity?: NormalizedActivity;
-  delta?: string;
-  error?: string;
-  fileDiff?: FileDiffInfo;
-  messageID?: string;
-  partID?: string;
-  partType?: "text" | "reasoning" | "tool";
-  permission?: string;
-  permissionID?: string;
-  questionID?: string;
-  questions?: QuestionInfo[];
-  sessionID?: string;
-  sourceEventId?: string;
-  text?: string;
-  timestamp: number;
-  toolName?: string;
-  toolState?: string;
-  type: string;
-}
-
-export interface SessionMessageWithParts {
-  info: Message;
-  parts: Part[];
-}
-
-/**
- * Rebuilds the current assistant transcript from the SDK's absolute message
- * representation after a stream gap. Stable message/part IDs make these
- * upserts idempotent; unlike replayed token deltas, they cannot duplicate text.
- */
-function historicalToolActivity(
-  status: Extract<Part, { type: "tool" }>["state"]["status"]
-): NormalizedActivity {
-  if (status === "error") {
-    return "error";
-  }
-  if (status === "running" || status === "pending") {
-    return "thinking";
-  }
-  return "writing";
-}
-
-function normalizeHistoryPart(
-  sessionID: string,
-  message: Message,
-  part: Part
-): NormalizedAgentEvent | null {
-  const base = {
-    messageID: message.id,
-    sessionID,
-    sourceEventId: `history:${message.id}:${part.id}`,
-    timestamp: message.time.created,
-  } satisfies Partial<NormalizedAgentEvent>;
-
-  if (part.type === "text") {
-    return {
-      ...base,
-      activity: "writing",
-      partID: part.id,
-      partType: "text",
-      text: part.text,
-      type: "message.part.updated",
-    };
-  }
-  if (part.type === "reasoning") {
-    return {
-      ...base,
-      activity: "thinking",
-      partID: part.id,
-      partType: "reasoning",
-      text: part.text,
-      type: "message.part.updated",
-    };
-  }
-  if (part.type === "tool") {
-    return {
-      ...base,
-      activity: historicalToolActivity(part.state.status),
-      fileDiff: extractFileDiff(part.tool, part.state),
-      partID: part.id,
-      partType: "tool",
-      toolName: part.tool,
-      toolState: part.state.status,
-      type: "message.part.updated",
-    };
-  }
-  return null;
-}
-
-export function normalizeSessionHistory(
-  sessionID: string,
-  messages: SessionMessageWithParts[],
-  scope = "default"
-): NormalizedAgentEvent[] {
-  const normalized: NormalizedAgentEvent[] = [];
-  for (const message of messages) {
-    if (message.info.role !== "assistant") {
-      continue;
-    }
-    recordAssistantMessage(scope, sessionID, message.info.id);
-    for (const part of message.parts) {
-      const event = normalizeHistoryPart(sessionID, message.info, part);
-      if (event) {
-        normalized.push(event);
-      }
-    }
-  }
-  return normalized;
-}
-
-function safeNum(v: unknown): number | undefined {
-  return typeof v === "number" ? v : undefined;
-}
-
-function safeStr(v: unknown): string | undefined {
-  return typeof v === "string" ? v : undefined;
-}
-
-function extractFileDiffFromCompleted(
-  toolName: string,
-  metadata: Record<string, unknown>
-): FileDiffInfo | undefined {
-  if ((toolName === "edit" || toolName === "write") && metadata.filediff) {
-    const fd = metadata.filediff as Record<string, unknown>;
-    return {
-      additions: safeNum(fd.additions),
-      after: safeStr(fd.after),
-      before: safeStr(fd.before),
-      deletions: safeNum(fd.deletions),
-      filePath: safeStr(fd.file) ?? "",
-    };
-  }
-  if (toolName === "apply_patch" && Array.isArray(metadata.files)) {
-    const files = metadata.files as Record<string, unknown>[];
-    if (files.length === 0) {
-      return undefined;
-    }
-    const f = files[0];
-    return {
-      additions: safeNum(f.additions),
-      after: safeStr(f.after),
-      before: safeStr(f.before),
-      deletions: safeNum(f.deletions),
-      filePath: safeStr(f.filePath) ?? "",
-    };
-  }
-  return undefined;
-}
-
-function extractFileDiffFromRunning(
-  toolName: string,
-  input: Record<string, unknown>
-): FileDiffInfo | undefined {
-  if (
-    (toolName === "edit" || toolName === "write") &&
-    typeof input.filePath === "string"
-  ) {
-    const diff: FileDiffInfo = { filePath: input.filePath };
-    if (
-      toolName === "edit" &&
-      typeof input.oldString === "string" &&
-      typeof input.newString === "string"
-    ) {
-      diff.before = input.oldString;
-      diff.after = input.newString;
-    }
-    return diff;
-  }
-  return undefined;
-}
-
-function extractFileDiff(
-  toolName: string,
-  state: {
-    input?: Record<string, unknown>;
-    metadata?: Record<string, unknown>;
-    status: string;
-  }
-): FileDiffInfo | undefined {
-  if (state.status === "completed" && state.metadata) {
-    return extractFileDiffFromCompleted(toolName, state.metadata);
-  }
-  if (state.status === "running" && state.input) {
-    return extractFileDiffFromRunning(toolName, state.input);
-  }
-  return undefined;
-}
-
-/**
- * Which messages the engine has said are assistant-authored, per session.
- *
- * Part events carry no role, so the normalizer has to remember what
- * `message.updated` said. The map is global because `normalize` has no directory
- * context, and entries are session-scoped, so one session never legitimately
- * appears under two directories.
- *
- * Recorded roles are deliberately not cleared when a subscription starts. The
- * engine does not replay `message.updated` for a message already in flight, so
- * forgetting on reconnect would *cause* the silent content drop it looks like it
- * prevents: part events would miss and return a bare `{ type, sessionID }`, with
- * no error and nothing to distinguish them from the `default:` arm of
- * `normalizeEvent`. `resetMessageTracking` exists for tests and for a deliberate
- * full reset, not for routine subscription.
- *
- * It grew without bound, one entry per assistant message for the life of the
- * process. Capped per session now: the oldest entries are dropped, which costs a
- * little classification accuracy on a very long session rather than a leak.
- */
-const assistantMessageRoles = new Map<string, Set<string>>();
-
-const MAX_TRACKED_MESSAGES_PER_SESSION = 512;
-const MAX_TRACKED_SESSIONS = 4096;
-
-function roleScope(scope: string, sessionID: string): string {
-  return `${scope}\0${sessionID}`;
-}
-
-function isAssistantMessage(
-  scope: string,
-  sessionID: string,
-  messageID: string
-): boolean {
-  const sessionRoles = assistantMessageRoles.get(roleScope(scope, sessionID));
-  return sessionRoles?.has(messageID) ?? false;
-}
-
-function recordAssistantMessage(
-  scope: string,
-  sessionID: string,
-  messageID: string
-) {
-  const key = roleScope(scope, sessionID);
-  let sessionRoles = assistantMessageRoles.get(key);
-  if (sessionRoles) {
-    // Refresh insertion order so old inactive sessions are evicted first.
-    assistantMessageRoles.delete(key);
-    assistantMessageRoles.set(key, sessionRoles);
-  } else {
-    sessionRoles = new Set();
-    if (assistantMessageRoles.size >= MAX_TRACKED_SESSIONS) {
-      const oldest = assistantMessageRoles.keys().next();
-      if (!oldest.done) {
-        assistantMessageRoles.delete(oldest.value);
-      }
-    }
-    assistantMessageRoles.set(key, sessionRoles);
-  }
-
-  if (sessionRoles.size >= MAX_TRACKED_MESSAGES_PER_SESSION) {
-    const oldest = sessionRoles.values().next();
-    if (!oldest.done) {
-      sessionRoles.delete(oldest.value);
-    }
-  }
-
-  sessionRoles.add(messageID);
-}
-
-/**
- * Forgets remembered assistant messages.
- *
- * Deliberately NOT called when a subscription starts: the map is global because
- * `normalize` has no directory context, and the engine does not replay
- * `message.updated` for a message already in flight, so clearing on subscribe would
- * discard the only record classifying another board's streamed content. Used by
- * tests, which would otherwise leak state between cases.
- */
-export function resetMessageTracking(): void {
-  assistantMessageRoles.clear();
-}
-
-function normalizeMessagePartUpdated(
-  base: NormalizedAgentEvent,
-  raw: Extract<OCEvent, { type: "message.part.updated" }>,
-  scope: string
-): NormalizedAgentEvent {
-  const part = raw.properties.part;
-  const sessionID = raw.properties.sessionID;
-  const messageID = part.messageID;
-
-  if (!isAssistantMessage(scope, sessionID, messageID)) {
-    return { ...base, sessionID };
-  }
-
-  if (part.type === "text") {
-    return {
-      ...base,
-      sessionID,
-      activity: "writing",
-      messageID,
-      partID: part.id,
-      partType: "text",
-      text: part.text,
-    };
-  }
-  if (part.type === "tool") {
-    const state = part.state;
-    const fileDiff = extractFileDiff(part.tool, state);
-    return {
-      ...base,
-      sessionID,
-      activity: state.status === "running" ? "thinking" : "writing",
-      messageID,
-      partID: part.id,
-      partType: "tool",
-      toolName: part.tool,
-      toolState: state.status,
-      fileDiff,
-    };
-  }
-  if (part.type === "reasoning") {
-    return {
-      ...base,
-      sessionID,
-      activity: "thinking",
-      messageID,
-      partID: part.id,
-      partType: "reasoning",
-      text: part.text,
-    };
-  }
-  return { ...base, sessionID };
-}
-
-function normalizeMessagePartDelta(
-  base: NormalizedAgentEvent,
-  raw: Extract<OCEvent, { type: "message.part.delta" }>,
-  scope: string
-): NormalizedAgentEvent {
-  const props = raw.properties;
-  const sessionID = props.sessionID;
-  const messageID = props.messageID;
-
-  if (!isAssistantMessage(scope, sessionID, messageID)) {
-    return { ...base, sessionID };
-  }
-
-  return {
-    ...base,
-    sessionID,
-    messageID,
-    partID: props.partID,
-    delta: props.delta,
-  };
-}
-
-function normalizeSessionStatus(
-  base: NormalizedAgentEvent,
-  raw: Extract<OCEvent, { type: "session.status" }>
-): NormalizedAgentEvent {
-  const status = raw.properties.status;
-  let activity: NormalizedActivity = "idle";
-  if (status.type === "busy") {
-    activity = "thinking";
-  }
-  if (status.type === "retry") {
-    activity = "thinking";
-  }
-  return {
-    ...base,
-    sessionID: raw.properties.sessionID,
-    activity,
-  };
-}
-
-function normalizeMessageUpdated(
-  base: NormalizedAgentEvent,
-  raw: Extract<OCEvent, { type: "message.updated" }>,
-  scope: string
-): NormalizedAgentEvent {
-  const info = raw.properties.info;
-  const sessionID = raw.properties.sessionID;
-  const messageID = info.id;
-
-  if (info.role === "assistant") {
-    recordAssistantMessage(scope, sessionID, messageID);
-  }
-
-  if (info.role === "assistant" && "error" in info && info.error) {
-    return {
-      ...base,
-      sessionID,
-      messageID,
-      activity: "error",
-      error: String(info.error.data?.message ?? ""),
-    };
-  }
-  return { ...base, sessionID, messageID };
-}
-
-export function normalizeEvent(
-  raw: OCEvent,
-  scope = "default"
-): NormalizedAgentEvent {
-  const base: NormalizedAgentEvent = {
-    sourceEventId: sourceEventIdFor(raw),
-    type: raw.type,
-    timestamp: Date.now(),
-  };
-
-  switch (raw.type) {
-    case "message.part.updated":
-      return normalizeMessagePartUpdated(base, raw, scope);
-    case "message.part.delta":
-      return normalizeMessagePartDelta(base, raw, scope);
-    case "session.status":
-      return normalizeSessionStatus(base, raw);
-    case "session.idle":
-      return { ...base, sessionID: raw.properties.sessionID, activity: "idle" };
-    case "permission.asked":
-      return {
-        ...base,
-        sessionID: raw.properties.sessionID,
-        activity: "waiting_for_approval",
-        permissionID: raw.properties.id,
-        permission: raw.properties.permission,
-      };
-    case "question.asked":
-      return {
-        ...base,
-        sessionID: raw.properties.sessionID,
-        activity: "waiting_for_question",
-        questionID: raw.properties.id,
-        questions: raw.properties.questions.map(
-          (q: Record<string, unknown>) => ({
-            question: String(q.question ?? ""),
-            header: String(q.header ?? ""),
-            options: ((q.options as Record<string, unknown>[]) ?? []).map(
-              (o) => ({
-                label: String(o.label ?? ""),
-                description: String(o.description ?? ""),
-              })
-            ),
-            multiple: q.multiple === true,
-            custom: q.custom !== false,
-          })
-        ),
-      };
-    case "session.error":
-      return {
-        ...base,
-        sessionID: raw.properties.sessionID,
-        activity: "error",
-        error: String(raw.properties.error?.data?.message ?? ""),
-      };
-    case "message.updated":
-      return normalizeMessageUpdated(base, raw, scope);
-    default:
-      return base;
-  }
-}
-
-function sourceEventIdFor(raw: OCEvent): string {
-  switch (raw.type) {
-    case "permission.asked":
-      return `permission.asked:${raw.properties.id}`;
-    case "question.asked":
-      return `question.asked:${raw.properties.id}`;
-    default:
-      return raw.id;
-  }
-}

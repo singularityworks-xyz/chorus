@@ -5,7 +5,8 @@ import type {
   opencodeModelCatalogSchema,
 } from "@chorus/contracts";
 import { useEffect, useMemo, useState } from "react";
-import { createModelKey, ModelPicker } from "@/components/model-picker";
+import { createModelKey } from "@/features/models/components/model-picker/lib/model-key";
+import { ModelPicker } from "@/features/models/components/model-picker/model-picker";
 import {
   fetchGlobalModelCatalog,
   modelSettingsLoadErrorMessage,

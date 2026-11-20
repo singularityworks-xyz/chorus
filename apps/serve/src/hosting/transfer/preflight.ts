@@ -42,8 +42,7 @@ export async function preflight(root: string) {
     }
   }
   const modes = await readGitIndex(root);
-  // Capture avoids `git status` and external filters. Repositories requiring
-  // filters also need a separate portability contract for their external data.
+
   const paths = (
     await gitText(root, [
       "ls-files",
