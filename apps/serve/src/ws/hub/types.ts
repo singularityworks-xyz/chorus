@@ -16,6 +16,7 @@ export interface BufferedRecord {
 
 export interface HubClient {
   backpressuredFrames: number;
+  capabilities: Set<string>;
   cleanSends: number;
   consecutiveDrops: number;
   controlMessagesThisMinute: number;

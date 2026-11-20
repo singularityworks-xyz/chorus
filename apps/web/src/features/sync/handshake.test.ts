@@ -30,6 +30,7 @@ describe("handshake and resume", () => {
 
     expect(socket.sentTypes).toEqual(["hello"]);
     expect(JSON.parse(socket.sent[0] as string)).toEqual({
+      capabilities: ["card.reordered"],
       since: 0,
       type: "hello",
     });
@@ -66,6 +67,7 @@ describe("handshake and resume", () => {
     expect(restored[0]?.seq).toBe(412);
     expect(sync.state.snapshot).not.toBeNull();
     expect(JSON.parse(socket.sent[0] as string)).toEqual({
+      capabilities: ["card.reordered"],
       since: 412,
       type: "hello",
       workspaceId: TEST_WORKSPACE_ID,
@@ -80,6 +82,7 @@ describe("handshake and resume", () => {
     const socket = openSocket(sync);
 
     expect(JSON.parse(socket.sent[0] as string)).toEqual({
+      capabilities: ["card.reordered"],
       since: 9,
       type: "hello",
       workspaceId: TEST_WORKSPACE_ID,
@@ -207,6 +210,7 @@ describe("handshake and resume", () => {
     second.open();
 
     expect(JSON.parse(second.sent[0] as string)).toEqual({
+      capabilities: ["card.reordered"],
       since: 1,
       type: "hello",
       workspaceId: TEST_WORKSPACE_ID,

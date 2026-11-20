@@ -18,6 +18,33 @@ export interface QuestionReplyInput {
   requestID: string;
 }
 
+function unwrap<T>(
+  result: { data?: T; error?: unknown },
+  operation: string
+): T {
+  if (result.data !== undefined) {
+    return result.data;
+  }
+  if (result.error !== undefined) {
+    throw new Error(
+      `OpenCode question.${operation} failed: ${describeError(result.error)}`
+    );
+  }
+  throw new Error(
+    `OpenCode question.${operation} returned no data and no error`
+  );
+}
+
+function describeError(error: unknown): string {
+  if (typeof error !== "object" || error === null) {
+    return String(error);
+  }
+  if ("message" in error && typeof error.message === "string") {
+    return error.message;
+  }
+  return JSON.stringify(error);
+}
+
 export class QuestionHandler {
   readonly client: OpencodeClient;
 
@@ -27,14 +54,16 @@ export class QuestionHandler {
 
   async list(directory?: string): Promise<QuestionRequest[]> {
     const result = await this.client.question.list({ directory });
-    return result.data ?? [];
+    return unwrap(result, "list");
   }
 
-  async reply(input: QuestionReplyInput): Promise<void> {
+  async reply(input: QuestionReplyInput): Promise<boolean> {
     const result = await this.client.question.list({
       directory: input.directory,
     });
-    const request = result.data?.find(({ id }) => id === input.requestID);
+    const request = unwrap(result, "list").find(
+      ({ id }) => id === input.requestID
+    );
     if (!request) {
       throw new Error("the question request is no longer pending");
     }
@@ -79,14 +108,16 @@ export class QuestionHandler {
       throw new Error("the answer set does not match the pending questions");
     }
 
-    await this.client.question.reply({
+    const replyResult = await this.client.question.reply({
       requestID: input.requestID,
       answers,
       directory: input.directory,
     });
+    return unwrap(replyResult, "reply");
   }
 
-  async reject(requestID: string, directory?: string): Promise<void> {
-    await this.client.question.reject({ requestID, directory });
+  async reject(requestID: string, directory?: string): Promise<boolean> {
+    const result = await this.client.question.reject({ requestID, directory });
+    return unwrap(result, "reject");
   }
 }

@@ -49,6 +49,15 @@ const MINIMAL_PAYLOADS: Record<string, unknown> = {
       taskId: "t1",
     },
   },
+  "board.columns.replace": {
+    baseRevision: null,
+    clientId: "c1",
+    mutationId: "m1",
+    payload: {
+      boardId: "b1",
+      columns: { queue: [], in_progress: [], approve: [], done: [] },
+    },
+  },
   "board.session.patch": {
     baseRevision: null,
     clientId: "c1",
@@ -202,13 +211,39 @@ describe("mutation to event mapping", () => {
     }
   });
 
-  test("whole-column replacement is not a client mutation", () => {
+  test("legacy whole-column payloads remain accepted for ordering only", () => {
     expect(
       workspaceMutationSchema.safeParse({
         baseRevision: null,
         clientId: "c1",
         mutationId: "m1",
         payload: { boardId: "b1", columns: {} },
+        type: "board.columns.replace",
+      }).success
+    ).toBe(true);
+  });
+
+  test("legacy column payloads reject a task repeated across lanes", () => {
+    const task = {
+      id: "task-1",
+      label: "repo",
+      labelVariant: "primary-light",
+      title: "Task",
+    };
+    expect(
+      workspaceMutationSchema.safeParse({
+        baseRevision: null,
+        clientId: "c1",
+        mutationId: "m1",
+        payload: {
+          boardId: "b1",
+          columns: {
+            queue: [task],
+            in_progress: [task],
+            approve: [],
+            done: [],
+          },
+        },
         type: "board.columns.replace",
       }).success
     ).toBe(false);

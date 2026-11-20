@@ -160,6 +160,25 @@ describe("question commands", () => {
     expect(bridge.replyQuestion).not.toHaveBeenCalled();
   });
 
+  test("keeps a question pending when OpenCode declines the reply", async () => {
+    const { app, bridge, resolvePendingApproval } = makeApp();
+    bridge.replyQuestion.mockImplementation(async () => false);
+
+    const response = await app.handle(
+      new Request("http://localhost/tasks/sess-1/questions/question-1/reply", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          answers: [{ questionIndex: 0, optionIndices: [1] }],
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ accepted: false });
+    expect(resolvePendingApproval).not.toHaveBeenCalled();
+  });
+
   test("rejects a question with an explicit accepted acknowledgment", async () => {
     const { app, bridge } = makeApp();
 
@@ -180,6 +199,21 @@ describe("question commands", () => {
       "question-1",
       BOARD_WORKTREE
     );
+  });
+
+  test("keeps a question pending when OpenCode declines the rejection", async () => {
+    const { app, bridge, resolvePendingApproval } = makeApp();
+    bridge.rejectQuestion.mockImplementation(async () => false);
+
+    const response = await app.handle(
+      new Request("http://localhost/tasks/sess-1/questions/question-1/reject", {
+        method: "POST",
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ accepted: false });
+    expect(resolvePendingApproval).not.toHaveBeenCalled();
   });
 });
 describe("POST /tasks/:sessionID/abort", () => {

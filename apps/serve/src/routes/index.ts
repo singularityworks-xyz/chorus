@@ -1,7 +1,4 @@
 import { Elysia } from "elysia";
-import type { OpenCodeBridge } from "../bridge/opencode/bridge";
-import type { BoardTaskService } from "../tasks/board-task-service";
-import type { WorkspaceStore } from "../workspace/store";
 import { createBoardAutocompleteRoutes } from "./boards/autocomplete";
 import { createGitStatusRoutes } from "./git/status";
 import { createSessionRoutes } from "./sessions/routes";
@@ -13,9 +10,9 @@ import { createBoardTaskRoutes } from "./tasks/board-lifecycle";
 import { createSessionControlRoutes } from "./tasks/session-control";
 
 export function createHttpRoutes(
-  bridge: OpenCodeBridge,
-  boardTasks: BoardTaskService,
-  workspaceStore: WorkspaceStore
+  bridge: HttpRouteDependencies["bridge"],
+  boardTasks: HttpRouteDependencies["boardTasks"],
+  workspaceStore: HttpRouteDependencies["workspaceStore"]
 ) {
   const dependencies: HttpRouteDependencies = {
     bridge,

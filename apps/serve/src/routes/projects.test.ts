@@ -1,5 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { Elysia } from "elysia";
+import type { ProviderService } from "../projects/providers/service";
+import type { ProjectService } from "../projects/service";
 import { createProjectRoutes } from "./projects";
 import { createProviderRoutes } from "./providers";
 
@@ -13,7 +15,7 @@ function makeProjectService() {
       credentials: [
         {
           id: "openrouter",
-          type: "api",
+          type: "api" as const,
         },
       ],
     })),
@@ -106,7 +108,20 @@ function makeProjectService() {
       },
     })),
     runConnect: mock(async () => true),
-  };
+  } satisfies Pick<ProjectService, "listProjects" | "openFolder"> &
+    Pick<
+      ProviderService,
+      | "configureProvider"
+      | "launchAuthLogin"
+      | "listConfiguredProviders"
+      | "listCredentials"
+      | "listModels"
+      | "listModelsForDirectory"
+      | "listProviders"
+      | "listProvidersForDirectory"
+      | "openModels"
+      | "runConnect"
+    >;
 }
 
 function makeApp(
@@ -114,8 +129,8 @@ function makeApp(
   isProduction = false
 ) {
   return new Elysia()
-    .use(createProjectRoutes(service as never, isProduction))
-    .use(createProviderRoutes(service as never));
+    .use(createProjectRoutes(service, isProduction))
+    .use(createProviderRoutes(service));
 }
 
 describe("project and provider routes", () => {

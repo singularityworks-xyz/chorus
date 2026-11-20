@@ -5,6 +5,7 @@ import type {
   WorkspaceMutation,
   WorkspaceSnapshot,
 } from "@chorus/contracts";
+import { WORKSPACE_COLUMN_IDS } from "@chorus/contracts";
 import { createLogger } from "@chorus/logger";
 import { z } from "zod";
 import type { RepositoryRegistry } from "../../projects/repository-registry";
@@ -148,6 +149,24 @@ export class WorkspaceMutationProcessor {
           column: mutation.payload.column,
           beforeTaskId: mutation.payload.beforeTaskId,
         });
+
+      case "board.columns.replace": {
+        const board = this.#getSnapshot().boards.find(
+          (entry) => entry.boardId === mutation.payload.boardId
+        );
+        if (!board) {
+          return null;
+        }
+        return this.#existingBoardMutation(mutation.payload.boardId, {
+          type: "board.columns_replaced",
+          boardId: mutation.payload.boardId,
+          ts: now,
+          columns: preserveCurrentTasksInRequestedOrder(
+            board.columns,
+            mutation.payload.columns
+          ),
+        });
+      }
 
       case "board.session.patch":
         return this.#existingBoardMutation(mutation.payload.boardId, {
@@ -390,4 +409,34 @@ export class WorkspaceMutationProcessor {
       });
     }
   }
+}
+
+function preserveCurrentTasksInRequestedOrder(
+  current: WorkspaceBoard["columns"],
+  requested: WorkspaceBoard["columns"]
+): WorkspaceBoard["columns"] {
+  const orderedColumns = Object.fromEntries(
+    WORKSPACE_COLUMN_IDS.map((columnId) => {
+      const currentTasks = current[columnId] ?? [];
+      const currentById = new Map(currentTasks.map((task) => [task.id, task]));
+      const includedIds = new Set<string>();
+      const requestedTasks = (requested[columnId] ?? []).flatMap((task) => {
+        const currentTask = currentById.get(task.id);
+        if (!currentTask || includedIds.has(task.id)) {
+          return [];
+        }
+        includedIds.add(task.id);
+        return [currentTask];
+      });
+      return [
+        columnId,
+        [
+          ...requestedTasks,
+          ...currentTasks.filter((task) => !includedIds.has(task.id)),
+        ],
+      ];
+    })
+  );
+
+  return { ...current, ...orderedColumns };
 }

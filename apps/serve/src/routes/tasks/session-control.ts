@@ -28,7 +28,7 @@ export function createSessionControlRoutes({
               reply: "once",
               message: body.message,
             }),
-          { accepts: (accepted) => accepted, resume: true }
+          { accepts: (accepted) => accepted === true, resume: true }
         );
         if (
           result.status === "already_resolving" ||
@@ -70,7 +70,7 @@ export function createSessionControlRoutes({
               reply: "reject",
               message: body.message,
             }),
-          { accepts: (accepted) => accepted }
+          { accepts: (accepted) => accepted === true }
         );
         if (
           result.status === "already_resolving" ||
@@ -166,7 +166,7 @@ export function createSessionControlRoutes({
               requestID: params.requestID,
               answers: body.answers,
             }),
-          { resume: true }
+          { accepts: (accepted) => accepted === true, resume: true }
         );
         if (
           result.status === "already_resolving" ||
@@ -206,7 +206,8 @@ export function createSessionControlRoutes({
         const result = await workspaceStore.runPendingApprovalAction(
           params.sessionID,
           params.requestID,
-          () => bridge.rejectQuestion(params.requestID, directory)
+          () => bridge.rejectQuestion(params.requestID, directory),
+          { accepts: (accepted) => accepted === true }
         );
         if (
           result.status === "already_resolving" ||

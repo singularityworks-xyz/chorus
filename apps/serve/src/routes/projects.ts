@@ -11,7 +11,7 @@ const logger = createLogger(
 );
 
 export function createProjectRoutes(
-  projectService: ProjectService,
+  projectService: Pick<ProjectService, "listProjects" | "openFolder">,
   isProduction = false
 ) {
   return new Elysia()

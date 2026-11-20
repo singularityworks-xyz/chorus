@@ -11,6 +11,7 @@ import { WORKSPACE_SNAPSHOT_VERSION, workspaceEventSchema } from "./events";
 export const MAX_REPLAY_GAP = 500;
 
 export const clientHelloSchema = z.object({
+  capabilities: z.array(z.literal("card.reordered")).default([]),
   workspaceId: z.uuid().optional(),
   since: z.number().int().nonnegative(),
   type: z.literal("hello"),

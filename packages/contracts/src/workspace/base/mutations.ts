@@ -2,7 +2,24 @@ import { z } from "zod";
 import { boardViewModeSchema, workspaceBoardSessionSchema } from "./boards";
 import { modelSelectionSchema } from "./models";
 import { boardSeedSchema } from "./projects";
-import { reviewModeSchema, workspaceColumnIdSchema } from "./tasks";
+import {
+  columnsSchema,
+  reviewModeSchema,
+  workspaceColumnIdSchema,
+} from "./tasks";
+
+const legacyColumnsSchema = columnsSchema.superRefine((columns, ctx) => {
+  const taskIds = new Set<string>();
+  for (const task of Object.values(columns).flat()) {
+    if (taskIds.has(task.id)) {
+      ctx.addIssue({
+        code: "custom",
+        message: `duplicate task id: ${task.id}`,
+      });
+    }
+    taskIds.add(task.id);
+  }
+});
 
 export const workspaceMutationBaseSchema = z.object({
   baseRevision: z.number().int().nonnegative().nullable(),
@@ -46,6 +63,13 @@ export const workspaceMutationSchema = z.discriminatedUnion("type", [
       boardId: z.string().min(1),
       column: workspaceColumnIdSchema,
       taskId: z.string().min(1),
+    }),
+  }),
+  workspaceMutationBaseSchema.extend({
+    type: z.literal("board.columns.replace"),
+    payload: z.object({
+      boardId: z.string().min(1),
+      columns: legacyColumnsSchema,
     }),
   }),
   workspaceMutationBaseSchema.extend({

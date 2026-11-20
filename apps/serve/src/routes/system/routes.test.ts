@@ -29,6 +29,7 @@ describe("GET /bridge/status", () => {
       connected: true,
       opencodeUrl: "http://localhost:4096",
       activeSessions: 2,
+      subscribedDirectories: ["/repo"],
       uptime: 1000,
     });
   });

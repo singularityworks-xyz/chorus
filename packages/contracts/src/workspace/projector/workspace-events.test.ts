@@ -108,6 +108,32 @@ describe("workspace-scoped events", () => {
     expect(repeated.preferences.recentlyUsedModels).toHaveLength(2);
   });
 
+  test("recent models keep the five newest unique selections", () => {
+    let current = workspace;
+    for (let index = 0; index < 7; index += 1) {
+      current = applyEventToWorkspace(current, {
+        type: "preference.recent_model_added",
+        ts: T0 + index,
+        model: { providerID: "provider", modelID: `model-${index}` },
+      });
+    }
+
+    expect(
+      current.preferences.recentlyUsedModels?.map((model) => model.modelID)
+    ).toEqual(["model-6", "model-5", "model-4", "model-3", "model-2"]);
+
+    const selectedAgain = applyEventToWorkspace(current, {
+      type: "preference.recent_model_added",
+      ts: T0 + 8,
+      model: { providerID: "provider", modelID: "model-4" },
+    });
+    expect(
+      selectedAgain.preferences.recentlyUsedModels?.map(
+        (model) => model.modelID
+      )
+    ).toEqual(["model-4", "model-6", "model-5", "model-3", "model-2"]);
+  });
+
   test("board-scoped events leave the workspace untouched", () => {
     const next = applyEventToWorkspace(workspace, {
       type: "card.started",

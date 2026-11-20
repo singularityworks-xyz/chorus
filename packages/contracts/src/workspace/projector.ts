@@ -82,7 +82,7 @@ export function applyEventToWorkspace(
         ...workspace,
         preferences: {
           ...workspace.preferences,
-          recentlyUsedModels: [event.model, ...withoutDuplicate].slice(0, 10),
+          recentlyUsedModels: [event.model, ...withoutDuplicate].slice(0, 5),
         },
       };
     }

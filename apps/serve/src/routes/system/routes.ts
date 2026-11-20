@@ -1,6 +1,6 @@
 import { Elysia } from "elysia";
 import type { OpenCodeBridge } from "../../bridge/opencode/bridge";
-export function createSystemRoutes(bridge: OpenCodeBridge) {
+export function createSystemRoutes(bridge: Pick<OpenCodeBridge, "getStatus">) {
   return new Elysia()
     .get("/health", () => ({
       status: "ok",

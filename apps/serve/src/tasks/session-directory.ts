@@ -14,7 +14,7 @@ export class UnknownSessionError extends Error {
 }
 
 export function resolveSessionDirectory(
-  store: WorkspaceStore,
+  store: Pick<WorkspaceStore, "getBoardBySessionId">,
   sessionID: string
 ): string {
   const board = store.getBoardBySessionId(sessionID);
@@ -31,7 +31,12 @@ export function boardDirectory(board: WorkspaceBoard): string {
 }
 
 export async function attachForkedSession(
-  store: WorkspaceStore,
+  store: Pick<WorkspaceStore, "getBoardBySessionId"> & {
+    updateBoardSession: (
+      boardId: string,
+      update: Parameters<WorkspaceStore["updateBoardSession"]>[1]
+    ) => Promise<unknown>;
+  },
   previousSessionID: string,
   forkedSessionID: string
 ): Promise<boolean> {

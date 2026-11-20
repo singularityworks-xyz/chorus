@@ -9,7 +9,21 @@ const logger = createLogger(
   "SERVE:PROVIDER-ROUTES"
 );
 
-export function createProviderRoutes(providerService: ProviderService) {
+export function createProviderRoutes(
+  providerService: Pick<
+    ProviderService,
+    | "configureProvider"
+    | "launchAuthLogin"
+    | "listConfiguredProviders"
+    | "listCredentials"
+    | "listModels"
+    | "listModelsForDirectory"
+    | "listProviders"
+    | "listProvidersForDirectory"
+    | "openModels"
+    | "runConnect"
+  >
+) {
   return new Elysia()
     .get(
       "/providers",

@@ -121,6 +121,66 @@ describe("WorkspaceStore persistence", () => {
     ).toEqual(["task-b"]);
   });
 
+  test("legacy column updates reorder current tasks without replacing their state", async () => {
+    const store = createStore();
+    await store.load();
+    const boardId = await seedBoard(store);
+    const currentTask = (id: string, title: string) => ({
+      id,
+      label: "repo",
+      labelVariant: "primary-light" as const,
+      title,
+    });
+    await store.applyBoardEvents(boardId, [
+      {
+        type: "board.columns_replaced",
+        ts: Date.now(),
+        boardId,
+        columns: {
+          queue: [currentTask("task-a", "A"), currentTask("task-b", "B")],
+          in_progress: [],
+          approve: [],
+          done: [],
+        },
+      },
+      {
+        type: "card.created",
+        ts: Date.now(),
+        boardId,
+        column: "queue",
+        taskId: "task-c",
+        task: currentTask("task-c", "C"),
+      },
+    ]);
+    await store.applyBoardEvents(boardId, [
+      { type: "card.started", ts: Date.now(), boardId, taskId: "task-a" },
+    ]);
+
+    const commit = await store.applyMutation(
+      mutation("board.columns.replace", {
+        boardId,
+        columns: {
+          queue: [
+            currentTask("task-b", "stale B"),
+            currentTask("task-a", "stale A"),
+          ],
+          in_progress: [],
+          approve: [],
+          done: [],
+        },
+      })
+    );
+
+    expect(commit?.events[0]?.type).toBe("board.columns_replaced");
+    expect(
+      store.getBoard(boardId)?.columns.queue?.map((task) => task.id)
+    ).toEqual(["task-b", "task-c"]);
+    expect(
+      store.getBoard(boardId)?.columns.in_progress?.map((task) => task.id)
+    ).toEqual(["task-a"]);
+    expect(store.getBoard(boardId)?.columns.queue?.[0]?.title).toBe("B");
+  });
+
   test("a reload replays the log into identical state", async () => {
     const dir = createTempDir("chorus-replay-");
 
@@ -194,6 +254,40 @@ describe("WorkspaceStore persistence", () => {
       const commit = await store.applyMutation(m);
       expect(commit?.events).toHaveLength(1);
     }
+  });
+
+  test("recent model projections stay aligned after event-log replay", async () => {
+    const directory = createTempDir("chorus-model-projection-");
+    const first = createStoreAt(directory);
+    await first.load();
+
+    for (let index = 0; index < 7; index += 1) {
+      await first.applyMutation(
+        mutation("preference.recently_used_models.add", {
+          model: { providerID: "provider", modelID: `model-${index}` },
+        })
+      );
+    }
+
+    await first.close();
+    const replayed = createStoreAt(directory);
+    await replayed.load();
+    expect(
+      replayed
+        .getSnapshot()
+        .preferences.recentlyUsedModels.map((model) => model.modelID)
+    ).toEqual(["model-6", "model-5", "model-4", "model-3", "model-2"]);
+
+    await replayed.applyMutation(
+      mutation("preference.recently_used_models.add", {
+        model: { providerID: "provider", modelID: "model-4" },
+      })
+    );
+    expect(
+      replayed
+        .getSnapshot()
+        .preferences.recentlyUsedModels.map((model) => model.modelID)
+    ).toEqual(["model-4", "model-6", "model-5", "model-3", "model-2"]);
   });
 
   test("maps legacy voice mutations to the current preference event", async () => {

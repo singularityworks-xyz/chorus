@@ -1,5 +1,6 @@
 import {
   applyEventToBoard,
+  applyEventToWorkspace,
   type BoardSeed,
   type WorkspaceBoard,
   type WorkspaceEvent,
@@ -83,44 +84,6 @@ function withHistory(
   };
 }
 
-function applyWorkspacePreference(
-  snapshot: WorkspaceSnapshot,
-  event: WorkspaceEvent
-): WorkspaceSnapshot {
-  if (event.type === "preference.composer_hint_dismissed") {
-    return {
-      ...snapshot,
-      preferences: { ...snapshot.preferences, composerHintDismissed: true },
-    };
-  }
-
-  if (event.type === "preference.speech_voice_set") {
-    return {
-      ...snapshot,
-      preferences: { ...snapshot.preferences, speechVoiceId: event.voiceId },
-    };
-  }
-
-  if (event.type === "preference.board_view_mode_set") {
-    return {
-      ...snapshot,
-      preferences: { ...snapshot.preferences, boardViewMode: event.mode },
-    };
-  }
-
-  if (event.type === "preference.default_model_set") {
-    return {
-      ...snapshot,
-      preferences: {
-        ...snapshot.preferences,
-        defaultModelSelection: event.model,
-      },
-    };
-  }
-
-  return snapshot;
-}
-
 export function projectWorkspaceEvent(
   snapshot: WorkspaceSnapshot,
   event: WorkspaceEvent
@@ -160,27 +123,20 @@ export function projectWorkspaceEvent(
     }
 
     case "preference.recent_model_added": {
-      const recentModels = (
-        snapshot.preferences.recentlyUsedModels ?? []
-      ).filter(
-        (model) =>
-          model.providerID !== event.model.providerID ||
-          model.modelID !== event.model.modelID
-      );
+      const projected = applyEventToWorkspace(snapshot, event);
       return {
         ...snapshot,
-        preferences: {
-          ...snapshot.preferences,
-          recentlyUsedModels: [event.model, ...recentModels].slice(0, 5),
-        },
+        preferences: projected.preferences,
       };
     }
 
     case "preference.composer_hint_dismissed":
     case "preference.speech_voice_set":
     case "preference.board_view_mode_set":
-    case "preference.default_model_set":
-      return applyWorkspacePreference(snapshot, event);
+    case "preference.default_model_set": {
+      const projected = applyEventToWorkspace(snapshot, event);
+      return { ...snapshot, preferences: projected.preferences };
+    }
 
     default: {
       if (!("boardId" in event) || event.boardId === null) {

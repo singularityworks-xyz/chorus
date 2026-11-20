@@ -1,133 +1,229 @@
-import { beforeEach, describe, expect, test } from "bun:test";
-import { ChorusSync } from "./chorus-sync";
-import { SocketAuthenticationExpiredError } from "./socket-credentials";
-import { flushPromiseQueue } from "./test-support";
-import { FakeScheduler, FakeSocket, FakeStorage } from "./testing";
+import { describe, expect, test } from "bun:test";
+import {
+  prepareAuthenticatedSocketUrl,
+  SocketAuthenticationExpiredError,
+  type SocketCredentialFetcher,
+} from "./socket-credentials";
 
-beforeEach(() => FakeSocket.reset());
+describe("authenticated WebSocket URL preparation", () => {
+  test("installed local production uses its separate private entry and preserves an existing session if it is absent", async () => {
+    const paths: string[] = [];
+    const url = await prepareAuthenticatedSocketUrl("ws://localhost:2000/ws", {
+      allowLocalBootstrap: true,
+      localEntryPort: 2001,
+      pageOrigin: "http://localhost:3000",
+      fetcher: (input) => {
+        paths.push(String(input));
+        if (String(input).includes(":2001")) {
+          return Promise.reject(new Error("optional listener absent"));
+        }
+        return Promise.resolve(
+          Response.json(
+            String(input).endsWith("ws-ticket")
+              ? { ticket: "ab".repeat(16) }
+              : { deviceId: "device-1" }
+          )
+        );
+      },
+    });
+    expect(paths).toEqual([
+      "http://localhost:2001/auth/local-session",
+      "/api/auth/device",
+      "/api/auth/ws-ticket",
+    ]);
+    expect(new URL(url).searchParams.get("ticket")).toBe("ab".repeat(16));
+  });
 
-describe("asynchronous socket credentials", () => {
-  test("waits for credentials before opening the socket and avoids duplicate requests", async () => {
-    let resolveUrl: ((url: string) => void) | undefined;
-    let preparations = 0;
-    const sync = new ChorusSync(
-      {
-        createSocket: (url) => new FakeSocket(url),
-        prepareSocketUrl: () => {
-          preparations += 1;
-          return new Promise((resolve) => {
-            resolveUrl = resolve;
-          });
+  test("registers the device and uses cookies for same-origin sockets", async () => {
+    const requests: { input: string | URL | Request; init?: RequestInit }[] =
+      [];
+    const url = await prepareAuthenticatedSocketUrl("ws://localhost:3000/ws", {
+      fetcher: (input, init) => {
+        requests.push({ input, init });
+        return Promise.resolve(Response.json({ deviceId: "device-1" }));
+      },
+      pageOrigin: "http://localhost:3000",
+    });
+
+    expect(url).toBe("ws://localhost:3000/ws");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.input).toBe("/api/auth/device");
+    expect(requests[0]?.init).toMatchObject({
+      cache: "no-store",
+      method: "POST",
+    });
+  });
+
+  test("bootstraps a local browser before registering it as a device", async () => {
+    const requests: { input: string | URL | Request; init?: RequestInit }[] =
+      [];
+    await prepareAuthenticatedSocketUrl("ws://localhost:2000/ws", {
+      allowLocalBootstrap: true,
+      fetcher: (input, init) => {
+        requests.push({ input, init });
+        if (String(input).endsWith("/ws-ticket")) {
+          return Promise.resolve(Response.json({ ticket: "ab".repeat(16) }));
+        }
+        return Promise.resolve(Response.json({ authenticated: true }));
+      },
+      pageOrigin: "http://localhost:3000",
+    });
+
+    expect(requests.map((request) => String(request.input))).toEqual([
+      "http://localhost:2000/auth/local-session",
+      "/api/auth/device",
+      "/api/auth/ws-ticket",
+    ]);
+    expect(requests[0]?.init).toMatchObject({
+      credentials: "include",
+      headers: { "x-chorus-local-bootstrap": "1" },
+      method: "POST",
+    });
+  });
+
+  test("retries device registration once after a fresh local session", async () => {
+    const paths: string[] = [];
+    let deviceAttempts = 0;
+    const url = await prepareAuthenticatedSocketUrl("ws://localhost:2000/ws", {
+      allowLocalBootstrap: true,
+      localEntryPort: 2001,
+      fetcher: (input) => {
+        const path = String(input);
+        paths.push(path);
+        if (path.endsWith("/auth/local-session")) {
+          return Promise.resolve(Response.json({ authenticated: true }));
+        }
+        if (path === "/api/auth/device") {
+          deviceAttempts += 1;
+          return Promise.resolve(
+            deviceAttempts === 1
+              ? new Response(null, { status: 401 })
+              : Response.json({ deviceId: "device-1" })
+          );
+        }
+        return Promise.resolve(Response.json({ ticket: "ab".repeat(16) }));
+      },
+      pageOrigin: "http://localhost:3000",
+    });
+
+    expect(paths).toEqual([
+      "http://localhost:2001/auth/local-session",
+      "/api/auth/device",
+      "http://localhost:2001/auth/local-session",
+      "/api/auth/device",
+      "/api/auth/ws-ticket",
+    ]);
+    expect(new URL(url).searchParams.get("ticket")).toBe("ab".repeat(16));
+  });
+
+  test("keeps an expired-session error when local device registration retry fails", async () => {
+    let deviceAttempts = 0;
+    await expect(
+      prepareAuthenticatedSocketUrl("ws://localhost:2000/ws", {
+        allowLocalBootstrap: true,
+        localEntryPort: 2001,
+        fetcher: (input) => {
+          if (String(input).endsWith("/auth/local-session")) {
+            return Promise.resolve(Response.json({ authenticated: true }));
+          }
+          deviceAttempts += 1;
+          return Promise.resolve(new Response(null, { status: 401 }));
         },
-        storage: new FakeStorage(),
-        url: "wss://serve.example.test/ws",
-      },
-      {}
-    );
-
-    sync.start();
-    sync.reconnectNow();
-    await flushPromiseQueue();
-
-    expect(preparations).toBe(1);
-    expect(FakeSocket.instances).toHaveLength(0);
-
-    resolveUrl?.("wss://serve.example.test/ws?ticket=once");
-    await flushPromiseQueue();
-
-    expect(FakeSocket.last.url).toBe("wss://serve.example.test/ws?ticket=once");
+        pageOrigin: "http://localhost:3000",
+      })
+    ).rejects.toBeInstanceOf(SocketAuthenticationExpiredError);
+    expect(deviceAttempts).toBe(2);
   });
 
-  test("a network-offline transition invalidates pending credentials", async () => {
-    let resolveUrl: ((url: string) => void) | undefined;
-    const sync = new ChorusSync(
-      {
-        createSocket: (url) => new FakeSocket(url),
-        prepareSocketUrl: () =>
-          new Promise((resolve) => {
-            resolveUrl = resolve;
-          }),
-        storage: new FakeStorage(),
-        url: "wss://serve.example.test/ws",
+  test("does not attempt local bootstrap from a LAN or remote browser", async () => {
+    const paths: string[] = [];
+    await prepareAuthenticatedSocketUrl("ws://192.168.1.8:2000/ws", {
+      allowLocalBootstrap: true,
+      fetcher: (input) => {
+        paths.push(String(input));
+        if (String(input).endsWith("/ws-ticket")) {
+          return Promise.resolve(Response.json({ ticket: "ab".repeat(16) }));
+        }
+        return Promise.resolve(Response.json({ deviceId: "device-1" }));
       },
-      {}
-    );
+      pageOrigin: "http://192.168.1.8:3000",
+    });
 
-    sync.start();
-    await flushPromiseQueue();
-    sync.networkOffline();
-    resolveUrl?.("wss://serve.example.test/ws?ticket=stale");
-    await flushPromiseQueue();
-
-    expect(FakeSocket.instances).toHaveLength(0);
-    expect(sync.state.status).toBe("offline");
+    expect(paths).toEqual(["/api/auth/device", "/api/auth/ws-ticket"]);
   });
 
-  test("a credential 401 expires auth, while transient failures retry", async () => {
-    const scheduler = new FakeScheduler();
-    let authExpired = 0;
-    const authSync = new ChorusSync(
+  test("obtains a ticket for cross-origin sockets", async () => {
+    const paths: string[] = [];
+    const url = await prepareAuthenticatedSocketUrl(
+      "wss://serve.example.test/ws",
       {
-        createSocket: (url) => new FakeSocket(url),
-        prepareSocketUrl: () =>
-          Promise.reject(new SocketAuthenticationExpiredError()),
-        schedule: scheduler.schedule,
-        storage: new FakeStorage(),
-        url: "wss://serve.example.test/ws",
-      },
-      { onAuthExpired: () => (authExpired += 1) }
+        fetcher: (input) => {
+          paths.push(String(input));
+          return Promise.resolve(
+            String(input).endsWith("/ws-ticket")
+              ? Response.json({ ticket: "ab".repeat(16) })
+              : Response.json({ deviceId: "device-1" })
+          );
+        },
+        pageOrigin: "https://web.example.test",
+      }
     );
 
-    authSync.start();
-    await flushPromiseQueue();
-
-    expect(authSync.state.status).toBe("auth-expired");
-    expect(authExpired).toBe(1);
-    expect(scheduler.pending).toHaveLength(0);
-
-    const retryScheduler = new FakeScheduler();
-    const retrySync = new ChorusSync(
-      {
-        createSocket: (url) => new FakeSocket(url),
-        prepareSocketUrl: () =>
-          Promise.reject(new Error("ticket service unavailable")),
-        schedule: retryScheduler.schedule,
-        storage: new FakeStorage(),
-        url: "wss://serve.example.test/ws",
-      },
-      {}
-    );
-
-    retrySync.start();
-    await flushPromiseQueue();
-
-    expect(retrySync.state.status).toBe("offline");
-    expect(retrySync.state.lastError).toContain("ticket service unavailable");
-    expect(retryScheduler.pending).toHaveLength(1);
+    expect(paths).toEqual(["/api/auth/device", "/api/auth/ws-ticket"]);
+    expect(new URL(url).searchParams.get("ticket")).toBe("ab".repeat(16));
   });
 
-  test("stop invalidates a late credential response", async () => {
-    let resolveUrl: ((url: string) => void) | undefined;
-    const sync = new ChorusSync(
-      {
-        createSocket: (url) => new FakeSocket(url),
-        prepareSocketUrl: () =>
-          new Promise((resolve) => {
-            resolveUrl = resolve;
-          }),
-        storage: new FakeStorage(),
-        url: "wss://serve.example.test/ws",
-      },
-      {}
+  test("requests a fresh single-use ticket each time", async () => {
+    let nextTicket = 1;
+    const fetcher: SocketCredentialFetcher = (input) => {
+      if (String(input).endsWith("/ws-ticket")) {
+        const ticket = String(nextTicket).padStart(32, "0");
+        nextTicket += 1;
+        return Promise.resolve(Response.json({ ticket }));
+      }
+      return Promise.resolve(Response.json({ deviceId: "device-1" }));
+    };
+    const options = { fetcher, pageOrigin: "https://web.example.test" };
+
+    const first = await prepareAuthenticatedSocketUrl(
+      "wss://serve.example.test/ws",
+      options
+    );
+    const second = await prepareAuthenticatedSocketUrl(
+      "wss://serve.example.test/ws",
+      options
     );
 
-    sync.start();
-    await flushPromiseQueue();
-    sync.stop();
-    resolveUrl?.("wss://serve.example.test/ws?ticket=late");
-    await flushPromiseQueue();
+    expect(new URL(first).searchParams.get("ticket")).not.toBe(
+      new URL(second).searchParams.get("ticket")
+    );
+  });
 
-    expect(FakeSocket.instances).toHaveLength(0);
-    expect(sync.state.status).toBe("offline");
+  test("treats an expired session as a terminal authentication error", async () => {
+    await expect(
+      prepareAuthenticatedSocketUrl("ws://localhost:3000/ws", {
+        fetcher: async () => new Response(null, { status: 401 }),
+        pageOrigin: "http://localhost:3000",
+      })
+    ).rejects.toBeInstanceOf(SocketAuthenticationExpiredError);
+  });
+
+  test("surfaces retryable HTTP and malformed-response failures", async () => {
+    await expect(
+      prepareAuthenticatedSocketUrl("ws://localhost:3000/ws", {
+        fetcher: async () => new Response(null, { status: 503 }),
+        pageOrigin: "http://localhost:3000",
+      })
+    ).rejects.toThrow("HTTP 503");
+
+    await expect(
+      prepareAuthenticatedSocketUrl("wss://serve.example.test/ws", {
+        fetcher: async (input) =>
+          String(input).endsWith("/ws-ticket")
+            ? Response.json({ ticket: "bad" })
+            : Response.json({ deviceId: "device-1" }),
+        pageOrigin: "https://web.example.test",
+      })
+    ).rejects.toThrow("malformed");
   });
 });

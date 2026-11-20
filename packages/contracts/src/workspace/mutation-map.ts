@@ -6,6 +6,7 @@ export const MUTATION_EVENT_MAP = {
   "board.select": "board.selected",
   "board.move": "board.moved",
   "board.task.reorder": "card.reordered",
+  "board.columns.replace": "board.columns_replaced",
   "board.session.patch": "board.session_patched",
   "board.model.set": "board.model_set",
   "board.review_mode.set": "board.review_mode_set",

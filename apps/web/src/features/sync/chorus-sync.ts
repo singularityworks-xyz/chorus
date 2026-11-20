@@ -287,6 +287,7 @@ export class ChorusSync {
     try {
       socket.send(
         JSON.stringify({
+          capabilities: ["card.reordered"],
           ...(workspaceId === null ? {} : { workspaceId }),
           since,
           type: "hello",

@@ -84,6 +84,7 @@ export class WorkspaceHub {
 
     const client: HubClient = {
       backpressuredFrames: 0,
+      capabilities: new Set(),
       cleanSends: 0,
       controlMessagesThisMinute: 0,
       consecutiveDrops: 0,
@@ -222,7 +223,12 @@ export class WorkspaceHub {
           this.#sendError(socket, "already initialised");
           return;
         }
-        this.#handleHello(client, hello.data.since, hello.data.workspaceId);
+        this.#handleHello(
+          client,
+          hello.data.since,
+          hello.data.workspaceId,
+          hello.data.capabilities
+        );
         return;
       }
 
@@ -268,8 +274,10 @@ export class WorkspaceHub {
   #handleHello(
     client: HubClient,
     since: number,
-    clientWorkspaceId?: string
+    clientWorkspaceId: string | undefined,
+    capabilities: string[]
   ): void {
+    client.capabilities = new Set(capabilities);
     const head = this.#store.headSeq();
     this.#send(
       client,
@@ -358,6 +366,14 @@ export class WorkspaceHub {
   }
 
   #sendSequenced(client: HubClient, record: BufferedRecord): void {
+    if (
+      record.event.type === "card.reordered" &&
+      !client.capabilities.has("card.reordered")
+    ) {
+      this.#sendSnapshot(client);
+      return;
+    }
+
     this.#send(
       client,
       sequencedEventSchema.parse({
