@@ -6,6 +6,14 @@ import type { TicketOptions } from "../auth/ticket";
 import type { WorkspaceHub } from "./hub";
 import type { HubSocket } from "./hub/types";
 
+export const wsClientMessageSchema = t.Object({
+  capabilities: t.Optional(t.Array(t.Literal("card.reordered"))),
+  payload: t.Optional(t.Any()),
+  since: t.Optional(t.Number()),
+  type: t.String(),
+  workspaceId: t.Optional(t.String()),
+});
+
 export interface WsHandlerOptions {
   hub: WorkspaceHub;
   sessionRegistry?: SessionRegistry;
@@ -61,12 +69,7 @@ export function createWsHandler({
   >();
 
   return new Elysia().ws("/ws", {
-    body: t.Object({
-      type: t.String(),
-      payload: t.Optional(t.Any()),
-      since: t.Optional(t.Number()),
-      workspaceId: t.Optional(t.String()),
-    }),
+    body: wsClientMessageSchema,
 
     async open(ws) {
       const socket = toHubSocket(ws);
